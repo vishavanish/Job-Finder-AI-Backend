@@ -1,0 +1,44 @@
+# ---- secrets & credentials ----
+.env
+credentials.json
+token_primary.json
+token_secondary.json
+token_*.json
+
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ---- app data / generated ----
+output/
+logs/
+*.db
+*.sqlite
+*.sqlite3
+browser_profile/
+
+# ---- Node / frontend (Vite/React) ----
+node_modules/
+dist/
+build/
+.vite/
+*.local
+
+# ---- editor / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- misc ----
+*.log
+.env.local
+.env.*.local
