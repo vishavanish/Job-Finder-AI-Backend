@@ -112,8 +112,8 @@ def get_settings() -> Settings:
             "URL will likely fail to connect."
         )
 
-        if settings.AUTH_DATABASE_URL.startswith("sqlite+libsql://"):
-            logger.info("startup: AUTH_DATABASE_URL points to Turso (remote libSQL)")
+    if settings.AUTH_DATABASE_URL.startswith("sqlite+libsql://"):
+        logger.info("startup: AUTH_DATABASE_URL points to Turso (remote libSQL)")
     elif settings.AUTH_DATABASE_URL.startswith("sqlite:///"):
         logger.warning(
             "startup: AUTH_DATABASE_URL is a LOCAL sqlite file — this will be "
@@ -121,6 +121,15 @@ def get_settings() -> Settings:
             "your Turso sqlite+libsql://... URL in .env for persistent storage."
         )
 
+    if settings.DATABASE_URL.startswith("sqlite+libsql://"):
+        logger.info("startup: DATABASE_URL points to Turso (remote libSQL)")
+    elif settings.DATABASE_URL.startswith("sqlite:///"):
+        logger.warning(
+            "startup: DATABASE_URL is a LOCAL sqlite file — applications and "
+            "task data will be wiped on every Render redeploy/restart. Set "
+            "DATABASE_URL to your Turso sqlite+libsql://... URL in .env for "
+            "persistent storage."
+        )
     missing = [name for name in ("HF_API_KEY", "GEMINI_API_KEY") if not getattr(settings, name)]
     if len(missing) == 2:
         logger.warning(
