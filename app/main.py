@@ -77,13 +77,10 @@ async def log_requests(request: Request, call_next):
     return response
 
 
+
+
 @app.get("/health", tags=["meta"])
 async def health():
-    """Real health check — verifies the SQLite task store is writable and
-    at least one LLM provider key is configured. Returns HTTP 503 if the
-    database is unreachable (a genuine outage), 200 with status=degraded
-    if only the LLM-key check fails (requests can still work if they
-    supply their own key), or 200 with status=ok otherwise."""
     result = run_health_check()
     if result["status"] == "unhealthy":
         from fastapi.responses import JSONResponse
