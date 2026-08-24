@@ -61,7 +61,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://job-finder-ai-frontend-one.vercel.app/"],
+    allow_origins=["https://job-finder-ai-frontend-one.vercel.app"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
