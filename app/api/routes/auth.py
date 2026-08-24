@@ -3,8 +3,8 @@ app/api/routes/auth.py
 -------------------------
 Real user accounts: register + login, issuing a JWT the frontend stores
 and sends as `Authorization: Bearer <token>` on subsequent requests.
-Backed by SQLite via app/core/db.py (separate from the Celery task
-store's SQLite file).
+Backed by Postgres (Supabase) via app/core/db.py — same engine/session
+used by every other route in this app.
 """
 from __future__ import annotations
 
@@ -28,11 +28,12 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
     existing = db.query(User).filter(User.email == normalized_email).first()
     if existing:
         raise HTTPException(status.HTTP_409_CONFLICT, "An account with this email already exists.")
-    logger.warning("blocked self-registration attempt for email=%s", req.email.lower().strip())
-    raise HTTPException(
-        status.HTTP_403_FORBIDDEN,
-        "Self-registration is disabled. Please contact the admin to request an account.",
-    )
+    
+    # logger.warning("blocked self-registration attempt for email=%s", req.email.lower().strip())
+    # raise HTTPException(
+    #     status.HTTP_403_FORBIDDEN,
+    #     "Self-registration is disabled. Please contact the admin to request an account.",
+    # )
 
     user = User(
         email=normalized_email,

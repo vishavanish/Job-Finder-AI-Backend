@@ -1,14 +1,24 @@
 """
 app/core/db.py
 ----------------
-SQLAlchemy engine/session setup for the user-accounts database. Supports
-either a local SQLite file (sqlite:///...) for local dev, or a remote
-Turso database (sqlite+libsql://...) for persistent storage on ephemeral
-hosts like Render, where local files get wiped on every redeploy/restart.
+SQLAlchemy engine/session setup for the app's single Postgres database
+(Supabase). Both user accounts (app/models/user.py) and job/application
+data (app/models/application.py) share this one engine/Base now — there
+used to be a separate SQLite file per concern; Supabase's free tier gives
+you one Postgres database, so everything lives there.
 
-connect_args={"check_same_thread": False} is only valid/needed for local
-SQLite-over-a-file connections — it's not applicable to the libsql remote
-dialect, so it's applied conditionally based on which URL scheme is set.
+pool_pre_ping=True: Supabase (and any managed Postgres) will silently
+drop idle connections after a timeout. Without pre-ping, the FIRST query
+on a stale connection raises a raw psycopg OperationalError instead of
+SQLAlchemy transparently reconnecting. Cheap per-checkout SELECT 1, worth
+it to avoid random 500s after any idle period.
+
+pool_size/max_overflow are kept small deliberately: if you're using
+Supabase's pooler (pgbouncer, transaction mode) this doesn't matter much
+since pgbouncer is doing the real pooling upstream. If you're using the
+DIRECT connection string instead, Supabase's free tier caps you at ~60
+total connections across everything (API process + every Celery worker),
+so a small per-process pool matters a lot there.
 """
 from __future__ import annotations
 
@@ -19,11 +29,12 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
-_is_local_sqlite_file = settings.AUTH_DATABASE_URL.startswith("sqlite:///")
-
 engine = create_engine(
-    settings.AUTH_DATABASE_URL,
-    connect_args={"check_same_thread": False} if _is_local_sqlite_file else {},
+    settings.DATABASE_URL,
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=5,
+    pool_recycle=1800,  # recycle connections every 30 min, belt-and-suspenders with pre_ping
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
