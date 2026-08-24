@@ -77,12 +77,19 @@ class Settings(BaseSettings):
     OUTPUT_DIR: Path = BASE_DIR / "output"
     BROWSER_PROFILE_DIR: Path = BASE_DIR / "browser_profile"
     LOG_DIR: Path = BASE_DIR / "logs"
-    DATABASE_URL: str = f"sqlite:///{BASE_DIR / 'output' / 'job_finder.db'}"
+
+    # ---- database (Supabase Postgres) ----
+    
+    DATABASE_URL: str = ""
+    DIRECT_URL: str = ""
+    # Deprecated: kept only so old .env files with AUTH_DATABASE_URL set
+    # don't silently do nothing. If set, it's used as DATABASE_URL when
+    # DATABASE_URL itself is empty. New setups should set DATABASE_URL only.
+    AUTH_DATABASE_URL: str = ""
 
     MAX_WORKER_THREADS: int = 4
     TASK_RESULT_TTL_SECONDS: int = 60 * 60 * 6  # 6h
-    
-    AUTH_DATABASE_URL: str = f"sqlite:///{BASE_DIR / 'output' / 'users.db'}"
+
     JWT_SECRET_KEY: str = ""
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
 
@@ -112,24 +119,46 @@ def get_settings() -> Settings:
             "URL will likely fail to connect."
         )
 
-    if settings.AUTH_DATABASE_URL.startswith("sqlite+libsql://"):
-        logger.info("startup: AUTH_DATABASE_URL points to Turso (remote libSQL)")
-    elif settings.AUTH_DATABASE_URL.startswith("sqlite:///"):
+    # Fold the deprecated AUTH_DATABASE_URL into DATABASE_URL if that's all
+    # an old .env file has set, so upgrading doesn't silently break auth.
+    if not settings.DATABASE_URL and settings.AUTH_DATABASE_URL:
         logger.warning(
-            "startup: AUTH_DATABASE_URL is a LOCAL sqlite file — this will be "
-            "wiped on every Render redeploy/restart. Set AUTH_DATABASE_URL to "
-            "your Turso sqlite+libsql://... URL in .env for persistent storage."
+            "startup: DATABASE_URL is empty but AUTH_DATABASE_URL is set — "
+            "using it as DATABASE_URL. AUTH_DATABASE_URL is deprecated; "
+            "rename it to DATABASE_URL in your .env."
+        )
+        settings.DATABASE_URL = settings.AUTH_DATABASE_URL
+
+    if not settings.DATABASE_URL:
+        if settings.ENVIRONMENT == "production":
+            raise RuntimeError(
+                "FATAL: ENVIRONMENT=production but DATABASE_URL is empty. "
+                "Set it to your Supabase Postgres connection string (Project "
+                "Settings -> Database -> Connection string -> pooler, "
+                "transaction mode, port 6543)."
+            )
+        logger.warning(
+            "startup: DATABASE_URL is empty — the app has no database "
+            "configured. Set it to your Supabase Postgres connection string "
+            "in .env before starting the API or a Celery worker."
+        )
+    elif not settings.DATABASE_URL.startswith(("postgresql://", "postgresql+psycopg2://", "postgresql+psycopg://")):
+        logger.warning(
+            "startup: DATABASE_URL does not look like a Postgres URL "
+            "(expected it to start with 'postgresql://'). If you copy-pasted "
+            "Supabase's string verbatim it may start with 'postgres://' — "
+            "SQLAlchemy needs 'postgresql://', so update the scheme."
+        )
+    elif ".pooler.supabase.com" not in settings.DATABASE_URL and "supabase.co" in settings.DATABASE_URL:
+        logger.warning(
+            "startup: DATABASE_URL points at Supabase's DIRECT connection "
+            "host, not the pooler. That's fine for a single long-lived "
+            "process, but Render + multiple Celery workers will burn "
+            "through Supabase free tier's ~60 direct-connection limit fast. "
+            "Prefer the pooler (transaction mode, port 6543) connection "
+            "string instead."
         )
 
-    if settings.DATABASE_URL.startswith("sqlite+libsql://"):
-        logger.info("startup: DATABASE_URL points to Turso (remote libSQL)")
-    elif settings.DATABASE_URL.startswith("sqlite:///"):
-        logger.warning(
-            "startup: DATABASE_URL is a LOCAL sqlite file — applications and "
-            "task data will be wiped on every Render redeploy/restart. Set "
-            "DATABASE_URL to your Turso sqlite+libsql://... URL in .env for "
-            "persistent storage."
-        )
     missing = [name for name in ("HF_API_KEY", "GEMINI_API_KEY") if not getattr(settings, name)]
     if len(missing) == 2:
         logger.warning(
@@ -150,9 +179,6 @@ def get_settings() -> Settings:
 
     if not settings.api_keys_list:
         if settings.ENVIRONMENT == "production":
-            # Fail hard — an open, unauthenticated deployment in prod is
-            # not a warning-level mistake, it's a full public-exposure
-            # incident waiting to happen. Refuse to start.
             raise RuntimeError(
                 "FATAL: ENVIRONMENT=production but API_KEYS is empty. "
                 "Refusing to start with no authentication. Set at least "
