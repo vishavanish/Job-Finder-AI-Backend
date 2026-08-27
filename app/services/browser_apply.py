@@ -1,10 +1,34 @@
 """
 app/services/browser_apply.py
 --------------------------------
-Application status is now recorded via app.services.applications_store
+Application status is recorded via app.services.applications_store
 .record_status() (DB upsert + history event) instead of a CSV row. The
 CSV write is kept as a secondary, best-effort audit trail only — never
 the source of truth, and never allowed to block or fail the DB write.
+
+AUTOPILOT CAPABILITY FILTER (new)
+----------------------------------
+This module used to open a browser tab for every top-ranked job, then
+*only* attempt Easy Apply auto-fill if source == "LinkedIn" — everything
+else just got a tab opened and logged as "opened" with nothing actually
+auto-applied. That's not autopilot, that's tab-spam.
+
+Now: before any tab is opened, jobs are filtered down to
+AUTO_APPLY_CAPABLE_SOURCES. Jobs from unsupported sources are skipped
+entirely (never opened, never counted as an "application") and reported
+back separately so the caller knows why the count is lower than
+open_top_n.
+
+AUTO_APPLY_CAPABLE_SOURCES is deliberately a module-level constant, not
+a hardcoded string check buried in the loop, so adding a new capability
+(e.g. a native Greenhouse/Lever form-filler) later is a one-line change
+here plus a new _try_<platform>_apply() function — nothing else in this
+file, celery_tasks.py, or the routes needs to change.
+
+"opened_count" (tabs opened) and "auto_applied_count" (Easy Apply forms
+genuinely filled) are now reported separately — a LinkedIn job can still
+lack an Easy Apply button, so "we opened it" and "we auto-applied to it"
+are not the same claim and shouldn't be conflated in the response.
 """
 from __future__ import annotations
 
@@ -21,6 +45,18 @@ from app.services.applications_store import record_status
 logger = logging.getLogger("job_finder_api.apply")
 
 NoOpProgress: Callable[[str], None] = lambda msg: None
+
+# Sources this module can genuinely auto-fill an application form for.
+# Today that's LinkedIn Easy Apply only. Extend this set (and add a
+# corresponding _try_<platform>_apply() + dispatch entry below) as more
+# native fill flows are implemented. Do NOT add a source here just
+# because jobs from it can be *opened* — only add it once there's a real
+# fill implementation, or the capability filter becomes meaningless.
+AUTO_APPLY_CAPABLE_SOURCES = frozenset({"LinkedIn"})
+
+# Statuses that count as a genuine auto-apply (form actually filled),
+# as opposed to "we opened the tab but nothing was filled."
+_AUTO_APPLIED_STATUSES = frozenset({"easy_apply_form_filled_awaiting_review"})
 
 
 def init_log(log_path: Path) -> None:
@@ -65,6 +101,40 @@ def log_action(log_path: Path, job: dict, status: str, *, user_id: str) -> dict:
     }
 
 
+def partition_by_auto_apply_capability(
+    jobs: list[dict],
+    *,
+    progress: Callable[[str], None] = NoOpProgress,
+) -> tuple[list[dict], list[dict]]:
+    """Splits jobs into (capable, skipped). `capable` are jobs whose
+    source has a real auto-fill implementation (AUTO_APPLY_CAPABLE_SOURCES);
+    `skipped` are everything else, each annotated with a `skip_reason` so
+    the caller can show the user *why* a job wasn't touched rather than
+    it silently vanishing.
+
+    This runs BEFORE open_top_n slicing and BEFORE any browser tab is
+    opened — a job that can't be auto-applied to shouldn't burn a slot in
+    "top N" or a tab in the browser."""
+    capable, skipped = [], []
+    for job in jobs:
+        source = job.get("source", "")
+        if source in AUTO_APPLY_CAPABLE_SOURCES:
+            capable.append(job)
+        else:
+            skipped.append({**job, "skip_reason": f"auto-apply not yet supported for source '{source}'"})
+
+    if skipped:
+        by_source: dict[str, int] = {}
+        for j in skipped:
+            by_source[j.get("source", "")] = by_source.get(j.get("source", ""), 0) + 1
+        progress(
+            f"skipped {len(skipped)} job(s) with no auto-apply support "
+            f"({dict(by_source)}) — autopilot only supports {sorted(AUTO_APPLY_CAPABLE_SOURCES)} today"
+        )
+
+    return capable, skipped
+
+
 def _try_easy_apply(page, applicant_info: dict) -> str:
     """Opens + partially fills a LinkedIn Easy Apply modal. Never clicks
     final submit — the human reviews and submits themselves."""
@@ -98,6 +168,14 @@ def _try_easy_apply(page, applicant_info: dict) -> str:
         return f"easy_apply_error:{e}"
 
 
+# Dispatch table: source -> fill function. Add entries here as new
+# platforms get real auto-fill support (keep AUTO_APPLY_CAPABLE_SOURCES
+# in sync with the keys of this dict).
+_FILL_DISPATCH: dict[str, Callable] = {
+    "LinkedIn": _try_easy_apply,
+}
+
+
 def open_and_prepare(
     jobs: list[dict],
     *,
@@ -109,24 +187,53 @@ def open_and_prepare(
     applications_log_path: Path,
     user_id: str,
     headless: bool = False,
+    require_auto_apply_capable: bool = True,
     progress: Callable[[str], None] = NoOpProgress,
 ) -> dict:
-    """Opens jobs in a persistent browser context. For every job, records
-    'opened' as the first status the instant the tab loads, then — for
-    LinkedIn jobs with auto-fill on — records the Easy Apply outcome as a
-    SEPARATE follow-up status update on the same application row.
+    """Opens jobs in a persistent browser context and auto-fills them.
+
+    CAPABILITY FILTERING: when require_auto_apply_capable=True (the
+    default — this IS the autopilot flow), jobs are filtered down to
+    AUTO_APPLY_CAPABLE_SOURCES *before* open_top_n slicing and *before*
+    any tab is opened. Jobs from unsupported sources never get a tab and
+    are returned separately under "skipped_jobs" with a reason, not
+    silently dropped.
+
+    Set require_auto_apply_capable=False to fall back to the old
+    behaviour (open every top-N job for manual human review, regardless
+    of auto-fill support) — useful if you want a "open my top matches so
+    I can apply by hand" mode distinct from autopilot.
+
+    For every job that IS opened, records 'opened' as the first status
+    the instant the tab loads, then — for jobs on a source with a real
+    fill implementation, with auto-fill on — records the fill outcome as
+    a SEPARATE follow-up status update on the same application row.
 
     Returns the log entries plus a `handle` dict (playwright instance +
     context) so the caller can keep the browser open for review."""
     init_log(applications_log_path)
-    top_jobs = jobs[:open_top_n]
+
+    if require_auto_apply_capable:
+        capable_jobs, skipped_jobs = partition_by_auto_apply_capability(jobs, progress=progress)
+    else:
+        capable_jobs, skipped_jobs = jobs, []
+
+    top_jobs = capable_jobs[:open_top_n]
     log_entries: list[dict] = []
+    auto_applied_count = 0
 
     if not top_jobs:
-        progress("no jobs to open")
-        return {"log": [], "opened_count": 0, "handle": None}
+        progress("no auto-apply-capable jobs to open" if require_auto_apply_capable else "no jobs to open")
+        return {
+            "log": [],
+            "opened_count": 0,
+            "auto_applied_count": 0,
+            "skipped_jobs": skipped_jobs,
+            "skipped_count": len(skipped_jobs),
+            "handle": None,
+        }
 
-    progress(f"opening top {len(top_jobs)} matches in browser")
+    progress(f"opening top {len(top_jobs)} auto-applyable matches in browser")
 
     playwright = sync_playwright().start()
     context = playwright.chromium.launch_persistent_context(browser_profile_dir, headless=headless)
@@ -143,10 +250,13 @@ def open_and_prepare(
             log_entries.append(entry)
             progress(f"[{job.get('llm_score', '?')}] {job['title']} @ {job['company']} ({job['source']}) -> opened")
 
-            if auto_fill_easy_apply and job.get("source") == "LinkedIn":
-                fill_status = _try_easy_apply(page, applicant_info)
+            fill_fn = _FILL_DISPATCH.get(job.get("source", ""))
+            if auto_fill_easy_apply and fill_fn:
+                fill_status = fill_fn(page, applicant_info)
                 fill_entry = log_action(applications_log_path, job, fill_status, user_id=user_id)
                 log_entries.append(fill_entry)
+                if fill_status in _AUTO_APPLIED_STATUSES:
+                    auto_applied_count += 1
                 progress(f"[{job.get('llm_score', '?')}] {job['title']} @ {job['company']} ({job['source']}) -> {fill_status}")
 
         except Exception as e:  # noqa: BLE001
@@ -156,11 +266,17 @@ def open_and_prepare(
 
         time.sleep(pause_between_tabs_sec)
 
-    progress("all tabs opened — review and submit manually, then call the close endpoint")
+    progress(
+        f"all tabs opened — {auto_applied_count}/{len(top_jobs)} genuinely auto-applied "
+        f"(rest need manual review) — review and submit manually, then call the close endpoint"
+    )
 
     return {
         "log": log_entries,
-        "opened_count": len(log_entries),
+        "opened_count": len(top_jobs),
+        "auto_applied_count": auto_applied_count,
+        "skipped_jobs": skipped_jobs,
+        "skipped_count": len(skipped_jobs),
         "handle": {"playwright": playwright, "context": context},
     }
 

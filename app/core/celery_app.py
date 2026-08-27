@@ -1,27 +1,12 @@
 """
 app/core/celery_app.py
-------------------------
-The Celery application instance. Broker AND result backend both point at
-your Upstash Redis database — Upstash speaks the standard Redis protocol
-over TCP with TLS, so this is a completely normal redis:// URL, just
-pointed at Upstash's host instead of a self-hosted Redis.
 
-Upstash gives you a connection string that looks like:
-    rediss://default:<password>@<region>-<name>.upstash.io:<port>
-(note the double-s in "rediss" — that's TLS, required by Upstash's free
-tier; a plain "redis://" URL will fail to connect.)
-
-Run a worker with:
-    celery -A app.core.celery_app worker --loglevel=info --pool=solo
-
---pool=solo is required on Windows (the default prefork pool uses
-os.fork, which doesn't exist on Windows). On Linux/Mac in production you
-can drop --pool=solo and let it use prefork with multiple worker
-processes for real parallelism.
 """
 from __future__ import annotations
 
 import logging
+import ssl
+from logging.handlers import RotatingFileHandler
 
 from celery import Celery
 from celery.signals import after_setup_logger
@@ -42,36 +27,54 @@ celery_app.conf.update(
     accept_content=["json"],
     result_expires=settings.TASK_RESULT_TTL_SECONDS,
     task_track_started=True,
-    # Upstash free tier has a command budget (500K/month) — these settings
-    # control how often the worker polls Redis, which drives idle command
-    # usage. Defaults are reasonable; this is the knob if you need to trade
-    # latency for lower Redis command usage.
+    task_default_queue="default",
     broker_transport_options={"visibility_timeout": 3600},
     worker_prefetch_multiplier=1,
 )
 
-# Explicit import (not autodiscover_tasks) so all @celery_app.task
-# definitions in app/core/celery_tasks.py get registered. autodiscover_tasks
-# only looks for a "tasks" module inside each *package* it's given
-# (e.g. app.services.tasks) — it will NOT find app/core/celery_tasks.py,
-# and will silently register zero tasks instead of raising an error. An
-# explicit import fails loudly at worker startup if something's wrong,
-# instead of letting every dispatched task sit PENDING forever.
+# rediss:// (TLS) connections to Upstash require explicit SSL config on
+# BOTH the broker and result backend connections. redis.from_url(..., ssl_cert_reqs=None)
+# in health.py works because it's a raw redis-py client — that kwarg does NOT
+# propagate to Celery's own connection pool. Without this block, the worker's
+# broker connection can fail cert verification silently and just never receive tasks.
+#
+# CERT_REQUIRED enforces verification against the system CA bundle. If this
+# ever starts failing with SSLCertVerificationError, it means the CA bundle
+# on this host is missing/stale (e.g. `sudo dnf install -y ca-certificates`),
+# not that Upstash's cert is invalid.
+if settings.REDIS_URL.startswith("rediss://"):
+    _ssl_opts = {"ssl_cert_reqs": ssl.CERT_REQUIRED}
+    celery_app.conf.broker_use_ssl = _ssl_opts
+    celery_app.conf.redis_backend_use_ssl = _ssl_opts
+
 import app.core.celery_tasks  # noqa: E402, F401
+
+_LOG_FILE_NAME = "celery_worker.log"
 
 
 @after_setup_logger.connect
 def setup_celery_file_logging(logger: logging.Logger, **kwargs) -> None:
-    """Celery workers are separate OS processes from the FastAPI app, so
-    they need their own log file handler — the RotatingFileHandler set up
-    in app/main.py only applies to the API process, not worker processes."""
-    from logging.handlers import RotatingFileHandler
+    root_logger = logging.getLogger()
+
+    # Guard against duplicate handlers: after_setup_logger can fire more
+    # than once per process (e.g. --autoreload, prefork worker restarts),
+    # and without this check each firing adds another RotatingFileHandler,
+    # duplicating every log line written after that point.
+    already_attached = any(
+        isinstance(h, RotatingFileHandler)
+        and getattr(h, "baseFilename", "") == str(settings.LOG_DIR / _LOG_FILE_NAME)
+        for h in root_logger.handlers
+    )
+    if already_attached:
+        return
 
     handler = RotatingFileHandler(
-        settings.LOG_DIR / "celery_worker.log",
+        settings.LOG_DIR / _LOG_FILE_NAME,
         maxBytes=5_000_000,
         backupCount=5,
         encoding="utf-8",
     )
     handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"))
-    logger.addHandler(handler)
+
+    root_logger.addHandler(handler)
+    root_logger.setLevel(logging.INFO)

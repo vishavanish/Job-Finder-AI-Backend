@@ -122,6 +122,7 @@ def apply_task(self, jobs: list[dict], apply_params: dict) -> dict:
         applications_log_path=settings.OUTPUT_DIR / "applications_log.csv",
         user_id=apply_params["user_id"],
         headless=actual_headless,
+        require_auto_apply_capable=apply_params.get("require_auto_apply_capable", True),
         progress=progress_cb,
     )
     result.pop("handle", None)
@@ -193,6 +194,7 @@ def pipeline_task(self, search_params: dict, score_params: dict, apply_params: d
             browser_profile_dir=apply_params.get("browser_profile_dir") or str(settings.BROWSER_PROFILE_DIR),
             applications_log_path=settings.OUTPUT_DIR / "applications_log.csv",
             headless=actual_headless,
+            require_auto_apply_capable=apply_params.get("require_auto_apply_capable", True), 
             progress=progress_cb,
         )
         raw.pop("handle", None)  # not JSON-serializable — see apply_task's note

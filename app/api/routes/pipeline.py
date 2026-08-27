@@ -73,6 +73,7 @@ async def run_pipeline(request: Request, req: PipelineRequest, user=Depends(get_
             "browser_profile_dir": None,
             "headless": req.apply.headless,
             "user_id": user.id,
+            "require_auto_apply_capable": req.apply.require_auto_apply_capable,
         }
 
     async_result = pipeline_task.apply_async(
