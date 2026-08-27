@@ -41,6 +41,7 @@ async def start_apply(request: Request, req: ApplyRequest, user=Depends(get_curr
         "browser_profile_dir": _safe_profile_dir(req.browser_profile_dir),
         "headless": req.headless,
         "user_id": user.id,
+        "require_auto_apply_capable": req.require_auto_apply_capable,
     }
 
     async_result = apply_task.apply_async(args=[jobs, apply_params], queue="default")

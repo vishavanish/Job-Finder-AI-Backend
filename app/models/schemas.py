@@ -184,7 +184,9 @@ class ApplyRequest(BaseModel):
     headless: bool = Field(
         False, description="Run browser headless. Set True for server deployments with no display."
     )
-
+    require_auto_apply_capable: bool = Field(
+        True, description="If True (default), only opens/applies to jobs whose source has a real auto-fill implementation (currently LinkedIn Easy Apply). Set False to open top-N matches for manual review regardless of source."
+    )
 
 class ApplyLogEntry(BaseModel):
     date: str
@@ -198,6 +200,8 @@ class ApplyLogEntry(BaseModel):
 class ApplyResult(BaseModel):
     log: list[ApplyLogEntry]
     opened_count: int
+    auto_applied_count: int = 0
+    skipped_count: int = 0
     browser_open: bool = Field(
         False, description="True if a non-headless browser context is still open awaiting manual review/close."
     )

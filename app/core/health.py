@@ -1,15 +1,6 @@
 """
 app/core/health.py
 --------------------
-A real health check, not a static {"status": "ok"}. Verifies the things
-that actually need to work for this API to function: the Postgres
-(Supabase) database is reachable, and at least one LLM provider key is
-configured somewhere reachable (server-side or expected to be supplied
-per-request).
-
-Returns HTTP 200 with "ok" or "degraded", or 503 with "unhealthy" — a
-load balancer / uptime monitor can act on the status code directly
-without parsing the body.
 """
 from __future__ import annotations
 
@@ -18,7 +9,20 @@ from sqlalchemy import text
 from app.core.config import get_settings
 from app.core.db import engine
 
-
+def check_redis() -> tuple[bool, str]:
+    settings = get_settings()
+    if not settings.REDIS_URL:
+        return False, "REDIS_URL is not set"
+ 
+    try:
+        import redis
+        client = redis.from_url(settings.REDIS_URL, socket_timeout=5, ssl_cert_reqs=None)
+        client.ping()
+        queue_len = client.llen("celery")
+        return True, f"reachable, {queue_len} task(s) queued on 'celery'"
+    except Exception as e:  # noqa: BLE001
+        return False, f"unreachable: {e}"
+    
 def check_database() -> tuple[bool, str]:
     try:
         with engine.connect() as conn:
@@ -37,22 +41,27 @@ def check_llm_config() -> tuple[bool, str]:
     return False, "no server-side LLM key configured (requests must supply their own)"
 
 
+    
+
 def run_health_check() -> dict:
     settings = get_settings()
-
+ 
     db_ok, db_detail = check_database()
+    redis_ok, redis_detail = check_redis()
     llm_ok, llm_detail = check_llm_config()
-
+ 
     checks = {
         "database": {"ok": db_ok, "detail": db_detail},
+        "redis": {"ok": redis_ok, "detail": redis_detail},
         "llm_config": {"ok": llm_ok, "detail": llm_detail},
     }
-
-    if not db_ok:
+ 
+    if not db_ok or not redis_ok:
         overall = "unhealthy"
     elif not llm_ok:
         overall = "degraded"
     else:
         overall = "ok"
-
+ 
     return {"status": overall, "app": settings.APP_NAME, "checks": checks}
+ 
