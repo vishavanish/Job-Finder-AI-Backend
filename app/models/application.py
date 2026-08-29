@@ -17,7 +17,7 @@ from sqlalchemy import Column, String, DateTime, Text, ForeignKey, UniqueConstra
 from sqlalchemy.orm import relationship
 
 from app.core.db import Base
-
+from app.models.user import User
 
 class Application(Base):
     __tablename__ = "applications"
