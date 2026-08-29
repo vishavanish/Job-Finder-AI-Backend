@@ -48,10 +48,16 @@ class Job(BaseModel):
     keyword_score: Optional[float] = None
     llm_score: Optional[float] = None
     llm_reason: Optional[str] = None
+    auto_apply_capable: Optional[bool] = Field(
+        None, description="True if this job's source has a real auto-fill implementation "
+        "(see app.services.browser_apply.AUTO_APPLY_CAPABLE_SOURCES). Set by the scoring "
+        "step. Frontend uses this to decide whether to show one 'Apply' button or two "
+        "('Apply' + 'Auto-Apply')."
+    )
 
     model_config = {"extra": "allow"}
-
-
+    
+    
 # ============================================================
 # SEARCH (job_sources.py -> dynamic)
 # ============================================================

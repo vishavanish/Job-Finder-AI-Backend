@@ -229,6 +229,10 @@ def llm_rank(
     progress(f"{len(ranked)}/{len(jobs)} jobs scored >={llm_min_score_to_keep}")
     return ranked, engine_used
 
+def _tag_auto_apply_capability(jobs: list[dict]) -> None:
+    from app.services.browser_apply import AUTO_APPLY_CAPABLE_SOURCES
+    for job in jobs:
+        job["auto_apply_capable"] = job.get("source") in AUTO_APPLY_CAPABLE_SOURCES
 
 def score_jobs(
     jobs: list[dict],
@@ -260,6 +264,7 @@ def score_jobs(
         hf_api_key=hf_api_key,
         progress=progress,
     )
+    _tag_auto_apply_capability(ranked)  # NEW — lets the frontend show 1 vs 2 buttons per job
     return {
         "ranked_jobs": ranked,
         "total_input": len(jobs),
