@@ -79,7 +79,7 @@ async def fetch_company_ats(request: Request, req: CompanyAtsRequest):
     targets = [t.model_dump() for t in req.targets]
 
     async_result = company_ats_task.apply_async(
-        args=[targets, req.request_delay_sec], queue="default"
+        args=[targets, req.request_delay_sec], queue=settings.default_queue
     )
     logger.info("[task=%s] dispatched to 'default' queue", async_result.id)
     return pending_response(async_result)

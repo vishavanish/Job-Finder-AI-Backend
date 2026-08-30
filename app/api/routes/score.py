@@ -50,6 +50,6 @@ async def start_score(request: Request, req: ScoreRequest):
         "hf_api_key": _unwrap_secret(req.hf_api_key),
     }
 
-    async_result = score_task.apply_async(args=[jobs, score_params], queue="default")
+    async_result = score_task.apply_async(args=[jobs, score_params], queue=settings.default_queue)
     logger.info("[task=%s] dispatched to 'default' queue", async_result.id)
     return pending_response(async_result)
