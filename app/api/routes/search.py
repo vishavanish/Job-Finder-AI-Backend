@@ -55,6 +55,6 @@ async def start_search(request: Request, req: SearchRequest):
         "apify_api_token": _unwrap_secret(req.apify_api_token),
     }
 
-    async_result = search_task.apply_async(args=[payload], queue="default")
+    async_result = search_task.apply_async(args=[payload],queue=settings.default_queue)
     logger.info("[task=%s] dispatched to 'default' queue", async_result.id)
     return pending_response(async_result)

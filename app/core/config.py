@@ -62,6 +62,23 @@ class Settings(BaseSettings):
     def api_keys_list(self) -> list[str]:
         return [k.strip() for k in self.API_KEYS.split(",") if k.strip()]
 
+    @property
+    def queue_suffix(self) -> str:
+        """Appended to every queue name so local dev and the Oracle prod
+        worker never compete for the same messages on the same Redis
+        broker. development -> "_dev" suffix; production -> no suffix
+        (keeps existing prod queue names "default"/"apply" unchanged, so
+        Oracle needs zero changes)."""
+        return "" if self.ENVIRONMENT == "production" else "_dev"
+
+    @property
+    def default_queue(self) -> str:
+        return f"default{self.queue_suffix}"
+
+    @property
+    def apply_queue(self) -> str:
+        return f"apply{self.queue_suffix}"
+    
     # ---- rate limiting ----
     RATE_LIMIT_PIPELINE: str = "5/minute"
     RATE_LIMIT_SEARCH: str = "10/minute"

@@ -44,8 +44,8 @@ async def start_apply(request: Request, req: ApplyRequest, user=Depends(get_curr
         "require_auto_apply_capable": req.require_auto_apply_capable,
     }
 
-    # async_result = apply_task.apply_async(args=[jobs, apply_params], queue="default")
-    async_result = apply_task.apply_async(args=[jobs, apply_params], queue="apply")
+    async_result = apply_task.apply_async(args=[jobs, apply_params], queue=settings.apply_queue)
+    # async_result = apply_task.apply_async(args=[jobs, apply_params], queue="apply")
     logger.info("[task=%s] dispatched to 'default' queue for user=%s", async_result.id, user.id)
     return pending_response(async_result)
 

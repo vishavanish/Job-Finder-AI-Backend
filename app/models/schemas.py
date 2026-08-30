@@ -109,16 +109,15 @@ class SearchResult(BaseModel):
 # ============================================================
 
 class CompanyAtsTarget(BaseModel):
-    platform: Literal["greenhouse", "lever", "smartrecruiters", "custom"]
+    platform: Literal["greenhouse", "lever", "smartrecruiters", "workday", "custom"]
     slug: str
     custom_endpoint_url: Optional[str] = None
     custom_method: Literal["GET", "POST"] = "GET"
     custom_json_body: Optional[dict[str, Any]] = None
-
-    # NEW — only used when platform == "custom" and the JSON-API probe fails
-    custom_list_selector: Optional[str] = None     # CSS selector for each job card
-    custom_title_selector: Optional[str] = None    # relative to list_selector
-    custom_link_selector: Optional[str] = None      # relative to list_selector, reads href
+    custom_session_url: Optional[str] = None
+    custom_list_selector: Optional[str] = None
+    custom_title_selector: Optional[str] = None
+    custom_link_selector: Optional[str] = None
     custom_location_selector: Optional[str] = None
 
 

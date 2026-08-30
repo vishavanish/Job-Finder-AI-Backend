@@ -28,8 +28,13 @@ celery_app.conf.update(
     result_expires=settings.TASK_RESULT_TTL_SECONDS,
     task_track_started=True,
     task_default_queue="default",
-    broker_transport_options={"visibility_timeout": 3600},
+    broker_transport_options={
+        "visibility_timeout": 3600,
+        "socket_keepalive": True,
+    },
     worker_prefetch_multiplier=1,
+    broker_connection_retry_on_startup=True,
+    broker_heartbeat=30,
 )
 
 # rediss:// (TLS) connections to Upstash require explicit SSL config on
