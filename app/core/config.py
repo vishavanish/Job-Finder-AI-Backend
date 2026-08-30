@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     # ---- provider secrets ----
     HF_API_KEY: str = ""
     GEMINI_API_KEY: str = ""
+    GROQ_API_KEY: str = ""
     APIFY_API_TOKEN: str = ""
 
     # ---- Celery / Redis (Upstash) ----

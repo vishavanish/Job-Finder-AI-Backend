@@ -5,6 +5,10 @@ Ported from scorer.py. Candidate profile (resume/skills/career targets),
 thresholds, model names, and even API keys can all be overridden per
 request; if a request doesn't supply an API key, it falls back to the
 server's env-configured key (app.core.config.Settings).
+
+LLM RANKING FALLBACK CHAIN: Gemini -> Groq (openai/gpt-oss-120b) -> HF/Qwen3-8B.
+Each stage only runs if its API key is present AND the previous stage
+didn't already return a successfully parsed set of scores.
 """
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ import re
 from typing import Callable
 import logging
 from huggingface_hub import InferenceClient
+from groq import Groq
 logger = logging.getLogger("job_finder_api.scorer")
 NoOpProgress: Callable[[str], None] = lambda msg: None
 
@@ -118,7 +123,7 @@ def _rank_with_gemini(
     try:
         from google import genai
     except ImportError:
-        progress("google-genai not installed — skipping Gemini, using Qwen/HF only")
+        progress("google-genai not installed — skipping Gemini, using Groq/HF only")
         return False
 
     client = genai.Client(api_key=gemini_api_key)
@@ -139,16 +144,53 @@ def _rank_with_gemini(
         )
         raw_text = response.text or ""
     except Exception as e:  # noqa: BLE001
-        progress(f"Gemini call failed ({e}) — falling back to Qwen/HF")
+        progress(f"Gemini call failed ({e}) — falling back to Groq/HF")
         return False
 
     if not raw_text.strip():
-        progress("Gemini returned an empty response — falling back to Qwen/HF")
+        progress("Gemini returned an empty response — falling back to Groq/HF")
         return False
 
     ok = _parse_and_apply_scores(raw_text, jobs, progress)
     if ok:
         progress("Gemini ranking succeeded")
+    return ok
+
+
+def _rank_with_groq(
+    jobs: list[dict], *, resume_summary: str, career_targets: list[str],
+    groq_model: str, groq_api_key: str, progress: Callable[[str], None],
+) -> bool:
+    if not groq_api_key:
+        return False
+
+    client = Groq(api_key=groq_api_key)
+    system_prompt = LLM_SYSTEM_PROMPT_TEMPLATE.format(
+        career_targets="\n        ".join(f"- {t}" for t in career_targets)
+    )
+
+    progress(f"trying Groq ({groq_model}) for {len(jobs)} jobs")
+    try:
+        response = client.chat.completions.create(
+            model=groq_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": _build_user_prompt(jobs, resume_summary)},
+            ],
+            temperature=0.1,
+        )
+        raw_text = response.choices[0].message.content or ""
+    except Exception as e:  # noqa: BLE001
+        progress(f"Groq call failed ({e}) — falling back to HF")
+        return False
+
+    if not raw_text.strip():
+        progress("Groq returned an empty response — falling back to HF")
+        return False
+
+    ok = _parse_and_apply_scores(raw_text, jobs, progress)
+    if ok:
+        progress("Groq ranking succeeded")
     return ok
 
 
@@ -194,8 +236,10 @@ def llm_rank(
     career_targets: list[str],
     llm_min_score_to_keep: float,
     gemini_model: str,
+    groq_model: str,
     hf_model: str,
     gemini_api_key: str,
+    groq_api_key: str,
     hf_api_key: str,
     progress: Callable[[str], None] = NoOpProgress,
 ) -> tuple[list[dict], str | None]:
@@ -210,15 +254,22 @@ def llm_rank(
     if succeeded:
         engine_used = f"gemini:{gemini_model}"
     else:
-        succeeded = _rank_with_hf(
+        succeeded = _rank_with_groq(
             jobs, resume_summary=resume_summary, career_targets=career_targets,
-            hf_model=hf_model, hf_api_key=hf_api_key, progress=progress,
+            groq_model=groq_model, groq_api_key=groq_api_key, progress=progress,
         )
         if succeeded:
-            engine_used = f"hf:{hf_model}"
+            engine_used = f"groq:{groq_model}"
+        else:
+            succeeded = _rank_with_hf(
+                jobs, resume_summary=resume_summary, career_targets=career_targets,
+                hf_model=hf_model, hf_api_key=hf_api_key, progress=progress,
+            )
+            if succeeded:
+                engine_used = f"hf:{hf_model}"
 
     if not succeeded:
-        progress("both Gemini and Qwen/HF ranking failed — returning jobs unranked")
+        progress("Gemini, Groq, and Qwen/HF ranking all failed — returning jobs unranked")
         for j in jobs:
             j.setdefault("llm_score", 0)
             j.setdefault("llm_reason", "LLM ranking unavailable this run.")
@@ -229,10 +280,12 @@ def llm_rank(
     progress(f"{len(ranked)}/{len(jobs)} jobs scored >={llm_min_score_to_keep}")
     return ranked, engine_used
 
+
 def _tag_auto_apply_capability(jobs: list[dict]) -> None:
     from app.services.browser_apply import AUTO_APPLY_CAPABLE_SOURCES
     for job in jobs:
         job["auto_apply_capable"] = job.get("source") in AUTO_APPLY_CAPABLE_SOURCES
+
 
 def score_jobs(
     jobs: list[dict],
@@ -244,8 +297,10 @@ def score_jobs(
     llm_top_n_to_rank: int = 40,
     llm_min_score_to_keep: float = 70,
     gemini_model: str = "gemini-2.5-flash",
+    groq_model: str = "openai/gpt-oss-120b",
     hf_model: str = "Qwen/Qwen3-8B",
     gemini_api_key: str = "",
+    groq_api_key: str = "",
     hf_api_key: str = "",
     progress: Callable[[str], None] = NoOpProgress,
 ) -> dict:
@@ -259,8 +314,10 @@ def score_jobs(
         career_targets=career_targets,
         llm_min_score_to_keep=llm_min_score_to_keep,
         gemini_model=gemini_model,
+        groq_model=groq_model,
         hf_model=hf_model,
         gemini_api_key=gemini_api_key,
+        groq_api_key=groq_api_key,
         hf_api_key=hf_api_key,
         progress=progress,
     )

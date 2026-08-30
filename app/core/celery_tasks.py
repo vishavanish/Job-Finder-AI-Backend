@@ -17,6 +17,12 @@ you polled the old in-memory task manager, just via
 Each function below is decorated with @celery_app.task(bind=True) so it
 receives `self`, giving access to self.update_state() for progress and
 self.request.id for the task's own ID (useful for logging).
+
+LLM RANKING FALLBACK CHAIN: Gemini -> Groq (openai/gpt-oss-120b) -> HF/Qwen3-8B.
+Groq sits in the middle because it's fast/cheap and openai/gpt-oss-120b scores
+well on structured-JSON-output tasks like this one; HF stays as the last
+resort. See app/services/scorer.py for the batched-path equivalent of this
+same chain.
 """
 from __future__ import annotations
 
@@ -53,12 +59,17 @@ def _make_progress_cb(task, task_name: str):
 
 def _score_one_job_llm(
     job: dict, *, resume_summary: str, career_targets: list[str],
-    gemini_model: str, hf_model: str, gemini_api_key: str, hf_api_key: str,
+    gemini_model: str, groq_model: str, hf_model: str,
+    gemini_api_key: str, groq_api_key: str, hf_api_key: str,
 ) -> dict:
     """Scores exactly ONE job via the LLM (not a batch). Reuses scorer.py's
     existing prompt-building and response-parsing helpers so scoring
     logic isn't duplicated/forked between the batched and per-job paths
     — this just calls them with a list of length 1.
+
+    Fallback order: Gemini -> Groq (openai/gpt-oss-120b) -> HF/Qwen3-8B. Each
+    stage only runs if its API key is present AND the previous stage
+    didn't already parse a valid score.
 
     Trade-off (flagged for the record, not hidden): one LLM API call per
     job is materially more expensive and slower in aggregate than the
@@ -86,7 +97,23 @@ def _score_one_job_llm(
             if response.text and _parse_and_apply_scores(response.text, jobs_wrapper, lambda m: None):
                 return jobs_wrapper[0]
         except Exception:  # noqa: BLE001
-            logger.exception("gemini per-job scoring failed for url=%s — falling back to HF", job.get("url"))
+            logger.exception("gemini per-job scoring failed for url=%s — falling back to Groq", job.get("url"))
+
+    if groq_api_key:
+        try:
+            from groq import Groq
+            client = Groq(api_key=groq_api_key)
+            response = client.chat.completions.create(
+                model=groq_model,
+                messages=[{"role": "system", "content": system_prompt},
+                          {"role": "user", "content": user_prompt}],
+                temperature=0.1,
+            )
+            raw_text = response.choices[0].message.content or ""
+            if raw_text and _parse_and_apply_scores(raw_text, jobs_wrapper, lambda m: None):
+                return jobs_wrapper[0]
+        except Exception:  # noqa: BLE001
+            logger.exception("groq per-job scoring failed for url=%s — falling back to HF", job.get("url"))
 
     if hf_api_key:
         try:
@@ -145,6 +172,7 @@ def search_and_score_keyword(
         skills = score_params["skills"]
         min_pct = score_params.get("keyword_prefilter_min_pct", 30)
         gemini_api_key = score_params.get("gemini_api_key") or settings.GEMINI_API_KEY
+        groq_api_key = score_params.get("groq_api_key") or settings.GROQ_API_KEY
         hf_api_key = score_params.get("hf_api_key") or settings.HF_API_KEY
 
         scored_count = 0
@@ -158,8 +186,10 @@ def search_and_score_keyword(
                 resume_summary=score_params["resume_summary"],
                 career_targets=score_params.get("career_targets", []),
                 gemini_model=score_params.get("gemini_model", "gemini-2.5-flash"),
+                groq_model=score_params.get("groq_model", "openai/gpt-oss-120b"),
                 hf_model=score_params.get("hf_model", "Qwen/Qwen3-8B"),
                 gemini_api_key=gemini_api_key,
+                groq_api_key=groq_api_key,
                 hf_api_key=hf_api_key,
             )
 
@@ -256,8 +286,10 @@ def score_task(self, jobs: list[dict], score_params: dict) -> dict:
         llm_top_n_to_rank=score_params.get("llm_top_n_to_rank", 40),
         llm_min_score_to_keep=score_params.get("llm_min_score_to_keep", 70),
         gemini_model=score_params.get("gemini_model", "gemini-2.5-flash"),
+        groq_model=score_params.get("groq_model", "openai/gpt-oss-120b"),
         hf_model=score_params.get("hf_model", "Qwen/Qwen3-8B"),
         gemini_api_key=score_params.get("gemini_api_key") or settings.GEMINI_API_KEY,
+        groq_api_key=score_params.get("groq_api_key") or settings.GROQ_API_KEY,
         hf_api_key=score_params.get("hf_api_key") or settings.HF_API_KEY,
         progress=progress_cb,
     )
@@ -343,8 +375,10 @@ def pipeline_task(self, search_params: dict, score_params: dict, apply_params: d
         llm_top_n_to_rank=score_params.get("llm_top_n_to_rank", 40),
         llm_min_score_to_keep=score_params.get("llm_min_score_to_keep", 70),
         gemini_model=score_params.get("gemini_model", "gemini-2.5-flash"),
+        groq_model=score_params.get("groq_model", "openai/gpt-oss-120b"),
         hf_model=score_params.get("hf_model", "Qwen/Qwen3-8B"),
         gemini_api_key=score_params.get("gemini_api_key") or settings.GEMINI_API_KEY,
+        groq_api_key=score_params.get("groq_api_key") or settings.GROQ_API_KEY,
         hf_api_key=score_params.get("hf_api_key") or settings.HF_API_KEY,
         progress=progress_cb,
     )
