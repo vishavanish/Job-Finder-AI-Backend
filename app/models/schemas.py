@@ -156,8 +156,10 @@ class ScoreRequest(BaseModel):
 
     # model selection / overrides
     gemini_model: str = "gemini-2.5-flash"
+    groq_model: str = "openai/gpt-oss-120b"
     hf_model: str = "Qwen/Qwen3-8B"
     gemini_api_key: Optional[SecretStr] = Field(None, description="Overrides server GEMINI_API_KEY for this call only.")
+    groq_api_key: Optional[SecretStr] = Field(None, description="Overrides server GROQ_API_KEY for this call only.")
     hf_api_key: Optional[SecretStr] = Field(None, description="Overrides server HF_API_KEY for this call only.")
 
 class ScoreResult(BaseModel):
