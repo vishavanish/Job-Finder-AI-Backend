@@ -130,6 +130,7 @@ def get_settings() -> Settings:
             "will fail to dispatch. Set REDIS_URL from your Upstash "
             "console in .env."
         )
+        
     elif not settings.REDIS_URL.startswith("rediss://"):
         logger.warning(
             "startup: REDIS_URL does not start with 'rediss://' (TLS) — "
