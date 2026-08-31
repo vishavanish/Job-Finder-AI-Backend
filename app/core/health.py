@@ -5,7 +5,7 @@ app/core/health.py
 from __future__ import annotations
 
 from sqlalchemy import text
-
+import redis
 from app.core.config import get_settings
 from app.core.db import engine
 
@@ -15,8 +15,7 @@ def check_redis() -> tuple[bool, str]:
         return False, "REDIS_URL is not set"
  
     try:
-        import redis
-        client = redis.from_url(settings.REDIS_URL, socket_timeout=5, ssl_cert_reqs=None)
+        client = redis.from_url(settings.REDIS_URL, socket_timeout=5)
         client.ping()
         queue_len = client.llen("celery")
         return True, f"reachable, {queue_len} task(s) queued on 'celery'"
