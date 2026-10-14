@@ -12,7 +12,7 @@ from enum import Enum
 from typing import Any, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field, HttpUrl, SecretStr, field_validator
+from pydantic import BaseModel, EmailStr, Field, HttpUrl, SecretStr, field_validator
 
 # ============================================================
 # SHARED / CORE
@@ -288,8 +288,48 @@ class UserOut(BaseModel):
     id: str
     email: str
     name: Optional[str] = None
+    role: str = "user"
+    is_active: bool = True
+    manager_id: Optional[str] = None
+    auth_provider: Optional[str] = None
+    email_verified_at: Optional[datetime] = None
+    last_login_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+
+
+class EntitlementSummary(BaseModel):
+    enabled: bool
+    max_level: Optional[int] = None
+    quota_per_day: Optional[int] = None
+    quota_remaining: Optional[int] = Field(None, description="None = unlimited")
+
+
+class MeOut(UserOut):
+    """GET /auth/me — the user plus what they may use, so the UI can
+    disable controls with a reason (frontend spec 5.1)."""
+    entitlements: dict[str, EntitlementSummary] = Field(default_factory=dict)
+
+
+class OtpRequest(BaseModel):
+    email: EmailStr
+
+
+class OtpVerify(BaseModel):
+    email: EmailStr
+    code: str = Field(..., pattern=r"^\s*\d{6}\s*$")
+
+
+class GoogleSignIn(BaseModel):
+    id_token: str = Field(..., min_length=20)
+
+
+class SetPasswordRequest(BaseModel):
+    password: str = Field(..., min_length=8)
+
+
+class MessageResponse(BaseModel):
+    detail: str
 
 
 class TokenResponse(BaseModel):
@@ -298,3 +338,71 @@ class TokenResponse(BaseModel):
     user: UserOut
 
 PipelineRequest.model_rebuild()
+
+
+# ============================================================
+# ADMIN CONSOLE (CLAUDE.md 7.11)
+# ============================================================
+
+class AdminUserCreate(BaseModel):
+    email: EmailStr
+    name: Optional[str] = None
+    role: Literal["user", "manager", "admin"] = "user"
+    manager_id: Optional[str] = None
+
+
+class AdminUserUpdate(BaseModel):
+    """Only the fields you send are changed; send manager_id: null to
+    remove a user from their manager's team."""
+    name: Optional[str] = None
+    role: Optional[Literal["user", "manager", "admin"]] = None
+    manager_id: Optional[str] = None
+
+
+class AdminUserList(BaseModel):
+    users: list[UserOut]
+    total: int
+    limit: int
+    offset: int
+
+
+class EntitlementOut(BaseModel):
+    feature: str
+    enabled: bool
+    quota_per_day: Optional[int] = None
+    max_level: Optional[int] = None
+    expires_at: Optional[datetime] = None
+    source: str = Field(..., description="'default' (no override) or 'override'")
+    used_today: Optional[int] = None
+
+
+class EntitlementUpdate(BaseModel):
+    enabled: bool
+    quota_per_day: Optional[int] = Field(None, ge=0, description="None = unlimited")
+    max_level: Optional[int] = Field(None, ge=1, le=3, description="auto_apply autopilot cap")
+    expires_at: Optional[datetime] = None
+
+
+class FlagUpdate(BaseModel):
+    value: Any
+
+
+class AuditEntryOut(BaseModel):
+    id: str
+    actor_id: Optional[str] = None
+    action: str
+    target_type: Optional[str] = None
+    target_id: Optional[str] = None
+    before: Optional[dict[str, Any]] = None
+    after: Optional[dict[str, Any]] = None
+    ip: Optional[str] = None
+    at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AuditList(BaseModel):
+    entries: list[AuditEntryOut]
+    total: int
+    limit: int
+    offset: int

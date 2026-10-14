@@ -3,8 +3,11 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, Request, HTTPException
+from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
+from app.core.db import get_db
+from app.services.entitlements import check_feature, require_feature
 from app.core.config import get_settings
 from app.core.rate_limit import limiter
 from app.core.task_dispatch import dispatch
@@ -20,7 +23,13 @@ settings = get_settings()
 
 @router.post("/run/stream", status_code=202)
 @limiter.limit(settings.RATE_LIMIT_PIPELINE)
-async def run_pipeline_stream(request: Request, req: PipelineRequest, user=Depends(get_current_user)):
+async def run_pipeline_stream(
+    request: Request,
+    req: PipelineRequest,
+    user=Depends(require_feature("job_search")),
+    _scoring=Depends(require_feature("scoring")),
+    db: Session = Depends(get_db),
+):
     """Fan-out version: dispatches one search+score sub-task PER KEYWORD
     in parallel (Celery group), each pushing scored jobs to Redis the
     instant they're ready. Returns immediately with a run_id — poll
@@ -59,11 +68,18 @@ async def get_pipeline_run_jobs(run_id: str, offset: int = 0, user=Depends(get_c
     status_code=202,
 )
 @limiter.limit(settings.RATE_LIMIT_PIPELINE)
-async def run_pipeline(request: Request, req: PipelineRequest, user=Depends(get_current_user)):
+async def run_pipeline(
+    request: Request,
+    req: PipelineRequest,
+    user=Depends(require_feature("job_search")),
+    _scoring=Depends(require_feature("scoring")),
+    db: Session = Depends(get_db),
+):
     """Runs search -> score -> (optional) apply as a single Celery task.
     Poll GET /tasks/{task_id} for status and the combined result."""
     apply_params = None
     if req.apply:
+        check_feature(db, user, "auto_apply")
         if req.apply.browser_profile_dir:
             logger.warning("ignored client-supplied browser_profile_dir override")
         apply_params = build_apply_params(req.apply, user_id=user.id)

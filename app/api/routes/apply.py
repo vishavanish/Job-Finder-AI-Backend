@@ -4,7 +4,7 @@ import logging
 
 from fastapi import APIRouter, Depends, Request
 
-from app.core.auth import get_current_user
+from app.services.entitlements import require_feature
 from app.core.config import get_settings
 from app.core.rate_limit import limiter
 from app.core.task_dispatch import dispatch
@@ -19,7 +19,7 @@ settings = get_settings()
 
 @router.post("", response_model=TaskResponse, status_code=202)
 @limiter.limit(settings.RATE_LIMIT_APPLY)
-async def start_apply(request: Request, req: ApplyRequest, user=Depends(get_current_user)):
+async def start_apply(request: Request, req: ApplyRequest, user=Depends(require_feature("auto_apply"))):
     """Opens top-matched jobs in a real Playwright browser on the Celery
     worker and pre-fills LinkedIn Easy Apply forms — never auto-submits.
     Poll GET /tasks/{task_id} for status, and GET /applications for the

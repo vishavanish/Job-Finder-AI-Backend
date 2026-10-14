@@ -88,7 +88,29 @@ def create_run(*, user_id: str, total_keywords: int) -> str:
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
     r.expire(_meta_key(run_id), RUN_TTL_SECONDS)
+    r.sadd(_user_runs_key(user_id), run_id)
+    r.expire(_user_runs_key(user_id), RUN_TTL_SECONDS)
     return run_id
+
+
+def _user_runs_key(user_id: str) -> str:
+    return f"user_runs:{user_id}"
+
+
+def cancel_runs_for_user(user_id: str) -> int:
+    """Marks every live run of this user 'cancelled'; keyword tasks that
+    haven't started yet check is_cancelled() and skip their work."""
+    r = _redis()
+    cancelled = 0
+    for run_id in r.smembers(_user_runs_key(user_id)):
+        if r.exists(_meta_key(run_id)):
+            mark_run_status(run_id=run_id, status="cancelled", error="cancelled: account disabled")
+            cancelled += 1
+    return cancelled
+
+
+def is_cancelled(run_id: str) -> bool:
+    return _redis().hget(_meta_key(run_id), "status") == "cancelled"
 
 
 def record_scored_job(*, run_id: str, job: dict) -> None:

@@ -150,6 +150,10 @@ def search_and_score_keyword(
     progress_cb = _make_progress_cb(self, "search_and_score_keyword")
     settings = get_settings()
 
+    if pipeline_progress.is_cancelled(run_id):
+        pipeline_progress.increment_keyword_completed(run_id=run_id)
+        return {"keyword": keyword, "skipped": "run cancelled"}
+
     try:
         raw_jobs = job_sources.scrape_all(
             keywords=[keyword],
