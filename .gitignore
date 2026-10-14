@@ -1,5 +1,9 @@
 # ---- secrets & credentials ----
 .env
+.env.*
+!.env.example
+*.pem
+*.key
 credentials.json
 token_primary.json
 token_secondary.json

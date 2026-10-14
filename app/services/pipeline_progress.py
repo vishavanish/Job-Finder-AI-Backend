@@ -38,23 +38,14 @@ from datetime import datetime, timezone
 
 import redis
 
-from app.core.config import get_settings
+from app.core.redis_client import get_redis
 
 logger = logging.getLogger("job_finder_api.pipeline_progress")
 
 RUN_TTL_SECONDS = 60 * 60 * 6  # 6h — matches TASK_RESULT_TTL_SECONDS' spirit
 
-_client: redis.Redis | None = None
-
-
 def _redis() -> redis.Redis:
-    """Lazy singleton — module-level so every call in this process reuses
-    one connection pool instead of opening a new client per call."""
-    global _client
-    if _client is None:
-        settings = get_settings()
-        _client = redis.from_url(settings.REDIS_URL, decode_responses=True, ssl_cert_reqs=None)
-    return _client
+    return get_redis()
 
 
 def _jobs_key(run_id: str) -> str:
@@ -63,6 +54,26 @@ def _jobs_key(run_id: str) -> str:
 
 def _meta_key(run_id: str) -> str:
     return f"pipeline:{run_id}:meta"
+
+
+def _keys_key(run_id: str) -> str:
+    return f"pipeline:{run_id}:job_keys"
+
+
+def claim_job_key(*, run_id: str, job_key: str) -> bool:
+    """SADD — True only for the FIRST caller to claim this job_key in the
+    run. Keyword tasks call this before the LLM step, so a job that
+    several keywords (or sources) surface is scored once, not N times.
+
+    Limitation: across keyword tasks the first claimer wins, so an Indeed
+    copy claimed first blocks a later LinkedIn copy. Within one keyword,
+    scrape_all already prefers LinkedIn. Full LinkedIn-wins across runs
+    needs the canonical `jobs` table (CLAUDE.md P3)."""
+    r = _redis()
+    key = _keys_key(run_id)
+    is_new = bool(r.sadd(key, job_key))
+    r.expire(key, RUN_TTL_SECONDS)
+    return is_new
 
 
 def create_run(*, user_id: str, total_keywords: int) -> str:

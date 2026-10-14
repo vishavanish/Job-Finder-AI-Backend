@@ -79,7 +79,24 @@ class Settings(BaseSettings):
     @property
     def apply_queue(self) -> str:
         return f"apply{self.queue_suffix}"
-    
+
+    @property
+    def worker_queues(self) -> str:
+        """Comma-separated -Q list for a worker that serves every queue
+        the API publishes to. start.sh reads this so the worker can never
+        drift from the names routes dispatch to (the stuck-`pending` bug)."""
+        return f"{self.default_queue},{self.apply_queue}"
+
+    # ---- signup ----
+    # Interim switch until OTP-verified signup (CLAUDE.md 7.1) lands.
+    ALLOW_SELF_REGISTRATION: bool = True
+
+    # ---- secret references ----
+    # Master key for encrypting user-supplied API keys that tasks resolve
+    # by key_ref (see app/services/secret_refs.py). Generate with:
+    #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    SECRETS_MASTER_KEY: str = ""
+
     # ---- rate limiting ----
     RATE_LIMIT_PIPELINE: str = "5/minute"
     RATE_LIMIT_SEARCH: str = "10/minute"
@@ -194,6 +211,25 @@ def get_settings() -> Settings:
         logger.warning(
             "startup: JWT_SECRET_KEY is empty — set this in .env before any real use "
             "(tokens cannot be signed/verified without it)."
+        )
+
+    if not settings.SECRETS_MASTER_KEY:
+        if settings.ENVIRONMENT == "production":
+            raise RuntimeError(
+                "FATAL: ENVIRONMENT=production but SECRETS_MASTER_KEY is empty. "
+                "Generate one with: python -c \"from cryptography.fernet import Fernet; "
+                "print(Fernet.generate_key().decode())\""
+            )
+        logger.warning(
+            "startup: SECRETS_MASTER_KEY is empty — user-supplied API keys are "
+            "encrypted with a key derived from JWT_SECRET_KEY. Set a dedicated "
+            "key before any real use."
+        )
+
+    if settings.ALLOW_SELF_REGISTRATION and settings.ENVIRONMENT == "production":
+        logger.warning(
+            "startup: ALLOW_SELF_REGISTRATION=true in production — anyone can "
+            "create an account (no email verification until OTP signup lands)."
         )
 
     if not settings.api_keys_list:

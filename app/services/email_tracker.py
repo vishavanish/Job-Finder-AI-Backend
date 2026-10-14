@@ -125,6 +125,16 @@ def _passes_prefilter(sender: str, subject: str, body_text: str) -> bool:
     return any(hint in haystack for hint in _SUBJECT_BODY_HINTS)
 
 
+def message_received_at(msg: dict) -> datetime:
+    """When Gmail received the message (internalDate, epoch ms). Falls
+    back to now only if Gmail omitted it, so ordering and matching use
+    the real date rather than the poll time."""
+    internal_ms = msg.get("internalDate")
+    if internal_ms:
+        return datetime.fromtimestamp(int(internal_ms) / 1000, tz=timezone.utc)
+    return datetime.now(timezone.utc)
+
+
 def fetch_candidates_for_account(
     account_label: str,
     *,
@@ -180,7 +190,7 @@ def fetch_candidates_for_account(
             subject=subject,
             snippet=snippet,
             body_text=body_text,
-            received_at=datetime.now(timezone.utc),
+            received_at=message_received_at(msg),
         ))
 
     progress(f"[{account_label}] {len(candidates)}/{len(message_ids)} messages passed pre-filter")
