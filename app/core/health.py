@@ -17,8 +17,11 @@ def check_redis() -> tuple[bool, str]:
     try:
         client = redis.from_url(settings.REDIS_URL, socket_timeout=5)
         client.ping()
-        queue_len = client.llen("celery")
-        return True, f"reachable, {queue_len} task(s) queued on 'celery'"
+        depths = ", ".join(
+            f"{client.llen(q)} queued on '{q}'"
+            for q in (settings.default_queue, settings.apply_queue)
+        )
+        return True, f"reachable, {depths}"
     except Exception as e:  # noqa: BLE001
         return False, f"unreachable: {e}"
     

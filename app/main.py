@@ -5,6 +5,7 @@ FastAPI entrypoint. Run with:
     uvicorn app.main:app --reload --port 8000
 
 Interactive docs at /docs (Swagger) and /redoc once running.
+Apply migrations first: `alembic upgrade head`.
 """
 import logging
 import time
@@ -18,11 +19,12 @@ from app.api.routes import api_router
 from app.core.config import get_settings
 from app.core.health import run_health_check
 from app.core.rate_limit import limiter, rate_limit_exceeded_handler
-from app.core.db import Base, engine
-from app.models import user , application
+from app import models  # noqa: F401 — registers every table/mapper before first use
 
 settings = get_settings()  # also runs startup config validation (logs warnings)
-Base.metadata.create_all(bind=engine)
+# Schema is owned by Alembic — run `alembic upgrade head` before starting
+# (start.sh does). No create_all() here: it can't add columns to existing
+# tables, so it would silently leave the DB behind the models.
 # ---- logging: console + rotating file, so logs survive beyond terminal
 # scrollback and don't grow unbounded on disk ----
 logging.basicConfig(

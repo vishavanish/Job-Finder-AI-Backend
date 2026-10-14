@@ -33,7 +33,8 @@ from app.core.config import get_settings
 from app.services import browser_apply, company_ats_sources, job_sources, scorer
 # --- add near the top, alongside existing imports ---
 from celery import group, chord
-from app.services import pipeline_progress
+from app.services import pipeline_progress, secret_refs
+from app.services.job_dedupe import job_key
 from app.services.scorer import (
     keyword_score, _build_user_prompt, _parse_and_apply_scores,
     LLM_SYSTEM_PROMPT_TEMPLATE,
@@ -165,18 +166,25 @@ def search_and_score_keyword(
             manual_naukri_jobs=[],  # applied once at the top level, not per-keyword — avoids duplicate inserts
             enable_naukri_apify=search_params.get("enable_naukri_apify", False),
             apify_naukri_actor_id=search_params.get("apify_naukri_actor_id", ""),
-            apify_api_token=search_params.get("apify_api_token") or "",
+            apify_api_token=secret_refs.resolve(search_params.get("apify_api_token_ref"), fallback=settings.APIFY_API_TOKEN),
             progress=progress_cb,
         )
 
         skills = score_params["skills"]
         min_pct = score_params.get("keyword_prefilter_min_pct", 30)
-        gemini_api_key = score_params.get("gemini_api_key") or settings.GEMINI_API_KEY
-        groq_api_key = score_params.get("groq_api_key") or settings.GROQ_API_KEY
-        hf_api_key = score_params.get("hf_api_key") or settings.HF_API_KEY
+        gemini_api_key = secret_refs.resolve(score_params.get("gemini_api_key_ref"), fallback=settings.GEMINI_API_KEY)
+        groq_api_key = secret_refs.resolve(score_params.get("groq_api_key_ref"), fallback=settings.GROQ_API_KEY)
+        hf_api_key = secret_refs.resolve(score_params.get("hf_api_key_ref"), fallback=settings.HF_API_KEY)
 
         scored_count = 0
+        duplicate_count = 0
         for job in raw_jobs:
+            # Claim before any scoring: another keyword task in this run
+            # may already have scored the same job (CLAUDE.md 6.2 #7).
+            if not pipeline_progress.claim_job_key(run_id=run_id, job_key=job_key(job)):
+                duplicate_count += 1
+                continue
+
             job["keyword_score"] = keyword_score(job.get("description", ""), skills)
             if job["keyword_score"] < min_pct:
                 continue  # cheap prefilter still applies — no point burning an LLM call on a clear non-match
@@ -201,8 +209,10 @@ def search_and_score_keyword(
             scored_count += 1
             progress_cb(f"'{keyword}': scored+kept {scored['title']} ({scored['llm_score']})")
 
+        if duplicate_count:
+            progress_cb(f"'{keyword}': skipped {duplicate_count} job(s) already scored in this run")
         pipeline_progress.increment_keyword_completed(run_id=run_id)
-        return {"keyword": keyword, "raw_found": len(raw_jobs), "kept": scored_count}
+        return {"keyword": keyword, "raw_found": len(raw_jobs), "duplicates": duplicate_count, "kept": scored_count}
 
     except Exception as e:  # noqa: BLE001
         logger.exception("search_and_score_keyword failed for run_id=%s keyword=%s", run_id, keyword)
@@ -267,7 +277,7 @@ def search_task(self, search_params: dict) -> dict:
         manual_naukri_jobs=search_params.get("manual_naukri_jobs", []),
         enable_naukri_apify=search_params.get("enable_naukri_apify", False),
         apify_naukri_actor_id=search_params.get("apify_naukri_actor_id", ""),
-        apify_api_token=search_params.get("apify_api_token") or "",
+        apify_api_token=secret_refs.resolve(search_params.get("apify_api_token_ref"), fallback=settings.APIFY_API_TOKEN),
         progress=progress_cb,
     )
     return {"jobs": jobs, "total_raw": len(jobs), "total_usable": len(jobs)}
@@ -288,9 +298,9 @@ def score_task(self, jobs: list[dict], score_params: dict) -> dict:
         gemini_model=score_params.get("gemini_model", "gemini-2.5-flash"),
         groq_model=score_params.get("groq_model", "openai/gpt-oss-120b"),
         hf_model=score_params.get("hf_model", "Qwen/Qwen3-8B"),
-        gemini_api_key=score_params.get("gemini_api_key") or settings.GEMINI_API_KEY,
-        groq_api_key=score_params.get("groq_api_key") or settings.GROQ_API_KEY,
-        hf_api_key=score_params.get("hf_api_key") or settings.HF_API_KEY,
+        gemini_api_key=secret_refs.resolve(score_params.get("gemini_api_key_ref"), fallback=settings.GEMINI_API_KEY),
+        groq_api_key=secret_refs.resolve(score_params.get("groq_api_key_ref"), fallback=settings.GROQ_API_KEY),
+        hf_api_key=secret_refs.resolve(score_params.get("hf_api_key_ref"), fallback=settings.HF_API_KEY),
         progress=progress_cb,
     )
 
@@ -356,7 +366,7 @@ def pipeline_task(self, search_params: dict, score_params: dict, apply_params: d
         manual_naukri_jobs=search_params.get("manual_naukri_jobs", []),
         enable_naukri_apify=search_params.get("enable_naukri_apify", False),
         apify_naukri_actor_id=search_params.get("apify_naukri_actor_id", ""),
-        apify_api_token=search_params.get("apify_api_token") or "",
+        apify_api_token=secret_refs.resolve(search_params.get("apify_api_token_ref"), fallback=settings.APIFY_API_TOKEN),
         progress=progress_cb,
     )
 
@@ -377,9 +387,9 @@ def pipeline_task(self, search_params: dict, score_params: dict, apply_params: d
         gemini_model=score_params.get("gemini_model", "gemini-2.5-flash"),
         groq_model=score_params.get("groq_model", "openai/gpt-oss-120b"),
         hf_model=score_params.get("hf_model", "Qwen/Qwen3-8B"),
-        gemini_api_key=score_params.get("gemini_api_key") or settings.GEMINI_API_KEY,
-        groq_api_key=score_params.get("groq_api_key") or settings.GROQ_API_KEY,
-        hf_api_key=score_params.get("hf_api_key") or settings.HF_API_KEY,
+        gemini_api_key=secret_refs.resolve(score_params.get("gemini_api_key_ref"), fallback=settings.GEMINI_API_KEY),
+        groq_api_key=secret_refs.resolve(score_params.get("groq_api_key_ref"), fallback=settings.GROQ_API_KEY),
+        hf_api_key=secret_refs.resolve(score_params.get("hf_api_key_ref"), fallback=settings.HF_API_KEY),
         progress=progress_cb,
     )
 
@@ -400,6 +410,7 @@ def pipeline_task(self, search_params: dict, score_params: dict, apply_params: d
             pause_between_tabs_sec=apply_params.get("pause_between_tabs_sec", 2),
             browser_profile_dir=apply_params.get("browser_profile_dir") or str(settings.BROWSER_PROFILE_DIR),
             applications_log_path=settings.OUTPUT_DIR / "applications_log.csv",
+            user_id=apply_params["user_id"],
             headless=actual_headless,
             require_auto_apply_capable=apply_params.get("require_auto_apply_capable", True), 
             progress=progress_cb,

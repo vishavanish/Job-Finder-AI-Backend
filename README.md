@@ -13,7 +13,7 @@ can drive different searches per call without redeployment.
 
 - **FastAPI** — REST API layer, JWT auth, per-user scoping
 - **Celery + Redis (Upstash)** — background task queue for search/score/apply/pipeline
-- **SQLite** — application tracking + user accounts
+- **Postgres (Supabase)** — application tracking + user accounts; schema managed by **Alembic** (`alembic upgrade head`)
 - **Playwright** — browser automation for opening/pre-filling job applications
 - **Gemini / Hugging Face (Qwen)** — LLM-based job-fit scoring, with automatic fallback
 - **Gmail API** — polls one or more inboxes to auto-detect application status changes

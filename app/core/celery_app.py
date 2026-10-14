@@ -27,7 +27,7 @@ celery_app.conf.update(
     accept_content=["json"],
     result_expires=settings.TASK_RESULT_TTL_SECONDS,
     task_track_started=True,
-    task_default_queue="default",
+    task_default_queue=settings.default_queue,
     broker_transport_options={
         "visibility_timeout": 3600,
         "socket_keepalive": True,
@@ -38,7 +38,7 @@ celery_app.conf.update(
 )
 
 # rediss:// (TLS) connections to Upstash require explicit SSL config on
-# BOTH the broker and result backend connections. redis.from_url(..., ssl_cert_reqs=None)
+# BOTH the broker and result backend connections. redis.from_url(..., )
 # in health.py works because it's a raw redis-py client — that kwarg does NOT
 # propagate to Celery's own connection pool. Without this block, the worker's
 # broker connection can fail cert verification silently and just never receive tasks.
