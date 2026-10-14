@@ -27,8 +27,21 @@ def _owner_key(task_id: str) -> str:
     return f"task_owner:{task_id}"
 
 
+def _user_tasks_key(user_id: str) -> str:
+    return f"user_tasks:{user_id}"
+
+
 def record_owner(task_id: str, user_id: str) -> None:
-    get_redis().set(_owner_key(task_id), user_id, ex=get_settings().TASK_RESULT_TTL_SECONDS)
+    ttl = get_settings().TASK_RESULT_TTL_SECONDS
+    r = get_redis()
+    r.set(_owner_key(task_id), user_id, ex=ttl)
+    # Per-user index so disabling a user can cancel everything they started.
+    r.sadd(_user_tasks_key(user_id), task_id)
+    r.expire(_user_tasks_key(user_id), ttl)
+
+
+def task_ids_for_user(user_id: str) -> list[str]:
+    return list(get_redis().smembers(_user_tasks_key(user_id)))
 
 
 def owner_of(task_id: str) -> str | None:

@@ -25,6 +25,9 @@ os.environ.update({
     "JWT_SECRET_KEY": "test-jwt-secret",
     "SECRETS_MASTER_KEY": Fernet.generate_key().decode(),
     "ALLOW_SELF_REGISTRATION": "true",
+    "REFRESH_COOKIE_SECURE": "false",  # TestClient talks plain http
+    "EMAIL_BACKEND": "console",
+    "GOOGLE_CLIENT_IDS": "test-client-id.apps.googleusercontent.com",
     "GEMINI_API_KEY": "",
     "GROQ_API_KEY": "",
     "HF_API_KEY": "",
@@ -72,6 +75,28 @@ def dispatched(monkeypatch):
     return calls
 
 
+@pytest.fixture(autouse=True)
+def revoked_tasks(monkeypatch):
+    """Celery revoke() needs a broker; record the ids instead."""
+    from app.core.celery_app import celery_app
+    revoked: list[str] = []
+    monkeypatch.setattr(celery_app.control, "revoke", lambda task_id, **kw: revoked.append(task_id))
+    return revoked
+
+
+@pytest.fixture(autouse=True)
+def _reset_feature_flags():
+    yield
+    from app.core.db import SessionLocal
+    from app.models.admin import FeatureFlag
+    db = SessionLocal()
+    try:
+        db.query(FeatureFlag).delete()
+        db.commit()
+    finally:
+        db.close()
+
+
 @pytest.fixture(scope="session")
 def app():
     from app.main import app as fastapi_app
@@ -89,16 +114,41 @@ def client(app):
 _user_counter = 0
 
 
+def _next_email() -> str:
+    global _user_counter
+    _user_counter += 1
+    return f"user{_user_counter}@example.com"
+
+
 @pytest.fixture
 def make_user(client):
     """Registers a fresh user and returns (user_id, auth headers)."""
     def _make() -> tuple[str, dict]:
-        global _user_counter
-        _user_counter += 1
-        resp = client.post("/api/v1/auth/register", json={
-            "email": f"user{_user_counter}@example.com", "password": "password123",
-        })
+        resp = client.post("/api/v1/auth/register", json={"email": _next_email(), "password": "password123"})
         assert resp.status_code == 201, resp.text
         body = resp.json()
         return body["user"]["id"], {"Authorization": f"Bearer {body['access_token']}"}
+    return _make
+
+
+def set_role(user_id: str, role: str, manager_id: str | None = None) -> None:
+    from app.core.db import SessionLocal
+    from app.models.user import User
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        user.role = role
+        if manager_id is not None:
+            user.manager_id = manager_id
+        db.commit()
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def make_admin(make_user):
+    def _make() -> tuple[str, dict]:
+        user_id, headers = make_user()
+        set_role(user_id, "admin")
+        return user_id, headers
     return _make

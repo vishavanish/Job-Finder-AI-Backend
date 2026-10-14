@@ -126,7 +126,36 @@ class Settings(BaseSettings):
     TASK_RESULT_TTL_SECONDS: int = 60 * 60 * 6  # 6h
 
     JWT_SECRET_KEY: str = ""
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
+    # Short-lived access token + rotating refresh cookie (CLAUDE.md 7.1).
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 30
+    REFRESH_COOKIE_NAME: str = "jf_refresh"
+    REFRESH_COOKIE_SECURE: bool = True
+    # "none" because the frontend (Vercel) and API live on different sites.
+    REFRESH_COOKIE_SAMESITE: str = "none"
+
+    # ---- sign-in: Google + email OTP ----
+    GOOGLE_CLIENT_IDS: str = ""  # comma-separated OAuth client ids accepted as `aud`
+    OTP_TTL_SECONDS: int = 600
+    OTP_MAX_ATTEMPTS: int = 5
+    OTP_RESEND_COOLDOWN_SECONDS: int = 60
+    OTP_MAX_REQUESTS_PER_HOUR: int = 5
+    RATE_LIMIT_AUTH: str = "10/minute"
+
+    # ---- outgoing email (OTP codes) ----
+    # "console" logs the code (development only — refused in production);
+    # "smtp" works with Resend, SES, Gmail or any SMTP relay.
+    EMAIL_BACKEND: str = "console"
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = ""
+    SMTP_STARTTLS: bool = True
+
+    @property
+    def google_client_ids_list(self) -> list[str]:
+        return [x.strip() for x in self.GOOGLE_CLIENT_IDS.split(",") if x.strip()]
 
 
 @lru_cache

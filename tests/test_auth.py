@@ -35,7 +35,9 @@ def test_disabled_user_is_locked_out_immediately(client, make_user):
     finally:
         db.close()
 
-    assert client.get("/api/v1/applications", headers=headers).status_code == 401
+    resp = client.get("/api/v1/applications", headers=headers)
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["code"] == "account_disabled"
 
 
 def test_protected_routes_reject_missing_token(client):

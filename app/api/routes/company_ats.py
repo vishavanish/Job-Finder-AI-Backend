@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from app.core.auth import get_current_user
+from app.services.entitlements import require_feature
 from app.core.config import get_settings
 from app.core.rate_limit import limiter
 from app.core.task_dispatch import dispatch
@@ -60,7 +60,7 @@ def _reject_private_targets(req: CompanyAtsRequest) -> None:
     status_code=202,
 )
 @limiter.limit(settings.RATE_LIMIT_SEARCH)
-async def fetch_company_ats(request: Request, req: CompanyAtsRequest, user=Depends(get_current_user)):
+async def fetch_company_ats(request: Request, req: CompanyAtsRequest, user=Depends(require_feature("ats_discovery"))):
     """Fetches jobs from Greenhouse/Lever/SmartRecruiters/Workday, or a
     custom company career page.
 

@@ -8,3 +8,4 @@ the original bug this pattern fixes (NoReferencedTableError).
 from app.models.user import User  # noqa: F401
 from app.models.application import Application, ApplicationStatusEvent  # noqa: F401
 from app.models.pipeline_run import PipelineRun, PipelineRunJob  # noqa: F401
+from app.models.admin import AuditLog, FeatureFlag, UserEntitlement  # noqa: F401

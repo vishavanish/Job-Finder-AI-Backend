@@ -178,13 +178,16 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Apply | `routes/apply.py`, `services/browser_apply.py` | Playwright, LinkedIn Easy Apply prefill (`_FILL_DISPATCH`, `AUTO_APPLY_CAPABLE_SOURCES = {"LinkedIn"}`), never auto-submits, capability filter; client-supplied `browser_profile_dir` is ignored (`task_params.build_apply_params`). The frontend calls `POST /apply/{id}/close`, which the backend does **not** implement. |
 | Tracking | `routes/applications.py`, `services/applications_store.py` | `record_status()` single write path (upsert + history event) |
 | Gmail | `services/email_tracker.py`, `scripts/gmail_authorize.py` | Multi-account polling via `token_<label>.json` files, keyword prefilter. Classifier, matching and status update are **not built**; no Celery beat schedule exists yet. |
-| Auth | `routes/auth.py`, `core/auth.py` | Email+password register/login, bcrypt, HS256 JWT (7-day, no refresh). `get_current_user` rejects inactive users. A legacy `require_api_key` dependency exists but is unused by routes. |
+| Auth | `routes/auth.py`, `core/auth.py`, `services/sessions.py`, `services/otp.py`, `services/accounts.py`, `providers/google_identity.py`, `providers/email.py` | Email OTP, Google ID-token sign-in, legacy password login. 15-min access JWT + rotating httpOnly refresh cookie (reuse ⇒ all sessions revoked). Revocation = bump `users.session_version` (stamped into every token). Disabled accounts get `403 {code: "account_disabled"}` on every path. `GET /auth/me` includes per-feature entitlements with `quota_remaining`. |
+| RBAC & admin | `core/auth.require_role`, `routes/admin.py`, `services/user_admin.py` | Roles user/manager/admin. Admin: users CRUD, roles, teams, flags, audit. Managers: only their team (list, enable/disable, reset sessions, entitlements within their own limits). Disabling revokes sessions and cancels the user's tasks and streaming runs. |
+| Entitlements & flags | `services/entitlements.py`, `services/feature_flags.py`, `models/admin.py` | `require_feature("x")` on every feature route (403 off / 429 over daily quota / 503 kill switch). Flags: `invite_only`, `auto_apply_enabled`. |
+| Audit | `services/audit.py`, `models/admin.AuditLog` | Append-only; written in the same transaction as the change. `GET /admin/audit`. |
 | Tasks | `routes/tasks.py`, `core/task_dispatch.py` | Every route dispatches through `task_dispatch.dispatch()`, which records `task_id → user_id` in Redis; `GET /tasks/{id}` and `cancel` 404 for anyone but the owner. |
 | Task params & secrets | `services/task_params.py`, `services/secret_refs.py` | One builder per request type; user API keys become encrypted `*_key_ref`s resolved in the worker. |
 | Shared Redis | `core/redis_client.py` | One client per process (`get_redis()`); tests swap in fakeredis. |
 | Frontend | separate repo `Job-Finder-AI-Frontend` | React 18 + Vite + react-router, plain JS (no TypeScript), axios client with hardcoded `API_URL`. Pages: Home, Keywords, Skills, ATS Targets, Providers, Applications, Profile, Login. Deployed on Vercel. |
 
-**Migrations & tests (added in Phase 0):** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
+**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
 
 **CI:** `.github/workflows/tests.yml` runs the tests on every push and pull request (no secrets needed).
 
@@ -216,7 +219,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | 6.2 #1, #8 task ownership / 404 for unknown ids | ✅ done (`task_dispatch`, `routes/tasks.py`) |
 | 6.2 #2 secrets out of Celery args | ✅ interim done (`secret_refs`, Redis + Fernet, TTL = `TASK_RESULT_TTL_SECONDS`). Durable store + BYOK UI is P2. |
 | 6.2 #3 Groq forwarded | ✅ done (`groq_model` / `groq_api_key` on both score request models) |
-| 6.2 #4 signup | ⚠️ partial: `ALLOW_SELF_REGISTRATION` switch (default `true`). OTP signup is P1. |
+| 6.2 #4 signup | ✅ P1: OTP-verified signup + admin `invite_only` flag (default = inverse of `ALLOW_SELF_REGISTRATION`). |
 | 6.2 #5 `record_status` by `job_key` | ✅ done (+ migration `0002`) |
 | 6.2 #6 email date | ✅ `internalDate` used. Token files → encrypted DB is P5. |
 | 6.2 #7 dedupe before scoring | ✅ done (`pipeline_progress.claim_job_key`). Limitation: across keyword tasks the first claimer wins, so an Indeed copy claimed first is kept over a later LinkedIn copy — fixed properly by the canonical `jobs` table in P3. |
@@ -224,13 +227,34 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | 6.2 #10, #11, #12 | ✅ done |
 | Stuck `pending` | ✅ fixed in code (`worker_queues`, `task_default_queue`, `start.sh`); confirm on the deployed worker. |
 | Alembic baseline + tests | ✅ done (31 tests) |
-| CI green | ⏳ workflow added (`.github/workflows/tests.yml`); runs once the `phase-0-hardening` branch is pushed |
+| CI green | ✅ passed on GitHub Actions for `phase-0-hardening` |
 
 **Operational changes introduced in P0**
 - New env: `SECRETS_MASTER_KEY` (Fernet key) — **required when `ENVIRONMENT=production`** (startup refuses without it). `ALLOW_SELF_REGISTRATION` (bool).
 - Run `alembic upgrade head` (from the repo root) before starting the API on every deploy. `start.sh` does this; systemd units must too.
 - Worker must be started with `-Q "$(python -c 'from app.core.config import get_settings; print(get_settings().worker_queues)')"` (what `start.sh` does).
 - Run tests: `pip install -r requirements-dev.txt && python -m pytest`.
+
+### 6.4 Phase 1 status (branch `phase-1-identity`)
+
+| Item | State |
+|------|-------|
+| Email OTP (7.1 rules) | ✅ CSPRNG 6 digits, HMAC-only in Redis (keys hash the email), 10-min TTL, single use, 5 attempts, 60 s cooldown, hourly cap per email + per-IP rate limit, identical response for unknown/uninvited emails |
+| Google sign-in | ✅ ID token verified by `google-auth` (signature, `iss`, `exp`, `aud` ∈ `GOOGLE_CLIENT_IDS`) + `email_verified`; links to an existing account by email |
+| Sessions | ✅ 15-min access + rotating refresh cookie, reuse detection, logout, `session_version` revocation |
+| RBAC, entitlements, quotas, kill switch | ✅ |
+| Admin: users, managers/teams, entitlements, flags, audit log | ✅ API only — no UI yet (frontend F1) |
+| Disabled user locked out immediately | ✅ next request gets 403 `account_disabled`; refresh refused; tasks revoked; streaming runs cancelled |
+| Every admin action audited | ✅ (`user.create/update/enable/disable/revoke_sessions`, `entitlement.set/reset`, `flag.set`, `user.signup`, `auth.login`, `auth.password_set`, `auth.refresh_token_reuse`, `user.role_set_cli`) |
+| Tests | ✅ 77 total |
+| Not in P1 | Usage view per user (needs the P2 usage ledger), "delete data" (data-rights work), bulk plans/templates, maintenance-mode flag |
+
+**Operational changes introduced in P1**
+- Migration `0003` (run `alembic upgrade head`).
+- **Access tokens now last 15 minutes.** The frontend must call `POST /auth/refresh` (with `credentials: "include"`) on 401 and keep the access token in memory. Until it does, set `ACCESS_TOKEN_EXPIRE_MINUTES=10080` to keep the old 7-day behaviour.
+- Refresh cookie is `SameSite=None; Secure` (frontend and API are cross-site); CORS already allows credentials for the Vercel origin.
+- New env: `GOOGLE_CLIENT_IDS`, `EMAIL_BACKEND` (`console` dev only — OTP returns 503 in production with it), `SMTP_HOST/PORT/USERNAME/PASSWORD/FROM/STARTTLS`, OTP tuning (`OTP_*`), `RATE_LIMIT_AUTH`, `REFRESH_*`.
+- First admin: `python -m app.scripts.set_role you@example.com admin` (audited; creates the account if needed).
 
 ---
 
@@ -251,7 +275,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 - Constant-time comparison.
 - Delivery via a transactional email provider (SES, Resend, SMTP) `[ASSUMPTION: provider to be chosen]`.
 
-**Sessions:** short-lived access JWT (15 min) + rotating refresh token (httpOnly, Secure, SameSite cookie). Revocation list in Redis. `get_current_user` rejects `is_active = false` on every request, so disabling a user takes effect immediately.
+**Sessions:** short-lived access JWT (15 min) + rotating refresh token (httpOnly, Secure, SameSite cookie). Refresh tokens are stored hashed in Redis; revocation bumps `users.session_version`, which every token carries. `get_current_user` rejects `is_active = false` on every request, so disabling a user takes effect immediately.
 
 **Gmail connection is a separate consent.** Signing in with Google does *not* grant mailbox access. Reading replies uses incremental authorization of `gmail.readonly` only when the user enables tracking (Section 7.8).
 
@@ -810,9 +834,9 @@ UX rules: show loading/empty/error states everywhere; never block on long tasks;
 
 ## 17. Open questions (confirm before building)
 
-1. **Hosting model:** multi-user SaaS or self-hosted personal tool? (Decides the LinkedIn runner — cloud vs Local Apply Agent.)
+1. **Hosting model:** multi-user SaaS or self-hosted personal tool? (Decides the LinkedIn runner — cloud vs Local Apply Agent.) *P1 was built assuming multi-user SaaS.*
 2. **"Recruitrehouse":** is this **Recruitee**, or another ATS? `[ASSUMPTION: Recruitee]`
-3. **OTP email provider:** SES, Resend, or SMTP?
+3. **OTP email provider:** SES, Resend, or SMTP? *P1 ships a provider-neutral SMTP sender; any of these works via SMTP settings.*
 4. **Plans/billing:** free vs paid plans now, or entitlements only?
 5. **Markets:** default is India (`country_indeed="India"`, Naukri). Other regions at launch?
 6. **Voice providers:** which STT/TTS vendors and budget per session?
