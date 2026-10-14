@@ -28,15 +28,13 @@ TaskStatus enum, so here's the mapping and *why*:
                                              caller's point of view
   REVOKED                -> FAILED
 
-UNKNOWN TASK IDS: Celery's AsyncResult never 404s — a garbage/typo'd id
-comes back with state=PENDING same as a real task that's just queued and
-hasn't been picked up yet. We can't reliably distinguish "queued, not
-started" from "never existed" purely from the result backend. This is a
-real (accepted) trade-off of moving off the SQLite-backed TaskManager,
-which *could* 404 confidently because it had its own authoritative table
-of task ids it created. Documented in the route docstring below rather
-than hidden — do not build anything downstream that depends on this
-endpoint 404ing for bad ids.
+OWNERSHIP / UNKNOWN TASK IDS: Celery's AsyncResult never 404s — a
+garbage id comes back PENDING just like a queued task. So every dispatch
+goes through app.core.task_dispatch.dispatch(), which records
+task_id -> user_id in Redis first. Both endpoints here 404 unless that
+record names the caller: unknown ids, other users' ids, and ids whose
+ownership record expired (TASK_RESULT_TTL_SECONDS, same lifetime as the
+result itself) all look identical, so task ids can't be probed.
 
 PROGRESS TEXT: our tasks call task.update_state(state="PROGRESS",
 meta={"progress": "..."}) from _progress_reporter. When state is
@@ -59,11 +57,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import logging
 from celery.result import AsyncResult
-from fastapi import APIRouter
-from fastapi import Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.auth import get_current_user
 from app.core.celery_app import celery_app
+from app.core.task_dispatch import owner_of
 from app.models.schemas import TaskResponse, TaskStatus
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -111,13 +109,20 @@ def _to_task_response(task_id: str) -> TaskResponse:
     )
 
 
-@router.get("/{task_id}", response_model=TaskResponse)
-async def get_task(task_id: str):
+def _require_owner(task_id: str, user) -> None:
+    if owner_of(task_id) != user.id:
+        raise HTTPException(404, "no task found with this id")
 
+
+@router.get("/{task_id}", response_model=TaskResponse)
+async def get_task(task_id: str, user=Depends(get_current_user)):
+    _require_owner(task_id, user)
     return _to_task_response(task_id)
 
 
 @router.post("/{task_id}/cancel", status_code=200)
 async def cancel_task(task_id: str, user=Depends(get_current_user)):
+    _require_owner(task_id, user)
     celery_app.control.revoke(task_id, terminate=True, signal="SIGTERM")
+    logger.info("[task=%s] cancel requested by user=%s", task_id, user.id)
     return {"task_id": task_id, "status": "cancel_requested"}

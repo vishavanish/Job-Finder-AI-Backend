@@ -13,6 +13,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.db import get_db
 from app.core.auth import hash_password, verify_password, create_access_token
 from app.models.user import User
@@ -24,16 +25,17 @@ logger = logging.getLogger("job_finder_api.auth")
 
 @router.post("/register", response_model=TokenResponse, status_code=201)
 def register(req: RegisterRequest, db: Session = Depends(get_db)):
+    if not get_settings().ALLOW_SELF_REGISTRATION:
+        logger.warning("blocked self-registration attempt (ALLOW_SELF_REGISTRATION=false)")
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Self-registration is disabled. Please contact the admin to request an account.",
+        )
+
     normalized_email = req.email.lower().strip()
     existing = db.query(User).filter(User.email == normalized_email).first()
     if existing:
         raise HTTPException(status.HTTP_409_CONFLICT, "An account with this email already exists.")
-    
-    # logger.warning("blocked self-registration attempt for email=%s", req.email.lower().strip())
-    # raise HTTPException(
-    #     status.HTTP_403_FORBIDDEN,
-    #     "Self-registration is disabled. Please contact the admin to request an account.",
-    # )
 
     user = User(
         email=normalized_email,

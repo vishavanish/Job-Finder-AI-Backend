@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from app.core.auth import get_current_user
 from app.core.config import get_settings
 from app.core.rate_limit import limiter
-from app.core.task_dispatch import pending_response
+from app.core.task_dispatch import dispatch
 from app.models.schemas import CompanyAtsRequest, TaskResponse
 from app.core.celery_tasks import company_ats_task
 
@@ -58,10 +58,9 @@ def _reject_private_targets(req: CompanyAtsRequest) -> None:
     "/fetch",
     response_model=TaskResponse,
     status_code=202,
-    dependencies=[Depends(get_current_user)],
 )
 @limiter.limit(settings.RATE_LIMIT_SEARCH)
-async def fetch_company_ats(request: Request, req: CompanyAtsRequest):
+async def fetch_company_ats(request: Request, req: CompanyAtsRequest, user=Depends(get_current_user)):
     """Fetches jobs from Greenhouse/Lever/SmartRecruiters/Workday, or a
     custom company career page.
 
@@ -78,8 +77,9 @@ async def fetch_company_ats(request: Request, req: CompanyAtsRequest):
     _reject_private_targets(req)
     targets = [t.model_dump() for t in req.targets]
 
-    async_result = company_ats_task.apply_async(
-        args=[targets, req.request_delay_sec], queue=settings.default_queue
+    response = dispatch(
+        company_ats_task, args=[targets, req.request_delay_sec],
+        queue=settings.default_queue, user_id=user.id,
     )
-    logger.info("[task=%s] dispatched to 'default' queue", async_result.id)
-    return pending_response(async_result)
+    logger.info("[task=%s] dispatched to '%s' for user=%s", response.task_id, settings.default_queue, user.id)
+    return response

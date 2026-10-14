@@ -16,6 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.db import SessionLocal
 from app.models.application import Application, ApplicationStatusEvent
+from app.services.job_dedupe import job_key as compute_job_key
 
 logger = logging.getLogger("job_finder_api.applications_store")
 
@@ -28,8 +29,11 @@ def record_status(
     status_source: str = "browser_apply",
     note: str | None = None,
 ) -> Application:
-    """Upserts the current-state row for (user_id, job['url']) and appends
-    an immutable history event in the same transaction.
+    """Upserts the current-state row for this user's job and appends an
+    immutable history event in the same transaction. The row is found by
+    job URL first, then by job_key — so the same job reached from another
+    source updates the existing row (its URL is kept in alias_urls)
+    instead of creating a second application.
 
     Raises SQLAlchemyError on failure — callers must not swallow this;
     a failed status write should surface, not disappear silently (this
@@ -37,17 +41,26 @@ def record_status(
     if not job.get("url"):
         raise ValueError("record_status requires job['url'] to identify the application")
 
+    key = compute_job_key(job)
     db = SessionLocal()
     try:
         existing = (
             db.query(Application)
             .filter(Application.user_id == user_id, Application.job_url == job["url"])
             .first()
+        ) or (
+            db.query(Application)
+            .filter(Application.user_id == user_id, Application.job_key == key)
+            .first()
         )
 
         if existing:
             existing.status = status
             existing.status_source = status_source
+            existing.job_key = existing.job_key or key
+            if job["url"] != existing.job_url and job["url"] not in (existing.alias_urls or []):
+                # reassign, not append — JSON columns don't track in-place mutation
+                existing.alias_urls = [*(existing.alias_urls or []), job["url"]]
             row = existing
         else:
             row = Application(
@@ -56,6 +69,7 @@ def record_status(
                 company=job.get("company", ""),
                 source=job.get("source", ""),
                 job_url=job["url"],
+                job_key=key,
                 status=status,
                 status_source=status_source,
             )

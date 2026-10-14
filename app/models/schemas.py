@@ -232,8 +232,10 @@ class ScoreRequestPartial(BaseModel):
     llm_top_n_to_rank: int = Field(40, ge=1, le=200)
     llm_min_score_to_keep: float = Field(70, ge=0, le=100)
     gemini_model: str = "gemini-2.5-flash"
+    groq_model: str = "openai/gpt-oss-120b"
     hf_model: str = "Qwen/Qwen3-8B"
     gemini_api_key: Optional[SecretStr] = None
+    groq_api_key: Optional[SecretStr] = None
     hf_api_key: Optional[SecretStr] = None
 
 

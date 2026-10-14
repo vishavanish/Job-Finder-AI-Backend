@@ -15,6 +15,8 @@ from typing import Any, Callable
 import pandas as pd
 from jobspy import scrape_jobs
 
+from app.services import job_dedupe
+
 SOURCE_DISPLAY_NAMES = {"linkedin": "LinkedIn", "indeed": "Indeed", "naukri": "Naukri"}
 
 NoOpProgress: Callable[[str], None] = lambda msg: None
@@ -146,25 +148,10 @@ def _validate_jobs(jobs: list[dict], progress: Callable[[str], None]) -> list[di
     return valid
 
 
-def _job_key(job: dict) -> str:
-    url = job.get("url", "").strip().lower()
-    if url:
-        return url
-    return "|".join([
-        job.get("title", "").strip().lower(),
-        job.get("company", "").strip().lower(),
-        job.get("location", "").strip().lower(),
-    ])
-
-
 def _deduplicate_jobs(jobs: list[dict], progress: Callable[[str], None]) -> list[dict]:
-    seen, unique = set(), []
-    for job in jobs:
-        key = _job_key(job)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        unique.append(job)
+    """Same job from several sources/searches -> one copy, LinkedIn
+    preferred. Rules live in app/services/job_dedupe.py."""
+    unique = job_dedupe.dedupe(jobs)
     if len(jobs) - len(unique):
         progress(f"removed {len(jobs) - len(unique)} duplicate jobs")
     return unique
