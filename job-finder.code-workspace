@@ -1,0 +1,230 @@
+{
+  // Job Finder AI — full stack in one VS Code window.
+  // Open with: File > Open Workspace from File... > this file.
+  // Expects the frontend repo checked out next to this one:
+  //   <parent>/job_finder_api        (this repo, branch dev)
+  //   <parent>/job-finder-frontend   (frontend repo, branch dev)
+  //   <parent>/venv                  (Python 3.11 virtualenv with requirements-dev.txt)
+  //
+  // Terminal > Run Task > "Run full stack" starts API + Celery worker + frontend.
+  // Run and Debug > "Full stack (debug)" does the same with breakpoints.
+  //
+  // Local runs use a SQLite file (job_finder_api/output/dev.db) — never the
+  // Supabase DATABASE_URL from .env — and the *_dev Celery queues, so nothing
+  // here touches production data. OTP codes are printed in the API terminal.
+  "folders": [
+    { "name": "backend", "path": "." },
+    { "name": "frontend", "path": "../job-finder-frontend" }
+  ],
+  "settings": {
+    "python.defaultInterpreterPath": "${workspaceFolder:backend}/../venv/Scripts/python.exe",
+    "python.testing.pytestEnabled": true,
+    "python.testing.cwd": "${workspaceFolder:backend}",
+    "python.testing.pytestArgs": ["tests"],
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/.pytest_cache": true,
+      "**/browser_profile": true,
+      "**/node_modules": true
+    }
+  },
+  "extensions": {
+    "recommendations": ["ms-python.python", "ms-python.debugpy", "dbaeumer.vscode-eslint", "esbenp.prettier-vscode"]
+  },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "backend: migrate",
+        "type": "process",
+        "command": "${workspaceFolder:backend}/../venv/Scripts/python.exe",
+        "args": ["-m", "alembic", "upgrade", "head"],
+        "options": {
+          "cwd": "${workspaceFolder:backend}",
+          "env": {
+            "ENVIRONMENT": "development",
+            "DATABASE_URL": "sqlite:///./output/dev.db"
+          }
+        },
+        "problemMatcher": []
+      },
+      {
+        "label": "backend: api",
+        "type": "process",
+        "command": "${workspaceFolder:backend}/../venv/Scripts/python.exe",
+        "args": ["-m", "uvicorn", "app.main:app", "--reload", "--host", "127.0.0.1", "--port", "8000"],
+        "options": {
+          "cwd": "${workspaceFolder:backend}",
+          "env": {
+            "ENVIRONMENT": "development",
+            "DATABASE_URL": "sqlite:///./output/dev.db",
+            "EMAIL_BACKEND": "console",
+            "REFRESH_COOKIE_SECURE": "false",
+            "REFRESH_COOKIE_SAMESITE": "lax"
+          }
+        },
+        "dependsOn": "backend: migrate",
+        "isBackground": true,
+        "presentation": { "group": "stack", "panel": "dedicated" },
+        "problemMatcher": {
+          "owner": "uvicorn",
+          "pattern": { "regexp": "^__never_matches__$" },
+          "background": { "activeBegins": true, "beginsPattern": "Will watch for changes|Started reloader", "endsPattern": "Application startup complete" }
+        }
+      },
+      {
+        "label": "backend: worker",
+        "type": "process",
+        "command": "${workspaceFolder:backend}/../venv/Scripts/python.exe",
+        "args": ["-m", "celery", "-A", "app.core.celery_app:celery_app", "worker", "--pool=solo", "--loglevel=info", "-Q", "default_dev,apply_dev"],
+        "options": {
+          "cwd": "${workspaceFolder:backend}",
+          "env": {
+            "ENVIRONMENT": "development",
+            "DATABASE_URL": "sqlite:///./output/dev.db"
+          }
+        },
+        "dependsOn": "backend: migrate",
+        "isBackground": true,
+        "presentation": { "group": "stack", "panel": "dedicated" },
+        "problemMatcher": {
+          "owner": "celery",
+          "pattern": { "regexp": "^__never_matches__$" },
+          "background": { "activeBegins": true, "beginsPattern": "celery@", "endsPattern": "ready\\." }
+        }
+      },
+      {
+        "label": "frontend: dev",
+        "type": "shell",
+        "command": "npm run dev",
+        "options": { "cwd": "${workspaceFolder:frontend}" },
+        "isBackground": true,
+        "presentation": { "group": "stack", "panel": "dedicated" },
+        "problemMatcher": {
+          "owner": "vite",
+          "pattern": { "regexp": "^__never_matches__$" },
+          "background": { "activeBegins": true, "beginsPattern": "VITE", "endsPattern": "Local:" }
+        }
+      },
+      {
+        "label": "frontend: dev (mocks, no backend)",
+        "type": "shell",
+        "command": "npm run dev:mocks",
+        "options": { "cwd": "${workspaceFolder:frontend}" },
+        "isBackground": true,
+        "problemMatcher": {
+          "owner": "vite",
+          "pattern": { "regexp": "^__never_matches__$" },
+          "background": { "activeBegins": true, "beginsPattern": "VITE", "endsPattern": "Local:" }
+        }
+      },
+      {
+        "label": "Run full stack",
+        "dependsOn": ["backend: api", "backend: worker", "frontend: dev"],
+        "dependsOrder": "parallel",
+        "problemMatcher": []
+      },
+      {
+        "label": "setup: install dependencies",
+        "dependsOn": ["setup: backend deps", "setup: frontend deps"],
+        "problemMatcher": []
+      },
+      {
+        "label": "setup: backend deps",
+        "type": "process",
+        "command": "${workspaceFolder:backend}/../venv/Scripts/python.exe",
+        "args": ["-m", "pip", "install", "-r", "requirements-dev.txt"],
+        "options": { "cwd": "${workspaceFolder:backend}" },
+        "problemMatcher": []
+      },
+      {
+        "label": "setup: frontend deps",
+        "type": "shell",
+        "command": "npm install",
+        "options": { "cwd": "${workspaceFolder:frontend}" },
+        "problemMatcher": []
+      },
+      {
+        "label": "backend: make me admin",
+        "type": "process",
+        "command": "${workspaceFolder:backend}/../venv/Scripts/python.exe",
+        "args": ["-m", "app.scripts.set_role", "${input:adminEmail}", "admin"],
+        "options": {
+          "cwd": "${workspaceFolder:backend}",
+          "env": { "ENVIRONMENT": "development", "DATABASE_URL": "sqlite:///./output/dev.db" }
+        },
+        "dependsOn": "backend: migrate",
+        "problemMatcher": []
+      },
+      {
+        "label": "test: backend",
+        "type": "process",
+        "command": "${workspaceFolder:backend}/../venv/Scripts/python.exe",
+        "args": ["-m", "pytest"],
+        "options": { "cwd": "${workspaceFolder:backend}" },
+        "group": "test",
+        "problemMatcher": []
+      },
+      {
+        "label": "test: frontend (lint, types, tests, build)",
+        "type": "shell",
+        "command": "npm run check",
+        "options": { "cwd": "${workspaceFolder:frontend}" },
+        "group": "test",
+        "problemMatcher": []
+      }
+    ],
+    "inputs": [
+      { "id": "adminEmail", "type": "promptString", "description": "Email to make admin in the local dev database" }
+    ]
+  },
+  "launch": {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Backend API (debug)",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "uvicorn",
+        "args": ["app.main:app", "--host", "127.0.0.1", "--port", "8000"],
+        "cwd": "${workspaceFolder:backend}",
+        "python": "${workspaceFolder:backend}/../venv/Scripts/python.exe",
+        "env": {
+          "ENVIRONMENT": "development",
+          "DATABASE_URL": "sqlite:///./output/dev.db",
+          "EMAIL_BACKEND": "console",
+          "REFRESH_COOKIE_SECURE": "false",
+          "REFRESH_COOKIE_SAMESITE": "lax"
+        },
+        "preLaunchTask": "backend: migrate",
+        "justMyCode": true
+      },
+      {
+        "name": "Celery worker (debug)",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "celery",
+        "args": ["-A", "app.core.celery_app:celery_app", "worker", "--pool=solo", "--loglevel=info", "-Q", "default_dev,apply_dev"],
+        "cwd": "${workspaceFolder:backend}",
+        "python": "${workspaceFolder:backend}/../venv/Scripts/python.exe",
+        "env": { "ENVIRONMENT": "development", "DATABASE_URL": "sqlite:///./output/dev.db" },
+        "justMyCode": true
+      },
+      {
+        "name": "Frontend (Edge)",
+        "type": "msedge",
+        "request": "launch",
+        "url": "http://localhost:5173",
+        "webRoot": "${workspaceFolder:frontend}/src",
+        "preLaunchTask": "frontend: dev"
+      }
+    ],
+    "compounds": [
+      {
+        "name": "Full stack (debug)",
+        "configurations": ["Backend API (debug)", "Celery worker (debug)", "Frontend (Edge)"],
+        "stopAll": true
+      }
+    ]
+  }
+}

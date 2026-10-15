@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import csv
 import datetime
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -279,6 +280,32 @@ def open_and_prepare(
         "skipped_count": len(skipped_jobs),
         "handle": {"playwright": playwright, "context": context},
     }
+
+
+def open_and_prepare_isolated(jobs: list[dict], **kwargs) -> dict:
+    """open_and_prepare() on its own fresh thread.
+
+    Playwright's sync API refuses to start on a thread that already has an
+    asyncio event loop — and the browser is deliberately left open for the
+    user to review, so its loop stays alive on whatever thread started it.
+    Run directly on a Celery worker thread, the second apply in the same
+    worker (or the first, if anything else set a loop) failed with "using
+    Playwright Sync API inside the asyncio loop". A new thread per call
+    always starts clean; the left-open browser keeps that thread's loop."""
+    outcome: dict = {}
+
+    def _run() -> None:
+        try:
+            outcome["result"] = open_and_prepare(jobs, **kwargs)
+        except BaseException as e:  # noqa: BLE001 — re-raised on the caller's thread
+            outcome["error"] = e
+
+    worker = threading.Thread(target=_run, name="playwright-apply", daemon=True)
+    worker.start()
+    worker.join()
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["result"]
 
 
 def close_browser(handle: dict) -> None:
