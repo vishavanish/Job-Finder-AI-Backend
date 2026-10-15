@@ -75,6 +75,18 @@ Both repos on branch `dev`, side by side, with a Python 3.11 virtualenv next to 
 <parent>/venv                  # python -m venv venv
 ```
 
+**Quickest way — one command** (PowerShell or cmd, from `job_finder_api`):
+
+```
+.\dev
+```
+
+That runs migrations, then the API, the Celery worker and the frontend in one terminal
+(open http://localhost:5173). Ctrl+C stops all three. It installs the frontend's npm
+packages on the first run. Same thing without the wrapper: `..env\Scripts\python.exe run_dev.py`.
+
+**Or from VS Code's task runner:**
+
 1. Open `job-finder.code-workspace` (File > Open Workspace from File).
 2. First time only: Terminal > Run Task > **setup: install dependencies**, and make sure
    `job_finder_api/.env` has `JWT_SECRET_KEY` and `REDIS_URL` (Upstash is fine — local runs
