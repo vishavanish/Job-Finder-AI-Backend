@@ -2,7 +2,8 @@
 Start the whole stack for local development with one command:
 
     dev            (from job_finder_api/, in PowerShell or cmd — runs dev.cmd)
-    python run_dev.py
+    backend        (same, but only the API + worker — run the frontend yourself)
+    python run_dev.py [--backend-only]
 
 Runs database migrations, then the API (http://127.0.0.1:8000), the Celery
 worker and the frontend (http://localhost:5173) in this one terminal, each
@@ -58,18 +59,19 @@ def fail(message: str) -> None:
     sys.exit(1)
 
 
-def preflight() -> dict:
-    if not FRONTEND.exists():
+def preflight(with_web: bool) -> dict:
+    if with_web and not FRONTEND.exists():
         fail(f"frontend repo not found at {FRONTEND} — clone Job-Finder-AI-Frontend next to job_finder_api")
     if not (BACKEND / ".env").exists():
         fail("job_finder_api/.env is missing — it needs at least JWT_SECRET_KEY and REDIS_URL")
-    for port, what in ((8000, "API"), (5173, "frontend")):
+    ports = ((8000, "API"), (5173, "frontend")) if with_web else ((8000, "API"),)
+    for port, what in ports:
         if port_in_use(port):
             fail(f"port {port} ({what}) is already in use — stop whatever is running there first")
     (BACKEND / "output").mkdir(exist_ok=True)
 
     env = {**os.environ, **DEV_ENV}
-    if not (FRONTEND / "node_modules").exists():
+    if with_web and not (FRONTEND / "node_modules").exists():
         say("dev", "installing frontend dependencies (first run only)...")
         subprocess.run([NPM, "install"], cwd=FRONTEND, check=True, shell=os.name == "nt")
     return env
@@ -120,7 +122,8 @@ def stop_all(procs: dict[str, subprocess.Popen]) -> None:
 
 def main() -> None:
     os.system("")  # enables ANSI colours in the Windows console
-    env = preflight()
+    with_web = "--backend-only" not in sys.argv[1:]
+    env = preflight(with_web)
     migrate(env)
 
     procs = {
@@ -128,9 +131,12 @@ def main() -> None:
                              "--host", "127.0.0.1", "--port", "8000"], BACKEND, env),
         "worker": start("worker", [PYTHON, "-m", "celery", "-A", "app.core.celery_app:celery_app", "worker",
                                    "--pool=solo", "--loglevel=info", "-Q", "default_dev,apply_dev"], BACKEND, env),
-        "web": start("web", [NPM, "run", "dev"], FRONTEND, env),
     }
-    say("dev", "starting... open http://localhost:5173 once [web] shows 'Local:'. Press Ctrl+C to stop everything.")
+    if with_web:
+        procs["web"] = start("web", [NPM, "run", "dev"], FRONTEND, env)
+        say("dev", "starting... open http://localhost:5173 once [web] shows 'Local:'. Press Ctrl+C to stop everything.")
+    else:
+        say("dev", "starting API (http://127.0.0.1:8000) + worker. Press Ctrl+C to stop both.")
 
     try:
         while True:
