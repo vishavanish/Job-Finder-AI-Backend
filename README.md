@@ -83,6 +83,8 @@ Both repos on branch `dev`, side by side, with a Python 3.11 virtualenv next to 
 | Celery worker | `job_finder_api` | `.\worker` |
 | Frontend (`http://localhost:5173`) | `job-finder-frontend` | `npm run dev` |
 
+Backend only (API + worker in one terminal, from `job_finder_api`): `.ackend`.
+
 Make an account admin in the local dev database: `.dmin you@example.com` (never touches Supabase).
 
 **Or all three in one terminal** (from `job_finder_api`):
