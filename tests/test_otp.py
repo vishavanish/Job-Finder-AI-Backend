@@ -145,3 +145,28 @@ def test_console_email_is_refused_in_production(client, monkeypatch):
 
 def test_malformed_code_is_rejected_by_validation(client):
     assert client.post(VERIFY, json={"email": "x@example.com", "code": "12ab56"}).status_code == 422
+
+
+def test_verify_errors_carry_codes_for_the_ui(client, outbox):
+    """The sign-in screen needs to tell wrong / locked / expired apart."""
+    max_attempts = get_settings().OTP_MAX_ATTEMPTS
+    client.post(REQUEST, json={"email": "ui@example.com"})
+    code = outbox.code_for("ui@example.com")
+    wrong = "000000" if code != "000000" else "111111"
+
+    first = client.post(VERIFY, json={"email": "ui@example.com", "code": wrong}).json()["detail"]
+    assert first["code"] == "otp_invalid" and first["attempts_left"] == max_attempts - 1
+
+    for _ in range(max_attempts - 2):
+        client.post(VERIFY, json={"email": "ui@example.com", "code": wrong})
+    last = client.post(VERIFY, json={"email": "ui@example.com", "code": wrong}).json()["detail"]
+    assert last["code"] == "otp_locked" and last["attempts_left"] == 0
+
+    gone = client.post(VERIFY, json={"email": "ui@example.com", "code": code}).json()["detail"]
+    assert gone["code"] == "otp_expired"
+
+
+def test_cooldown_error_has_code_and_retry_after(client, outbox):
+    client.post(REQUEST, json={"email": "wait@example.com"})
+    detail = client.post(REQUEST, json={"email": "wait@example.com"}).json()["detail"]
+    assert detail["code"] == "otp_cooldown" and detail["retry_after"] > 0
