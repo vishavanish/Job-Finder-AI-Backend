@@ -1,0 +1,124 @@
+"""
+app/services/provider_catalog.py
+-----------------------------------
+Job-source catalog and "Free tools only" mode (CLAUDE.md 7.4).
+
+Each source the search code supports is a row in provider_catalog. Before a
+search is dispatched, effective_sources() drops sources that are:
+  - turned off by an admin (enabled_global),
+  - turned off by the user (user_provider_settings),
+  - paid ("paid"/"byok" tier) while the user has Free tools only on,
+  - missing a required key (nothing for the user, the platform or .env).
+The caller tells the user which were skipped and why.
+
+Mapping to today's search parameters: "linkedin", "indeed", "naukri" are
+SearchRequest.sources; "naukri_apify" is SearchRequest.enable_naukri_apify.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+from sqlalchemy.orm import Session
+
+from app.models.ai import ProviderCatalog, UserProviderSetting
+from app.models.user import User
+from app.services import key_store
+
+PAID_TIERS = {"paid", "byok"}
+TIERS = ("free", "free_key", "paid", "byok")
+TOS_RISKS = ("none", "low", "high")
+APIFY_SOURCE = "naukri_apify"
+
+
+@dataclass
+class SourcePlan:
+    sources: list[str] = field(default_factory=list)  # for job_sources.scrape_all
+    naukri_apify: bool = False
+    skipped: list[str] = field(default_factory=list)  # human-readable reasons
+
+
+def all_sources(db: Session) -> list[ProviderCatalog]:
+    return db.query(ProviderCatalog).order_by(ProviderCatalog.key).all()
+
+
+def user_choices(db: Session, user_id: str) -> dict[str, bool]:
+    rows = db.query(UserProviderSetting).filter(UserProviderSetting.user_id == user_id).all()
+    return {r.provider_key: r.enabled for r in rows}
+
+
+def availability(db: Session, user: User, row: ProviderCatalog, *, choices: dict[str, bool] | None = None,
+                 has_request_key: bool = False) -> tuple[bool, str | None]:
+    """(runs for this user?, reason when not)."""
+    if not row.enabled_global:
+        return False, "turned off by the admin"
+    if not (choices if choices is not None else user_choices(db, user.id)).get(row.key, True):
+        return False, "turned off in your Providers settings"
+    if user.free_only_mode and row.tier in PAID_TIERS:
+        return False, "paid source — \"Free tools only\" is on"
+    if row.requires_key and row.key_scope and not has_request_key:
+        if not (key_store.has_user_key(db, user.id, row.key_scope)
+                or key_store.platform_key_available(db, row.key_scope)):
+            return False, f"needs a {row.key_scope} API key"
+    return True, None
+
+
+def effective_sources(db: Session, user: User, *, requested: list[str], want_naukri_apify: bool,
+                      has_apify_request_key: bool = False) -> SourcePlan:
+    catalog = {r.key: r for r in all_sources(db)}
+    choices = user_choices(db, user.id)
+    plan = SourcePlan()
+    for key in requested:
+        row = catalog.get(key)
+        if row is None:
+            plan.skipped.append(f"{key}: not in the source catalog")
+            continue
+        ok, reason = availability(db, user, row, choices=choices)
+        if ok:
+            plan.sources.append(key)
+        else:
+            plan.skipped.append(f"{row.name}: {reason}")
+    if want_naukri_apify:
+        row = catalog.get(APIFY_SOURCE)
+        ok, reason = (availability(db, user, row, choices=choices, has_request_key=has_apify_request_key)
+                      if row else (False, "not in the source catalog"))
+        if ok:
+            plan.naukri_apify = True
+        else:
+            plan.skipped.append(f"{row.name if row else APIFY_SOURCE}: {reason}")
+    return plan
+
+
+def mark_success(db: Session, keys: set[str]) -> None:
+    """Records that these sources returned jobs (health shown to admins)."""
+    if not keys:
+        return
+    now = datetime.now(timezone.utc)
+    for row in db.query(ProviderCatalog).filter(ProviderCatalog.key.in_(keys)).all():
+        row.last_success_at = now
+        row.consecutive_failures = 0
+    db.commit()
+
+
+def mark_failure(db: Session, key: str, error: str) -> None:
+    row = db.get(ProviderCatalog, key)
+    if row is None:
+        return
+    row.consecutive_failures = (row.consecutive_failures or 0) + 1
+    row.last_error_at = datetime.now(timezone.utc)
+    row.last_error = error[:300]
+    db.commit()
+
+
+def sources_seen(jobs: list[dict], plan: SourcePlan) -> set[str]:
+    """Catalog keys that produced at least one job. Apify results are
+    labelled "Naukri" too, so a Naukri job counts for the Apify source only
+    when plain Naukri search wasn't part of the plan."""
+    seen: set[str] = set()
+    for job in jobs:
+        name = str(job.get("source", "")).strip().lower()
+        if name == "naukri" and "naukri" not in plan.sources and plan.naukri_apify:
+            seen.add(APIFY_SOURCE)
+        elif name in ("linkedin", "indeed", "naukri"):
+            seen.add(name)
+    return seen

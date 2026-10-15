@@ -3,6 +3,9 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, Request
+from sqlalchemy.orm import Session
+
+from app.core.db import get_db
 
 from app.services.entitlements import require_feature
 from app.core.config import get_settings
@@ -19,13 +22,14 @@ settings = get_settings()
 
 @router.post("", response_model=TaskResponse, status_code=202)
 @limiter.limit(settings.RATE_LIMIT_SEARCH)
-async def start_search(request: Request, req: SearchRequest, user=Depends(require_feature("job_search"))):
+async def start_search(request: Request, req: SearchRequest, user=Depends(require_feature("job_search")),
+                       db: Session = Depends(get_db)):
     """Kicks off a job search across LinkedIn/Indeed/Naukri on the Celery
     "default" queue (this can take minutes due to rate-limit pacing — any
     available "default"-queue worker process can pick it up). Poll
     GET /tasks/{task_id} for status and the resulting job list."""
     response = dispatch(
-        search_task, args=[build_search_params(req)], queue=settings.default_queue, user_id=user.id,
+        search_task, args=[build_search_params(req, db=db, user=user)], queue=settings.default_queue, user_id=user.id,
     )
     logger.info("[task=%s] dispatched to '%s' for user=%s", response.task_id, settings.default_queue, user.id)
     return response

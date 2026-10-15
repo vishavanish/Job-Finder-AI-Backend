@@ -18,11 +18,9 @@ Each function below is decorated with @celery_app.task(bind=True) so it
 receives `self`, giving access to self.update_state() for progress and
 self.request.id for the task's own ID (useful for logging).
 
-LLM RANKING FALLBACK CHAIN: Gemini -> Groq (openai/gpt-oss-120b) -> HF/Qwen3-8B.
-Groq sits in the middle because it's fast/cheap and openai/gpt-oss-120b scores
-well on structured-JSON-output tasks like this one; HF stays as the last
-resort. See app/services/scorer.py for the batched-path equivalent of this
-same chain.
+LLM scoring goes through the AI router (app/services/ai_router.py): the
+model chain comes from the registry, keys from the key store. Tasks only
+carry `user_id` and, for legacy request-body keys, short-lived key refs.
 """
 from __future__ import annotations
 
@@ -35,10 +33,9 @@ from app.services import browser_apply, company_ats_sources, job_sources, scorer
 from celery import group, chord
 from app.services import pipeline_progress, secret_refs
 from app.services.job_dedupe import job_key
-from app.services.scorer import (
-    keyword_score, _build_user_prompt, _parse_and_apply_scores,
-    LLM_SYSTEM_PROMPT_TEMPLATE,
-)
+from app.core.db import SessionLocal
+from app.services import provider_catalog
+from app.services.scorer import keyword_score
 from app.services.browser_apply import AUTO_APPLY_CAPABLE_SOURCES
 logger = logging.getLogger("job_finder_api.tasks")
 
@@ -58,83 +55,85 @@ def _make_progress_cb(task, task_name: str):
         task.update_state(state="PROGRESS", meta={"progress": safe_message})
     return progress_cb
 
-def _score_one_job_llm(
-    job: dict, *, resume_summary: str, career_targets: list[str],
-    gemini_model: str, groq_model: str, hf_model: str,
-    gemini_api_key: str, groq_api_key: str, hf_api_key: str,
-) -> dict:
-    """Scores exactly ONE job via the LLM (not a batch). Reuses scorer.py's
-    existing prompt-building and response-parsing helpers so scoring
-    logic isn't duplicated/forked between the batched and per-job paths
-    — this just calls them with a list of length 1.
+def _request_keys(score_params: dict) -> dict[str, str]:
+    """Legacy one-run keys sent in a /score or /pipeline body, by key scope.
+    No .env fallback here: the key store handles platform/.env keys."""
+    return {
+        "gemini": secret_refs.resolve(score_params.get("gemini_api_key_ref")),
+        "groq": secret_refs.resolve(score_params.get("groq_api_key_ref")),
+        "huggingface": secret_refs.resolve(score_params.get("hf_api_key_ref")),
+    }
 
-    Fallback order: Gemini -> Groq (openai/gpt-oss-120b) -> HF/Qwen3-8B. Each
-    stage only runs if its API key is present AND the previous stage
-    didn't already parse a valid score.
 
-    Trade-off (flagged for the record, not hidden): one LLM API call per
-    job is materially more expensive and slower in aggregate than the
-    original batched approach (~40 jobs/call). This function exists
-    because per-job streaming was the explicit requirement — if cost
-    becomes a problem, the fix is switching to per-keyword-batch scoring
-    (still parallel across keywords via the same group() structure),
-    not changing this file's architecture."""
-    jobs_wrapper = [job]
-    system_prompt = LLM_SYSTEM_PROMPT_TEMPLATE.format(
-        career_targets="\n        ".join(f"- {t}" for t in career_targets)
+def _apify_token(db, search_params: dict) -> str:
+    """Request-body token first (legacy), then the user's/platform/.env key."""
+    from app.services import key_store
+    token = secret_refs.resolve(search_params.get("apify_api_token_ref"))
+    if token:
+        return token
+    resolved = key_store.resolve(db, user_id=search_params.get("user_id"), scope="apify")
+    return resolved.value if resolved else ""
+
+
+def _score_one_job_llm(job: dict, *, db, score_params: dict, request_keys: dict[str, str], ref: str | None) -> dict:
+    """Scores exactly ONE job via the router (per-job so the streaming
+    pipeline can show results live). One LLM call per job costs more than
+    batching; if that matters, batch per keyword instead."""
+    return scorer.score_one_job(
+        db, job, user_id=score_params.get("user_id"), resume_summary=score_params["resume_summary"],
+        career_targets=score_params.get("career_targets", []), request_keys=request_keys, ref=ref,
     )
-    user_prompt = _build_user_prompt(jobs_wrapper, resume_summary)
 
-    if gemini_api_key:
-        try:
-            from google import genai
-            client = genai.Client(api_key=gemini_api_key)
-            response = client.models.generate_content(
-                model=gemini_model,
-                contents=user_prompt,
-                config={"system_instruction": system_prompt, "temperature": 0.1,
-                        "response_mime_type": "application/json"},
-            )
-            if response.text and _parse_and_apply_scores(response.text, jobs_wrapper, lambda m: None):
-                return jobs_wrapper[0]
-        except Exception:  # noqa: BLE001
-            logger.exception("gemini per-job scoring failed for url=%s — falling back to Groq", job.get("url"))
 
-    if groq_api_key:
-        try:
-            from groq import Groq
-            client = Groq(api_key=groq_api_key)
-            response = client.chat.completions.create(
-                model=groq_model,
-                messages=[{"role": "system", "content": system_prompt},
-                          {"role": "user", "content": user_prompt}],
-                temperature=0.1,
-            )
-            raw_text = response.choices[0].message.content or ""
-            if raw_text and _parse_and_apply_scores(raw_text, jobs_wrapper, lambda m: None):
-                return jobs_wrapper[0]
-        except Exception:  # noqa: BLE001
-            logger.exception("groq per-job scoring failed for url=%s — falling back to HF", job.get("url"))
+def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str], sources: list[str],
+            manual_naukri_jobs: list, progress) -> list[dict]:
+    """job_sources.scrape_all with the params a route built, plus source
+    health: sources that returned jobs are marked healthy."""
+    for note in search_params.get("skipped_sources") or []:
+        progress(f"skipped source — {note}")
+    naukri_apify = search_params.get("enable_naukri_apify", False)
+    jobs = job_sources.scrape_all(
+        keywords=keywords,
+        locations=locations,
+        sources=sources,
+        results_per_keyword=search_params.get("results_per_keyword", 25),
+        max_age_hours=search_params.get("max_age_hours", 24),
+        country_indeed=search_params.get("country_indeed", "India"),
+        linkedin_fetch_description=search_params.get("linkedin_fetch_description", True),
+        search_delay_sec=search_params.get("search_delay_sec", 15),
+        linkedin_max_retries=search_params.get("linkedin_max_retries", 2),
+        linkedin_retry_delay_sec=search_params.get("linkedin_retry_delay_sec", 30),
+        enable_naukri_auto=search_params.get("enable_naukri_auto", False),
+        manual_naukri_jobs=manual_naukri_jobs,
+        enable_naukri_apify=naukri_apify,
+        apify_naukri_actor_id=search_params.get("apify_naukri_actor_id", ""),
+        apify_api_token=_apify_token(db, search_params) if naukri_apify else "",
+        progress=progress,
+    )
+    try:
+        plan = provider_catalog.SourcePlan(sources=list(sources), naukri_apify=naukri_apify)
+        provider_catalog.mark_success(db, provider_catalog.sources_seen(jobs, plan))
+    except Exception:  # noqa: BLE001 — health bookkeeping must never fail a search
+        db.rollback()
+        logger.exception("could not record source health")
+    return jobs
 
-    if hf_api_key:
-        try:
-            from huggingface_hub import InferenceClient
-            hf_client = InferenceClient(api_key=hf_api_key)
-            response = hf_client.chat_completion(
-                model=hf_model,
-                messages=[{"role": "system", "content": system_prompt},
-                          {"role": "user", "content": user_prompt}],
-                max_tokens=500, temperature=0.1,
-            )
-            raw_text = response.choices[0].message.content.strip()
-            if _parse_and_apply_scores(raw_text, jobs_wrapper, lambda m: None):
-                return jobs_wrapper[0]
-        except Exception:  # noqa: BLE001
-            logger.exception("HF per-job scoring failed for url=%s", job.get("url"))
 
-    job.setdefault("llm_score", 0)
-    job.setdefault("llm_reason", "LLM scoring unavailable for this job.")
-    return job
+def _score_jobs(db, jobs: list[dict], score_params: dict, *, ref: str | None, progress) -> dict:
+    return scorer.score_jobs(
+        db,
+        jobs,
+        user_id=score_params.get("user_id"),
+        resume_summary=score_params["resume_summary"],
+        skills=score_params["skills"],
+        career_targets=score_params.get("career_targets", []),
+        keyword_prefilter_min_pct=score_params.get("keyword_prefilter_min_pct", 30),
+        llm_top_n_to_rank=score_params.get("llm_top_n_to_rank", 40),
+        llm_min_score_to_keep=score_params.get("llm_min_score_to_keep", 70),
+        request_keys=_request_keys(score_params),
+        ref=ref,
+        progress=progress,
+    )
 
 
 @celery_app.task(bind=True, name="job_finder.search_and_score_keyword")
@@ -154,31 +153,15 @@ def search_and_score_keyword(
         pipeline_progress.increment_keyword_completed(run_id=run_id)
         return {"keyword": keyword, "skipped": "run cancelled"}
 
+    db = SessionLocal()
     try:
-        raw_jobs = job_sources.scrape_all(
-            keywords=[keyword],
-            locations=locations,
-            sources=sources,
-            results_per_keyword=search_params.get("results_per_keyword", 25),
-            max_age_hours=search_params.get("max_age_hours", 24),
-            country_indeed=search_params.get("country_indeed", "India"),
-            linkedin_fetch_description=search_params.get("linkedin_fetch_description", True),
-            search_delay_sec=search_params.get("search_delay_sec", 15),
-            linkedin_max_retries=search_params.get("linkedin_max_retries", 2),
-            linkedin_retry_delay_sec=search_params.get("linkedin_retry_delay_sec", 30),
-            enable_naukri_auto=search_params.get("enable_naukri_auto", False),
-            manual_naukri_jobs=[],  # applied once at the top level, not per-keyword — avoids duplicate inserts
-            enable_naukri_apify=search_params.get("enable_naukri_apify", False),
-            apify_naukri_actor_id=search_params.get("apify_naukri_actor_id", ""),
-            apify_api_token=secret_refs.resolve(search_params.get("apify_api_token_ref"), fallback=settings.APIFY_API_TOKEN),
-            progress=progress_cb,
-        )
+        raw_jobs = _scrape(db, search_params, keywords=[keyword], locations=locations, sources=sources,
+                           # manual jobs are added once at the top level, not per keyword
+                           manual_naukri_jobs=[], progress=progress_cb)
 
         skills = score_params["skills"]
         min_pct = score_params.get("keyword_prefilter_min_pct", 30)
-        gemini_api_key = secret_refs.resolve(score_params.get("gemini_api_key_ref"), fallback=settings.GEMINI_API_KEY)
-        groq_api_key = secret_refs.resolve(score_params.get("groq_api_key_ref"), fallback=settings.GROQ_API_KEY)
-        hf_api_key = secret_refs.resolve(score_params.get("hf_api_key_ref"), fallback=settings.HF_API_KEY)
+        request_keys = _request_keys(score_params)
 
         scored_count = 0
         duplicate_count = 0
@@ -193,17 +176,8 @@ def search_and_score_keyword(
             if job["keyword_score"] < min_pct:
                 continue  # cheap prefilter still applies — no point burning an LLM call on a clear non-match
 
-            scored = _score_one_job_llm(
-                job,
-                resume_summary=score_params["resume_summary"],
-                career_targets=score_params.get("career_targets", []),
-                gemini_model=score_params.get("gemini_model", "gemini-2.5-flash"),
-                groq_model=score_params.get("groq_model", "openai/gpt-oss-120b"),
-                hf_model=score_params.get("hf_model", "Qwen/Qwen3-8B"),
-                gemini_api_key=gemini_api_key,
-                groq_api_key=groq_api_key,
-                hf_api_key=hf_api_key,
-            )
+            scored = _score_one_job_llm(job, db=db, score_params=score_params, request_keys=request_keys,
+                                        ref=run_id)
 
             if scored.get("llm_score", 0) < score_params.get("llm_min_score_to_keep", 70):
                 continue
@@ -222,6 +196,8 @@ def search_and_score_keyword(
         logger.exception("search_and_score_keyword failed for run_id=%s keyword=%s", run_id, keyword)
         pipeline_progress.increment_keyword_completed(run_id=run_id)  # still counts as "done" so the run can finish
         return {"keyword": keyword, "error": str(e)}
+    finally:
+        db.close()
 
 
 @celery_app.task(name="job_finder.finalize_pipeline_run")
@@ -266,24 +242,13 @@ def dispatch_pipeline_group(run_id: str, search_params: dict, score_params: dict
 def search_task(self, search_params: dict) -> dict:
     progress_cb = _make_progress_cb(self, "search")
     
-    jobs = job_sources.scrape_all(
-        keywords=search_params["keywords"],
-        locations=search_params["locations"],
-        sources=search_params["sources"],
-        results_per_keyword=search_params.get("results_per_keyword", 25),
-        max_age_hours=search_params.get("max_age_hours", 24),
-        country_indeed=search_params.get("country_indeed", "India"),
-        linkedin_fetch_description=search_params.get("linkedin_fetch_description", True),
-        search_delay_sec=search_params.get("search_delay_sec", 15),
-        linkedin_max_retries=search_params.get("linkedin_max_retries", 2),
-        linkedin_retry_delay_sec=search_params.get("linkedin_retry_delay_sec", 30),
-        enable_naukri_auto=search_params.get("enable_naukri_auto", False),
-        manual_naukri_jobs=search_params.get("manual_naukri_jobs", []),
-        enable_naukri_apify=search_params.get("enable_naukri_apify", False),
-        apify_naukri_actor_id=search_params.get("apify_naukri_actor_id", ""),
-        apify_api_token=secret_refs.resolve(search_params.get("apify_api_token_ref"), fallback=settings.APIFY_API_TOKEN),
-        progress=progress_cb,
-    )
+    db = SessionLocal()
+    try:
+        jobs = _scrape(db, search_params, keywords=search_params["keywords"], locations=search_params["locations"],
+                       sources=search_params["sources"],
+                       manual_naukri_jobs=search_params.get("manual_naukri_jobs", []), progress=progress_cb)
+    finally:
+        db.close()
     return {"jobs": jobs, "total_raw": len(jobs), "total_usable": len(jobs)}
 
 
@@ -291,22 +256,11 @@ def search_task(self, search_params: dict) -> dict:
 def score_task(self, jobs: list[dict], score_params: dict) -> dict:
     settings = get_settings()
     progress_cb = _make_progress_cb(self, "score")
-    return scorer.score_jobs(
-        jobs,
-        resume_summary=score_params["resume_summary"],
-        skills=score_params["skills"],
-        career_targets=score_params.get("career_targets", []),
-        keyword_prefilter_min_pct=score_params.get("keyword_prefilter_min_pct", 30),
-        llm_top_n_to_rank=score_params.get("llm_top_n_to_rank", 40),
-        llm_min_score_to_keep=score_params.get("llm_min_score_to_keep", 70),
-        gemini_model=score_params.get("gemini_model", "gemini-2.5-flash"),
-        groq_model=score_params.get("groq_model", "openai/gpt-oss-120b"),
-        hf_model=score_params.get("hf_model", "Qwen/Qwen3-8B"),
-        gemini_api_key=secret_refs.resolve(score_params.get("gemini_api_key_ref"), fallback=settings.GEMINI_API_KEY),
-        groq_api_key=secret_refs.resolve(score_params.get("groq_api_key_ref"), fallback=settings.GROQ_API_KEY),
-        hf_api_key=secret_refs.resolve(score_params.get("hf_api_key_ref"), fallback=settings.HF_API_KEY),
-        progress=progress_cb,
-    )
+    db = SessionLocal()
+    try:
+        return _score_jobs(db, jobs, score_params, ref=self.request.id, progress=progress_cb)
+    finally:
+        db.close()
 
 
 @celery_app.task(bind=True, name="job_finder.company_ats")
@@ -355,47 +309,20 @@ def pipeline_task(self, search_params: dict, score_params: dict, apply_params: d
     settings = get_settings()
 
     progress_cb("step 1/3: scraping")
-    jobs = job_sources.scrape_all(
-        keywords=search_params["keywords"],
-        locations=search_params["locations"],
-        sources=search_params["sources"],
-        results_per_keyword=search_params.get("results_per_keyword", 25),
-        max_age_hours=search_params.get("max_age_hours", 24),
-        country_indeed=search_params.get("country_indeed", "India"),
-        linkedin_fetch_description=search_params.get("linkedin_fetch_description", True),
-        search_delay_sec=search_params.get("search_delay_sec", 15),
-        linkedin_max_retries=search_params.get("linkedin_max_retries", 2),
-        linkedin_retry_delay_sec=search_params.get("linkedin_retry_delay_sec", 30),
-        enable_naukri_auto=search_params.get("enable_naukri_auto", False),
-        manual_naukri_jobs=search_params.get("manual_naukri_jobs", []),
-        enable_naukri_apify=search_params.get("enable_naukri_apify", False),
-        apify_naukri_actor_id=search_params.get("apify_naukri_actor_id", ""),
-        apify_api_token=secret_refs.resolve(search_params.get("apify_api_token_ref"), fallback=settings.APIFY_API_TOKEN),
-        progress=progress_cb,
-    )
+    db = SessionLocal()
+    try:
+        jobs = _scrape(db, search_params, keywords=search_params["keywords"], locations=search_params["locations"],
+                       sources=search_params["sources"],
+                       manual_naukri_jobs=search_params.get("manual_naukri_jobs", []), progress=progress_cb)
+        if not jobs:
+            progress_cb("step 2/3: skipped — no jobs to score")
+            progress_cb("step 3/3: skipped — no jobs to apply to")
+            return {"jobs_scraped": 0, "score_result": None, "apply_result": None}
 
-    if not jobs:
-        progress_cb("step 2/3: skipped — no jobs to score")
-        progress_cb("step 3/3: skipped — no jobs to apply to")
-        return {"jobs_scraped": 0, "score_result": None, "apply_result": None}
-
-    progress_cb("step 2/3: scoring")
-    score_result = scorer.score_jobs(
-        jobs,
-        resume_summary=score_params["resume_summary"],
-        skills=score_params["skills"],
-        career_targets=score_params.get("career_targets", []),
-        keyword_prefilter_min_pct=score_params.get("keyword_prefilter_min_pct", 30),
-        llm_top_n_to_rank=score_params.get("llm_top_n_to_rank", 40),
-        llm_min_score_to_keep=score_params.get("llm_min_score_to_keep", 70),
-        gemini_model=score_params.get("gemini_model", "gemini-2.5-flash"),
-        groq_model=score_params.get("groq_model", "openai/gpt-oss-120b"),
-        hf_model=score_params.get("hf_model", "Qwen/Qwen3-8B"),
-        gemini_api_key=secret_refs.resolve(score_params.get("gemini_api_key_ref"), fallback=settings.GEMINI_API_KEY),
-        groq_api_key=secret_refs.resolve(score_params.get("groq_api_key_ref"), fallback=settings.GROQ_API_KEY),
-        hf_api_key=secret_refs.resolve(score_params.get("hf_api_key_ref"), fallback=settings.HF_API_KEY),
-        progress=progress_cb,
-    )
+        progress_cb("step 2/3: scoring")
+        score_result = _score_jobs(db, jobs, score_params, ref=self.request.id, progress=progress_cb)
+    finally:
+        db.close()
 
     apply_result = None
     if apply_params and score_result["ranked_jobs"]:

@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     GROQ_API_KEY: str = ""
     APIFY_API_TOKEN: str = ""
+    # Fallback for Anthropic models when no platform key is stored (P2 key store).
+    ANTHROPIC_API_KEY: str = ""
+
+    # ---- AI router (CLAUDE.md 7.9) ----
+    AI_BREAKER_FAILURES: int = 3          # consecutive failures before a model is skipped
+    AI_BREAKER_COOLDOWN_SECONDS: int = 300
+    AI_REQUEST_TIMEOUT_SECONDS: int = 60
 
     # ---- Celery / Redis (Upstash) ----
     # Get this from your Upstash console: Database -> Details -> "Redis

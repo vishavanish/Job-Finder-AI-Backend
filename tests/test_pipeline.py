@@ -37,7 +37,7 @@ def test_pipeline_apply_step_passes_user_id(monkeypatch):
     seen = {}
     monkeypatch.setattr(celery_tasks, "_make_progress_cb", lambda task, name: (lambda msg: None))
     monkeypatch.setattr(celery_tasks.job_sources, "scrape_all", lambda **kw: [dict(DUPLICATE_JOB)])
-    monkeypatch.setattr(celery_tasks.scorer, "score_jobs", lambda jobs, **kw: {"ranked_jobs": jobs})
+    monkeypatch.setattr(celery_tasks.scorer, "score_jobs", lambda db, jobs, **kw: {"ranked_jobs": jobs})
 
     def fake_open_and_prepare(jobs, **kw):
         seen.update(kw)

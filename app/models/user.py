@@ -45,6 +45,8 @@ class User(Base):
     last_login_at = Column(DateTime, nullable=True)
     sessions_revoked_at = Column(DateTime, nullable=True)
     session_version = Column(Integer, default=0, nullable=False, server_default="0")
+    # "Free tools only" (CLAUDE.md 7.4): skip paid job sources and paid AI models.
+    free_only_mode = Column(Boolean, default=False, nullable=False, server_default="0")
 
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(

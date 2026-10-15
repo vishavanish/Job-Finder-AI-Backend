@@ -35,13 +35,13 @@ async def run_pipeline_stream(
     instant they're ready. Returns immediately with a run_id — poll
     GET /pipeline/{run_id}/jobs to watch results arrive live, and
     GET /pipeline/{run_id} for run-level progress (X/Y keywords done)."""
-    search_params = build_search_params(req.search)
-    score_params = build_score_params(req.score)
+    search_params = build_search_params(req.search, db=db, user=user)
+    score_params = build_score_params(req.score, user_id=user.id)
 
     run_id = pipeline_progress.create_run(user_id=user.id, total_keywords=len(req.search.keywords))
     dispatch_pipeline_group.apply_async(args=[run_id, search_params, score_params],queue=settings.default_queue)
     logger.info("[run=%s] dispatched %d-keyword group for user=%s", run_id, len(req.search.keywords), user.id)
-    return {"run_id": run_id}
+    return {"run_id": run_id, "skipped_sources": search_params["skipped_sources"]}
 
 @router.get("/{run_id}")
 async def get_pipeline_run(run_id: str, user=Depends(get_current_user)):
@@ -86,7 +86,8 @@ async def run_pipeline(
 
     response = dispatch(
         pipeline_task,
-        args=[build_search_params(req.search), build_score_params(req.score), apply_params],
+        args=[build_search_params(req.search, db=db, user=user),
+              build_score_params(req.score, user_id=user.id), apply_params],
         queue=settings.default_queue,
         user_id=user.id,
     )

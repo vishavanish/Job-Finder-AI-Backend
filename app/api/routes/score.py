@@ -25,7 +25,7 @@ async def start_score(request: Request, req: ScoreRequest, user=Depends(require_
     GET /tasks/{task_id} for status and the ranked job list."""
     jobs = [j.model_dump() for j in req.jobs]
     response = dispatch(
-        score_task, args=[jobs, build_score_params(req)], queue=settings.default_queue, user_id=user.id,
+        score_task, args=[jobs, build_score_params(req, user_id=user.id)], queue=settings.default_queue, user_id=user.id,
     )
     logger.info("[task=%s] dispatched to '%s' for user=%s", response.task_id, settings.default_queue, user.id)
     return response
