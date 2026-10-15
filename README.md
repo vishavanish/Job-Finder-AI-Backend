@@ -75,7 +75,15 @@ Both repos on branch `dev`, side by side, with a Python 3.11 virtualenv next to 
 <parent>/venv                  # python -m venv venv
 ```
 
-**Quickest way — one command** (PowerShell or cmd, from `job_finder_api`):
+**Three terminals, one short command each** (PowerShell or cmd):
+
+| Terminal | Folder | Command |
+|----------|--------|---------|
+| API (`:8000`, runs migrations first) | `job_finder_api` | `.pi` |
+| Celery worker | `job_finder_api` | `.\worker` |
+| Frontend (`http://localhost:5173`) | `job-finder-frontend` | `npm run dev` |
+
+**Or all three in one terminal** (from `job_finder_api`):
 
 ```
 .\dev
