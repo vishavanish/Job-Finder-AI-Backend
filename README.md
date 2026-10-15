@@ -65,3 +65,24 @@ recent mail, pre-filters candidates that look like ATS/recruiter replies, and
 (pending) classifies them via LLM into rejection/interview/other before updating
 the matching `Application` row. Handles the case where you apply from one
 address but replies land in a different inbox.
+## Run locally in VS Code (backend + frontend)
+
+Both repos on branch `dev`, side by side, with a Python 3.11 virtualenv next to them:
+
+```
+<parent>/job_finder_api        # this repo
+<parent>/job-finder-frontend   # Job-Finder-AI-Frontend
+<parent>/venv                  # python -m venv venv
+```
+
+1. Open `job-finder.code-workspace` (File > Open Workspace from File).
+2. First time only: Terminal > Run Task > **setup: install dependencies**, and make sure
+   `job_finder_api/.env` has `JWT_SECRET_KEY` and `REDIS_URL` (Upstash is fine — local runs
+   only use the `*_dev` queues).
+3. Terminal > Run Task > **Run full stack** — runs migrations, then the API (`:8000`),
+   the Celery worker and the frontend (`http://localhost:5173`). Or Run and Debug >
+   **Full stack (debug)** for breakpoints.
+4. Optional: Run Task > **backend: make me admin** to give your local account the admin role.
+
+Local runs use `output/dev.db` (SQLite), never the Supabase `DATABASE_URL` in `.env`.
+Email sign-in codes are printed in the API terminal (`EMAIL_BACKEND=console`).

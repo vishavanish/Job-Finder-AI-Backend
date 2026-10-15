@@ -43,10 +43,50 @@ def test_pipeline_apply_step_passes_user_id(monkeypatch):
         seen.update(kw)
         return {"log": []}
 
-    monkeypatch.setattr(celery_tasks.browser_apply, "open_and_prepare", fake_open_and_prepare)
+    monkeypatch.setattr(celery_tasks.browser_apply, "open_and_prepare_isolated", fake_open_and_prepare)
     apply_params = {"applicant_info": {"first_name": "A", "last_name": "B", "email": "a@b.c"},
                     "user_id": "user-42", "headless": True}
 
     celery_tasks.pipeline_task({"keywords": ["x"], "locations": ["Pune"], "sources": ["linkedin"]},
                                SCORE_PARAMS, apply_params)
     assert seen["user_id"] == "user-42"
+
+
+def test_playwright_runs_on_a_thread_without_an_event_loop(monkeypatch):
+    """Regression: sync Playwright refuses threads that have an asyncio loop."""
+    import asyncio
+    import threading
+    from app.services import browser_apply
+    seen = {}
+
+    def fake(jobs, **kw):
+        seen["thread"] = threading.current_thread().name
+        try:
+            asyncio.get_running_loop()
+            seen["loop"] = True
+        except RuntimeError:
+            seen["loop"] = False
+        return {"log": []}
+
+    monkeypatch.setattr(browser_apply, "open_and_prepare", fake)
+
+    async def caller_with_running_loop():
+        return browser_apply.open_and_prepare_isolated([], user_id="u")
+
+    assert asyncio.run(caller_with_running_loop()) == {"log": []}
+    assert seen == {"thread": "playwright-apply", "loop": False}
+
+
+def test_isolated_apply_reraises_errors(monkeypatch):
+    from app.services import browser_apply
+
+    def boom(jobs, **kw):
+        raise ValueError("browser failed")
+
+    monkeypatch.setattr(browser_apply, "open_and_prepare", boom)
+    try:
+        browser_apply.open_and_prepare_isolated([])
+    except ValueError as e:
+        assert "browser failed" in str(e)
+    else:
+        raise AssertionError("error must propagate")

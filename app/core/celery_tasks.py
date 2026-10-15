@@ -331,7 +331,7 @@ def apply_task(self, jobs: list[dict], apply_params: dict) -> dict:
     if warning:
         progress_cb(warning)
 
-    result = browser_apply.open_and_prepare(
+    result = browser_apply.open_and_prepare_isolated(
         jobs,
         applicant_info=apply_params["applicant_info"],
         open_top_n=apply_params.get("open_top_n", 10),
@@ -406,7 +406,7 @@ def pipeline_task(self, search_params: dict, score_params: dict, apply_params: d
         if warning:
             progress_cb(warning)
 
-        raw = browser_apply.open_and_prepare(
+        raw = browser_apply.open_and_prepare_isolated(
             score_result["ranked_jobs"],
             applicant_info=apply_params["applicant_info"],
             open_top_n=apply_params.get("open_top_n", 10),
