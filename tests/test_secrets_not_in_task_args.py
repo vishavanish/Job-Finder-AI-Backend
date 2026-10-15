@@ -36,7 +36,8 @@ def test_score_args_carry_refs_not_keys(client, make_user, dispatched):
     assert secret_refs.resolve(params["gemini_api_key_ref"]) == GEMINI
     assert secret_refs.resolve(params["groq_api_key_ref"]) == GROQ
     assert secret_refs.resolve(params["hf_api_key_ref"]) == HF
-    assert params["groq_model"] == "custom/groq-model"  # 6.2 #3: Groq settings are forwarded now
+    # P2: the AI router picks the model; request model names are ignored, the worker gets user_id.
+    assert "groq_model" not in params and params["user_id"]
 
 
 def test_pipeline_args_carry_refs_not_keys(client, make_user, dispatched):

@@ -27,6 +27,11 @@ from app.core.redis_client import get_redis
 KEY_REF_PREFIX = "keyref_"
 
 
+def master_fernet() -> Fernet:
+    """The master key, shared with app/services/key_store.py."""
+    return _fernet()
+
+
 @lru_cache
 def _fernet() -> Fernet:
     settings = get_settings()

@@ -154,13 +154,15 @@ class ScoreRequest(BaseModel):
     llm_top_n_to_rank: int = Field(40, ge=1, le=200)
     llm_min_score_to_keep: float = Field(70, ge=0, le=100)
 
-    # model selection / overrides
-    gemini_model: str = "gemini-2.5-flash"
-    groq_model: str = "openai/gpt-oss-120b"
-    hf_model: str = "Qwen/Qwen3-8B"
-    gemini_api_key: Optional[SecretStr] = Field(None, description="Overrides server GEMINI_API_KEY for this call only.")
-    groq_api_key: Optional[SecretStr] = Field(None, description="Overrides server GROQ_API_KEY for this call only.")
-    hf_api_key: Optional[SecretStr] = Field(None, description="Overrides server HF_API_KEY for this call only.")
+    # Deprecated (P2): the AI router picks the model from the registry
+    # (GET /models, PUT /models/preferences); these names are ignored.
+    # Keys still work as one-run keys — prefer saving one with POST /keys.
+    gemini_model: str = Field("gemini-2.5-flash", deprecated=True)
+    groq_model: str = Field("openai/gpt-oss-120b", deprecated=True)
+    hf_model: str = Field("Qwen/Qwen3-8B", deprecated=True)
+    gemini_api_key: Optional[SecretStr] = Field(None, description="One-run key for Gemini models. Prefer POST /keys.")
+    groq_api_key: Optional[SecretStr] = Field(None, description="One-run key for Groq models. Prefer POST /keys.")
+    hf_api_key: Optional[SecretStr] = Field(None, description="One-run key for Hugging Face models. Prefer POST /keys.")
 
 class ScoreResult(BaseModel):
     ranked_jobs: list[Job]
@@ -231,9 +233,10 @@ class ScoreRequestPartial(BaseModel):
     keyword_prefilter_min_pct: float = Field(30, ge=0, le=100)
     llm_top_n_to_rank: int = Field(40, ge=1, le=200)
     llm_min_score_to_keep: float = Field(70, ge=0, le=100)
-    gemini_model: str = "gemini-2.5-flash"
-    groq_model: str = "openai/gpt-oss-120b"
-    hf_model: str = "Qwen/Qwen3-8B"
+    # Deprecated (P2): ignored — the AI router picks the model. Keys = one-run keys.
+    gemini_model: str = Field("gemini-2.5-flash", deprecated=True)
+    groq_model: str = Field("openai/gpt-oss-120b", deprecated=True)
+    hf_model: str = Field("Qwen/Qwen3-8B", deprecated=True)
     gemini_api_key: Optional[SecretStr] = None
     groq_api_key: Optional[SecretStr] = None
     hf_api_key: Optional[SecretStr] = None

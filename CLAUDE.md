@@ -172,7 +172,10 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Database | `app/core/db.py`, `app/models/` | One SQLAlchemy engine on **Supabase Postgres** (`DATABASE_URL`). Tables: `users`, `applications`, `application_status_events`, `pipeline_runs`, `pipeline_run_jobs` (the last two are unused — streaming state lives in Redis). |
 | Search | `routes/search.py`, `services/job_sources.py`, `services/naukri_apify_source.py` | JobSpy (LinkedIn/Indeed), Naukri via manual list or Apify; retries and pacing |
 | Dedupe | `services/job_dedupe.py`, `job_sources._deduplicate_jobs`, `pipeline_progress.claim_job_key` | Key = normalized company + title + city. **LinkedIn copy wins.** (Added in Phase 0 — before that, dedupe was by exact URL, so cross-source duplicates were never merged.) |
-| Scoring | `routes/score.py`, `services/scorer.py`, `core/celery_tasks._score_one_job_llm` | Keyword prefilter → Gemini → Groq → HF fallback chain. Batched path in `scorer.py`, per-job path in `celery_tasks.py`. Server keys (`GEMINI_API_KEY`, `GROQ_API_KEY`, `HF_API_KEY`) are used when the request supplies none. |
+| Scoring | `routes/score.py`, `services/scorer.py`, `core/celery_tasks._score_one_job_llm` | Keyword prefilter → LLM score via the **AI router** (P2). Batched path `scorer.score_jobs`, per-job path `scorer.score_one_job`. A reply that can't be parsed counts as a failed call. |
+| AI models & router | `services/ai_router.py`, `services/model_registry.py`, `providers/llm/`, `routes/models.py`, `routes/admin_ai.py` | Registry rows in `ai_models`; adapters: `gemini`, `groq`, `huggingface`, `anthropic` (official SDK), `openai_compatible` (any `/chat/completions` base URL). Chain: user choice → admin default → priority; Redis circuit breaker; every attempt in `usage_ledger`. |
+| Keys | `services/key_store.py`, `models/ai.Secret` | Envelope-encrypted platform + BYOK keys, masked (`last4`) everywhere. Lookup: user key → platform key → `.env` key. Request-body keys still work as one-run keys (`secret_refs`). |
+| Job-source catalog | `services/provider_catalog.py`, `routes/providers.py` | `provider_catalog` rows (linkedin, indeed, naukri free; naukri_apify paid). Routes drop sources that are off (admin/user), paid under Free tools only, or missing a key; `skipped_sources` says why. |
 | Streaming pipeline | `routes/pipeline.py`, `services/pipeline_progress.py` | Fan-out per keyword (plain Celery `group`, **not** `chord` — chords are unreliable on Upstash), results in a Redis list, polled by offset |
 | Company ATS | `routes/company_ats.py`, `services/company_ats_sources.py` | Greenhouse, Lever, SmartRecruiters, Workday, Oracle Fusion, SuccessFactors, custom (JSON probe → Playwright DOM fallback). SSRF guard `_reject_private_targets`. **No Recruitee fetcher yet.** |
 | Apply | `routes/apply.py`, `services/browser_apply.py` | Playwright, LinkedIn Easy Apply prefill (`_FILL_DISPATCH`, `AUTO_APPLY_CAPABLE_SOURCES = {"LinkedIn"}`), never auto-submits, capability filter; client-supplied `browser_profile_dir` is ignored (`task_params.build_apply_params`). The frontend calls `POST /apply/{id}/close`, which the backend does **not** implement. |
@@ -187,7 +190,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Shared Redis | `core/redis_client.py` | One client per process (`get_redis()`); tests swap in fakeredis. |
 | Frontend | separate repo `Job-Finder-AI-Frontend` | React 18 + Vite + react-router, plain JS (no TypeScript), axios client with hardcoded `API_URL`. Pages: Home, Keywords, Skills, ATS Targets, Providers, Applications, Profile, Login. Deployed on Vercel. |
 
-**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
+**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
 
 **CI:** `.github/workflows/tests.yml` runs the tests on every push and pull request (no secrets needed).
 
@@ -255,6 +258,27 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 - Refresh cookie is `SameSite=None; Secure` (frontend and API are cross-site); CORS already allows credentials for the Vercel origin.
 - New env: `GOOGLE_CLIENT_IDS`, `EMAIL_BACKEND` (`console` dev only — OTP returns 503 in production with it), `SMTP_HOST/PORT/USERNAME/PASSWORD/FROM/STARTTLS`, OTP tuning (`OTP_*`), `RATE_LIMIT_AUTH`, `REFRESH_*`.
 - First admin: `python -m app.scripts.set_role you@example.com admin` (audited; creates the account if needed).
+
+### 6.5 Phase 2 status (branch `dev`)
+
+| Item | State |
+|------|-------|
+| AI model registry | ✅ `ai_models` + admin CRUD (`/admin/models`), test button, per-task defaults. Admin adds any model, free or paid, without code; enabled models appear in users' `GET /models` at once. Seeded: Gemini 2.5 Flash → GPT-OSS 120B (Groq) → Qwen3 8B (HF), all free. |
+| Providers | ✅ `gemini`, `groq`, `huggingface`, `anthropic`, `openai_compatible` (covers OpenAI, OpenRouter, Together, DeepSeek, Mistral, local Ollama). |
+| Router | ✅ user choice → admin default → priority; skips disabled, wrong task, paid-not-allowed, Free-tools-only, keyless and breaker-open models (`AI_BREAKER_FAILURES` / `AI_BREAKER_COOLDOWN_SECONDS`). |
+| Paid models | ✅ usable with the `premium_models` entitlement (platform key) **or** the user's own key for that scope; never under Free tools only (owner decision 2026-10-15). |
+| BYOK + platform keys | ✅ `POST/GET/DELETE /keys`, `/admin/keys`; envelope encryption with `SECRETS_MASTER_KEY`; values never returned, logged, audited or enqueued. |
+| Usage ledger | ✅ every attempt (tokens, latency, cost, key source); `GET /usage`, `GET /admin/usage`, `GET /admin/users/{id}/usage`. |
+| Provider catalog + Free tools only | ✅ `GET /providers`, `PUT /providers/settings`, `/admin/providers`. Free tools only skips paid sources **and** paid models. |
+| Tests | ✅ 101 total (20 for P2) |
+| Not in P2 | STT/TTS/embeddings providers (P7); new job sources (RemoteOK, Adzuna… — P3); source auto-disable on repeated failures (only success/last error recorded); all screens (frontend F2). |
+
+**Operational changes introduced in P2**
+- Migration `0004` (run `alembic upgrade head`). Seeds the three current models and four job sources.
+- `.env` keys (`GEMINI_API_KEY`, `GROQ_API_KEY`, `HF_API_KEY`, `APIFY_API_TOKEN`, new `ANTHROPIC_API_KEY`) keep working as the last fallback; keys stored by an admin under `/admin/keys` take priority.
+- **`SECRETS_MASTER_KEY` now protects stored keys durably.** Changing it makes stored keys unreadable — back it up; never rotate it without re-wrapping.
+- `ScoreRequest.gemini_model/groq_model/hf_model` are deprecated and ignored; the router picks the model.
+- New env: `AI_BREAKER_FAILURES` (3), `AI_BREAKER_COOLDOWN_SECONDS` (300), `AI_REQUEST_TIMEOUT_SECONDS` (60).
 
 ---
 
