@@ -239,11 +239,11 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 
 | Item | State |
 |------|-------|
-| Email OTP (7.1 rules) | ✅ CSPRNG 6 digits, HMAC-only in Redis (keys hash the email), 10-min TTL, single use, 5 attempts, 60 s cooldown, hourly cap per email + per-IP rate limit, identical response for unknown/uninvited emails |
+| Email OTP (7.1 rules) | ✅ Errors carry `code` for the UI: `otp_invalid` (+`attempts_left`), `otp_locked`, `otp_expired`, `otp_cooldown` (+`retry_after`), `otp_too_many_requests`. CSPRNG 6 digits, HMAC-only in Redis (keys hash the email), 10-min TTL, single use, 5 attempts, 60 s cooldown, hourly cap per email + per-IP rate limit, identical response for unknown/uninvited emails |
 | Google sign-in | ✅ ID token verified by `google-auth` (signature, `iss`, `exp`, `aud` ∈ `GOOGLE_CLIENT_IDS`) + `email_verified`; links to an existing account by email |
 | Sessions | ✅ 15-min access + rotating refresh cookie, reuse detection, logout, `session_version` revocation |
 | RBAC, entitlements, quotas, kill switch | ✅ |
-| Admin: users, managers/teams, entitlements, flags, audit log | ✅ API only — no UI yet (frontend F1) |
+| Admin: users, managers/teams, entitlements, flags, audit log | ✅ API. Frontend F1 has UI for users (list, add, role, enable/disable, sign out everywhere), per-user entitlements and feature defaults; teams, flags and audit log have no UI yet |
 | Disabled user locked out immediately | ✅ next request gets 403 `account_disabled`; refresh refused; tasks revoked; streaming runs cancelled |
 | Every admin action audited | ✅ (`user.create/update/enable/disable/revoke_sessions`, `entitlement.set/reset`, `flag.set`, `user.signup`, `auth.login`, `auth.password_set`, `auth.refresh_token_reuse`, `user.role_set_cli`) |
 | Tests | ✅ 77 total |

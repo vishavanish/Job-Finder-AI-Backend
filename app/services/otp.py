@@ -81,25 +81,49 @@ def issue_code(email: str) -> str:
     return code
 
 
-def verify_code(email: str, code: str) -> bool:
-    """True exactly once for the right code within its lifetime."""
+class OtpResult:
+    """Outcome of one verification attempt.
+
+    status: "ok" | "invalid" (wrong code, attempts_left > 0)
+            | "locked" (wrong code, no attempts left — code deleted)
+            | "expired" (no live code: expired, used, or never requested)
+    """
+
+    def __init__(self, status: str, attempts_left: int = 0):
+        self.status = status
+        self.attempts_left = attempts_left
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+
+def check_code(email: str, code: str) -> OtpResult:
+    """Verifies `code`; the right code succeeds exactly once within its lifetime."""
     settings = get_settings()
     r = get_redis()
     code_key = f"otp:{_email_id(email)}"
 
     stored_mac = r.hget(code_key, "mac")
     if not stored_mac:
-        return False
+        return OtpResult("expired")
 
     attempts = r.hincrby(code_key, "attempts", 1)
     if attempts > settings.OTP_MAX_ATTEMPTS:
         r.delete(code_key)
-        return False
+        return OtpResult("locked")
 
     if hmac.compare_digest(stored_mac, _code_mac(email, code.strip())):
         r.delete(code_key)
-        return True
+        return OtpResult("ok")
 
-    if attempts >= settings.OTP_MAX_ATTEMPTS:
+    left = settings.OTP_MAX_ATTEMPTS - attempts
+    if left <= 0:
         r.delete(code_key)
-    return False
+        return OtpResult("locked")
+    return OtpResult("invalid", attempts_left=left)
+
+
+def verify_code(email: str, code: str) -> bool:
+    """True exactly once for the right code within its lifetime."""
+    return check_code(email, code).ok

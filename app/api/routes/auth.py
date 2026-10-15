@@ -75,10 +75,14 @@ def request_otp(request: Request, req: OtpRequest, background: BackgroundTasks, 
     try:
         code = otp.issue_code(req.email)
     except otp.OtpCooldown as e:
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Please wait before requesting another code.",
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail={"code": "otp_cooldown", "retry_after": e.retry_after,
+                                    "message": "Please wait before requesting another code."},
                             headers={"Retry-After": str(e.retry_after)})
     except otp.OtpTooManyRequests:
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many codes requested. Try again later.")
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail={"code": "otp_too_many_requests",
+                                    "message": "Too many codes requested. Try again in an hour."})
 
     user = accounts.find_by_email(db, req.email)
     may_sign_in = (user is not None and user.is_active) or (user is None and accounts.signup_open(db))
@@ -87,11 +91,28 @@ def request_otp(request: Request, req: OtpRequest, background: BackgroundTasks, 
     return MessageResponse(detail=OTP_SENT_MESSAGE)
 
 
+_OTP_ERRORS = {
+    "invalid": lambda left: {
+        "code": "otp_invalid", "attempts_left": left,
+        "message": f"That code isn't right. {left} attempt{'s' if left != 1 else ''} left.",
+    },
+    "locked": lambda _: {
+        "code": "otp_locked", "attempts_left": 0,
+        "message": "Too many wrong attempts. Request a new code.",
+    },
+    "expired": lambda _: {
+        "code": "otp_expired",
+        "message": "This code has expired or was already used. Request a new code.",
+    },
+}
+
+
 @router.post("/otp/verify", response_model=TokenResponse)
 @limiter.limit(settings.RATE_LIMIT_AUTH)
 def verify_otp(request: Request, req: OtpVerify, response: Response, db: Session = Depends(get_db)):
-    if not otp.verify_code(req.email, req.code):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired code.")
+    result = otp.check_code(req.email, req.code)
+    if not result.ok:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=_OTP_ERRORS[result.status](result.attempts_left))
     user = accounts.sign_in_verified(db, email=req.email, provider="email_otp", request=request)
     return sessions.start_session(user, response, db)
 
