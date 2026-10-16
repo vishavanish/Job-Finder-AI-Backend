@@ -30,7 +30,7 @@ from app.models.ai_schemas import (
     ModelTestResult, PlatformKeyList, TaskDefaults, UsageSummary,
 )
 from app.providers.llm import LLMError
-from app.services import ai_router, audit, key_store, model_registry, usage, user_admin
+from app.services import ai_router, audit, key_store, model_registry, provider_catalog, usage, user_admin
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 admin_only = require_role("admin")
@@ -171,15 +171,18 @@ def _source_view(db: Session, row: ProviderCatalog) -> dict:
         "key": row.key, "name": row.name, "tier": row.tier, "tos_risk": row.tos_risk,
         "requires_key": row.requires_key, "key_scope": row.key_scope, "description": row.description,
         "rate_limit": row.rate_limit, "enabled_global": row.enabled_global,
+        "default_enabled": bool(row.default_enabled),
         "key_configured": key_store.platform_key_available(db, row.key_scope) if row.key_scope else None,
         "health": {"consecutive_failures": row.consecutive_failures or 0, "last_success_at": row.last_success_at,
-                   "last_error_at": row.last_error_at, "last_error": row.last_error},
+                   "last_error_at": row.last_error_at, "last_error": row.last_error,
+                   "paused_until": provider_catalog.paused_until(row)},
     }
 
 
 def _source_snapshot(row: ProviderCatalog) -> dict:
     return {"name": row.name, "tier": row.tier, "tos_risk": row.tos_risk, "rate_limit": row.rate_limit,
-            "description": row.description, "enabled_global": row.enabled_global}
+            "description": row.description, "enabled_global": row.enabled_global,
+            "default_enabled": bool(row.default_enabled)}
 
 
 @router.get("/providers", response_model=list[AdminSourceOut])

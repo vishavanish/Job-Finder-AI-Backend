@@ -1,0 +1,156 @@
+{
+ "comments": "21/08/2026: Cursor pagination is now available and is the preferred way to page through the feed. Pass the nextCursor value from each response back as ?cursor=. It is faster than offset and will never return the same job twice. The offset parameter is deprecated and will be removed in a future release. 13/03/2026: The API has been updated to include the companySlug field in the response.",
+ "updatedAt": 1792158620,
+ "offset": 0,
+ "limit": 20,
+ "totalCount": 124790,
+ "nextCursor": null,
+ "jobs": [
+  {
+   "title": "Senior Product Manager",
+   "excerpt": "Seven Starling is revolutionizing women's behavioral health through our clinically-validated virtual care platform.",
+   "companyName": "Seven Starling",
+   "companySlug": "seven-starling",
+   "companyLogo": "https://cdn-images.himalayas.app/hm7ktp7vcmlii9as3gpoja4gkwj5",
+   "employmentType": "Full Time",
+   "minSalary": 135000,
+   "maxSalary": 150000,
+   "salaryPeriod": "annual",
+   "seniority": [
+    "Senior"
+   ],
+   "currency": "USD",
+   "locationRestrictions": [
+    "United States"
+   ],
+   "timezoneRestrictions": [
+    -10,
+    -9,
+    -8,
+    -7,
+    -6,
+    -5,
+    14
+   ],
+   "categories": [
+    "Product-Manager",
+    "Technical-Product-Manager",
+    "Digital-Health-Product-Manager",
+    "HealthTech-Product-Manager",
+    "Senior-Product-Management",
+    "Product"
+   ],
+   "parentCategories": [
+    "Product"
+   ],
+   "description": "<div>\n<p><a href=\"https://himalayas.app/companies/seven-starling\">Seven Starling</a> is revolutionizing women's behavioral health through our clinically-validated virtual care platform. As a venture-backed, rapidly scaling startup at the forefront of maternal healthcare innovation, we've developed a",
+   "pubDate": 1792158620,
+   "expiryDate": 1797342619,
+   "applicationLink": "https://himalayas.app/companies/seven-starling/jobs/senior-product-manager",
+   "guid": "https://himalayas.app/companies/seven-starling/jobs/senior-product-manager"
+  },
+  {
+   "title": "Data Entry Clerk",
+   "excerpt": "This is a remote position. We are seeking a detail-oriented and organized Data Entry Clerk to efficiently manage and process a high volume of data for our organization.",
+   "companyName": "Better Hearing Centers",
+   "companySlug": "better-hearing-centers",
+   "companyLogo": "https://cdn-images.himalayas.app/1y5t7vss4g72tb8ajvncws6cb3qo",
+   "employmentType": "Full Time",
+   "minSalary": null,
+   "maxSalary": null,
+   "salaryPeriod": "annual",
+   "seniority": [
+    "Entry-level"
+   ],
+   "currency": null,
+   "locationRestrictions": [
+    "United States"
+   ],
+   "timezoneRestrictions": [
+    -10,
+    -9,
+    -8,
+    -7,
+    -6,
+    -5,
+    14
+   ],
+   "categories": [
+    "Data-Entry-Clerk",
+    "Data-Entry-Specialist",
+    "Administrative-Clerk",
+    "Administrative-Assistant",
+    "Office-Clerk",
+    "Data-Entry-Operator",
+    "Data-Entry-Associate",
+    "Data-Entry-Coordinator",
+    "Data-Entry-Assistant",
+    "Document-Entry-Clerk",
+    "Data-Entry-Executive",
+    "Data-Entry-Agent"
+   ],
+   "parentCategories": [
+    "Operations",
+    "Human Resources"
+   ],
+   "description": "<h3>This is a remote position.</h3><div>We are seeking a detail-oriented and organized <b>Data Entry Clerk</b> to efficiently manage and process a high volume of data for our organization. The ideal candidate will be responsible for entering, updating, and maintaining accurate information in company",
+   "pubDate": 1792158613,
+   "expiryDate": 1797342612,
+   "applicationLink": "https://himalayas.app/companies/better-hearing-centers/jobs/data-entry-clerk",
+   "guid": "https://himalayas.app/companies/better-hearing-centers/jobs/data-entry-clerk"
+  },
+  {
+   "title": "Community Moderator & Content Specialist",
+   "excerpt": "This is a remote position. About Us: At MENA Alliances, we are dedicated to empowering talented individuals from underrepresented regions, particularly in the MENA region, by creating meaningful opportunities and building bridges to global markets.",
+   "companyName": "MENA Alliances",
+   "companySlug": "mena-alliances",
+   "companyLogo": "https://cdn-images.himalayas.app/qk354vwd4a5catzlcnzdbcbemcm6",
+   "employmentType": "Full Time",
+   "minSalary": null,
+   "maxSalary": null,
+   "salaryPeriod": "annual",
+   "seniority": [
+    "Mid-level"
+   ],
+   "currency": null,
+   "locationRestrictions": [
+    "United States"
+   ],
+   "timezoneRestrictions": [
+    -10,
+    -9,
+    -8,
+    -7,
+    -6,
+    -5,
+    14
+   ],
+   "categories": [
+    "Community-Manager",
+    "Content-Specialist",
+    "Social-Media-Manager",
+    "Content-Marketing-Specialist",
+    "Digital-Content-Creator",
+    "Community-Moderator",
+    "Content-Moderation-Specialist",
+    "Senior-Content-and-Community-Specialist",
+    "Social-and-Community-Content-Specialist",
+    "Content-Moderator",
+    "Social-Media-Content-Moderator",
+    "Online-Community-Specialist",
+    "Community-Management-Specialist",
+    "Community-Moderation"
+   ],
+   "parentCategories": [
+    "Marketing",
+    "Content Creator",
+    "Operations"
+   ],
+   "description": "<h3>This is a remote position.</h3><div>About Us: <br>At <a href=\"https://himalayas.app/companies/mena-alliances\">MENA Alliances</a>, we are dedicated to empowering talented individuals from underrepresented regions, particularly in the MENA region, by creating meaningful opportunities and building ",
+   "pubDate": 1792158604,
+   "expiryDate": 1797342603,
+   "applicationLink": "https://himalayas.app/companies/mena-alliances/jobs/community-moderator-content-specialist",
+   "guid": "https://himalayas.app/companies/mena-alliances/jobs/community-moderator-content-specialist"
+  }
+ ]
+}

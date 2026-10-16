@@ -201,6 +201,7 @@ class SourceHealth(BaseModel):
     last_success_at: Optional[datetime] = None
     last_error_at: Optional[datetime] = None
     last_error: Optional[str] = None
+    paused_until: Optional[datetime] = Field(None, description="Skipped after repeated errors until this time")
 
 
 class UserSourceOut(BaseModel):
@@ -213,6 +214,7 @@ class UserSourceOut(BaseModel):
     description: Optional[str] = None
     rate_limit: Optional[str] = None
     enabled: bool = Field(..., description="The user's own switch")
+    default_enabled: bool = Field(True, description="Switch position for users who never changed it")
     available: bool = Field(..., description="Will run in the user's next search")
     reason: Optional[str] = None
     health: SourceHealth
@@ -238,6 +240,7 @@ class AdminSourceOut(BaseModel):
     description: Optional[str] = None
     rate_limit: Optional[str] = None
     enabled_global: bool
+    default_enabled: bool = True
     key_configured: Optional[bool] = None
     health: SourceHealth
 
@@ -249,3 +252,4 @@ class AdminSourceUpdate(BaseModel):
     rate_limit: Optional[str] = Field(None, max_length=100)
     description: Optional[str] = Field(None, max_length=500)
     enabled_global: Optional[bool] = None
+    default_enabled: Optional[bool] = Field(None, description="On for users who never switched it themselves")

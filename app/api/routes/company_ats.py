@@ -36,7 +36,8 @@ def _reject_private_targets(req: CompanyAtsRequest) -> None:
     (e.g. cloud metadata endpoints) before the task is even dispatched,
     regardless of which fetch strategy ends up being used."""
     for target in req.targets:
-        if target.platform != "custom" or not target.custom_endpoint_url:
+        # workday targets also fetch the caller's custom_endpoint_url host.
+        if target.platform not in ("custom", "workday") or not target.custom_endpoint_url:
             continue
         host = urlparse(target.custom_endpoint_url).hostname
         if not host:

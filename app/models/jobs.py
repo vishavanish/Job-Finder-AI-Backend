@@ -19,7 +19,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 
 from app.core.db import Base
 from app.models.user import User  # noqa: F401 — see app/models/application.py for why
@@ -48,6 +48,7 @@ class Job(Base):
     description = Column(Text, nullable=False, default="")
     posted = Column(String(64), nullable=False, default="")
     best_source = Column(String(100), nullable=False, default="")
+    best_source_rank = Column(Integer, nullable=False, default=2)  # source_info.source_rank; lower is better
     first_seen_at = Column(DateTime, default=_now, nullable=False)
     last_seen_at = Column(DateTime, default=_now, nullable=False)
 

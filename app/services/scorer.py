@@ -18,6 +18,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from app.services import ai_router
+from app.services.source_info import has_partial_description
 
 logger = logging.getLogger("job_finder_api.scorer")
 NoOpProgress: Callable[[str], None] = lambda msg: None
@@ -84,10 +85,13 @@ def _build_user_prompt(jobs: list[dict], resume_summary: str) -> str:
     batch_desc = []
     for i, job in enumerate(jobs):
         snippet = (job.get("description", "") or "")[:1200]
+        label = ("Description (short snippet from a job aggregator; judge mainly on the title and the details "
+                 "given, and do not penalise details that are missing)"
+                 if has_partial_description(job.get("source")) else "Description")
         batch_desc.append(
             f"Index: {i}\nTitle: {job.get('title', '')}\n"
             f"Company: {job.get('company', '')}\nSource: {job.get('source', '')}\n"
-            f"Description:\n{snippet}\n"
+            f"{label}:\n{snippet}\n"
         )
     return f"CANDIDATE RESUME SUMMARY:\n{resume_summary}\n\nJOB POSTINGS:\n" + "\n".join(batch_desc)
 

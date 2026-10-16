@@ -27,19 +27,40 @@ from app.services import provider_catalog, search_profiles
 from app.services.secret_refs import stash_secret_field
 
 
-def build_search_params(req: SearchRequest, *, db: Session, user: User) -> dict:
+def client_info(request) -> tuple[str, str]:
+    """(IP, User-Agent) of the API caller, for sources that require them."""
+    return (request.client.host if request.client else ""), request.headers.get("user-agent", "")
+
+
+def _remote_ok(locations: list[str], prefs) -> bool:
+    """Remote-only feeds run when the search is for remote work."""
+    if any("remote" in (loc or "").lower() for loc in locations):
+        return True
+    return bool(prefs and "remote" in [str(m).lower() for m in (prefs.work_modes or [])])
+
+
+def build_search_params(req: SearchRequest, *, db: Session, user: User,
+                        client: tuple[str, str] | None = None) -> dict:
+    """`client` = (IP, User-Agent) of the caller; only Careerjet needs it."""
+    requested = list(req.sources) if req.sources is not None else None
     plan = provider_catalog.effective_sources(
-        db, user, requested=list(req.sources), want_naukri_apify=req.enable_naukri_apify,
+        db, user, requested=requested, want_naukri_apify=req.enable_naukri_apify,
         has_apify_request_key=bool(req.apify_api_token),
+        remote_ok=_remote_ok(req.locations, search_profiles.preferences(db, user.id)),
     )
-    if not plan.sources and not plan.naukri_apify and not (req.manual_naukri_jobs and "naukri" in req.sources):
+    if requested is None and req.manual_naukri_jobs:
+        plan.sources.append("naukri")
+    if not plan.sources and not plan.naukri_apify:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": "no_sources_available",
                     "message": "None of the selected job sources can run: " + "; ".join(plan.skipped),
                     "skipped": plan.skipped},
         )
-    return {
+    if req.enable_naukri_auto:
+        plan.skipped.append("Naukri automatic search: no longer available (Naukri requires a captcha) — "
+                            "use manual import or Naukri via Apify")
+    params = {
         "user_id": user.id,
         "keywords": req.keywords,
         "locations": req.locations,
@@ -52,12 +73,15 @@ def build_search_params(req: SearchRequest, *, db: Session, user: User) -> dict:
         "search_delay_sec": req.search_delay_sec,
         "linkedin_max_retries": req.linkedin_max_retries,
         "linkedin_retry_delay_sec": req.linkedin_retry_delay_sec,
-        "enable_naukri_auto": req.enable_naukri_auto,
+        "enable_naukri_auto": False,  # deprecated; JobSpy's Naukri search is blocked
         "manual_naukri_jobs": [j.model_dump() for j in req.manual_naukri_jobs],
         "enable_naukri_apify": plan.naukri_apify,
         "apify_naukri_actor_id": req.apify_naukri_actor_id,
         "apify_api_token_ref": stash_secret_field(req.apify_api_token),
     }
+    if "careerjet" in plan.sources and client:
+        params["client_ip"], params["client_user_agent"] = client[0][:64], client[1][:300]
+    return params
 
 
 def build_score_params(req: ScoreRequest | ScoreRequestPartial, *, user_id: str) -> dict:
@@ -77,7 +101,8 @@ def build_score_params(req: ScoreRequest | ScoreRequestPartial, *, user_id: str)
     }
 
 
-def build_pipeline_params(req: PipelineRequest, *, db: Session, user: User) -> tuple[dict, dict]:
+def build_pipeline_params(req: PipelineRequest, *, db: Session, user: User,
+                          client: tuple[str, str] | None = None) -> tuple[dict, dict]:
     """(search_params, score_params) for /pipeline/run and /pipeline/run/stream.
 
     Profile mode fills keywords, skills and context from the saved search
@@ -124,7 +149,7 @@ def build_pipeline_params(req: PipelineRequest, *, db: Session, user: User) -> t
     score["filters"] = filters
     score["include_seen"] = req.include_seen
     score["profile_hash"] = search_profiles.profile_hash(score)
-    return build_search_params(search, db=db, user=user), score
+    return build_search_params(search, db=db, user=user, client=client), score
 
 
 def build_apply_params(req: ApplyRequest, *, user_id: str) -> dict:

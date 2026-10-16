@@ -45,6 +45,20 @@ class Settings(BaseSettings):
     # Fallback for Anthropic models when no platform key is stored (P2 key store).
     ANTHROPIC_API_KEY: str = ""
 
+    # Free job-source keys (.env fallback; keys stored via /keys or /admin/keys win).
+    ADZUNA_API_KEY: str = ""      # "APP_ID:APP_KEY"
+    JOOBLE_API_KEY: str = ""
+    CAREERJET_API_KEY: str = ""
+
+    # ---- job sources (CLAUDE.md 7.4) ----
+    SOURCE_HTTP_TIMEOUT_SECONDS: int = 20
+    FEED_CACHE_TTL_SECONDS: int = 3600          # remote feeds downloaded at most once per TTL
+    SOURCE_BREAKER_FAILURES: int = 5            # consecutive failures before a source is paused
+    SOURCE_BREAKER_COOLDOWN_SECONDS: int = 1800
+    SOURCE_DAILY_CAP_OWN_KEY: int = 100         # keyed-API calls per user per day with their own key
+    SOURCE_DAILY_CAP_PLATFORM_KEY: int = 20     # ... per user per day on the shared platform key
+    SOURCE_DAILY_CAP_PLATFORM_TOTAL: int = 200  # ... all users together per day on the platform key
+
     # ---- AI router (CLAUDE.md 7.9) ----
     AI_BREAKER_FAILURES: int = 3          # consecutive failures before a model is skipped
     AI_BREAKER_COOLDOWN_SECONDS: int = 300

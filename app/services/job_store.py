@@ -7,8 +7,9 @@ Canonical jobs and per-user job state (CLAUDE.md 7.5).
 running in parallel on different workers. It is race-safe without locks:
   - the insert relies on the unique `job_key` (a loser re-reads the row);
   - "is this copy better?" is a single conditional UPDATE, so two copies
-    arriving at once cannot overwrite a better one. Better = LinkedIn over
-    anything else, otherwise the longer description (job_dedupe.preferred).
+    arriving at once cannot overwrite a better one. Better = a better-ranked
+    source (LinkedIn > company ATS > board > aggregator, stored in
+    `best_source_rank`), otherwise the longer description (job_dedupe.preferred).
 It commits per job: these run in workers, one short transaction per copy.
 
 `decide` says what the pipeline does with a job the user may have met
@@ -23,6 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.jobs import Job, JobSourceSeen, UserJob
+from app.services.source_info import source_rank
 
 # States set by the user (or the apply engine) that a feed never overwrites.
 STICKY_STATES = {"saved", "hidden", "applied"}
@@ -41,12 +43,8 @@ def _fields(job: dict) -> dict:
         "title": _clip(job.get("title"), 500), "company": _clip(job.get("company"), 255),
         "location": _clip(job.get("location"), 255), "url": str(job.get("url") or ""),
         "description": str(job.get("description") or ""), "posted": _clip(job.get("posted"), 64),
-        "best_source": _clip(job.get("source"), 100),
+        "best_source": _clip(job.get("source"), 100), "best_source_rank": source_rank(job.get("source")),
     }
-
-
-def _is_linkedin(job: dict) -> bool:
-    return (job.get("source") or "").strip().lower() == "linkedin"
 
 
 def upsert_copy(db: Session, job: dict, key: str) -> Job:
@@ -66,9 +64,9 @@ def upsert_copy(db: Session, job: dict, key: str) -> Job:
             _touch_source(db, row.id, fields["best_source"], fields["url"])
             return row
 
-    better = func.length(Job.description) < len(fields["description"])
-    not_linkedin = func.lower(Job.best_source) != "linkedin"
-    cond = or_(not_linkedin, better) if _is_linkedin(job) else (not_linkedin & better)
+    rank = fields["best_source_rank"]
+    longer = func.length(Job.description) < len(fields["description"])
+    cond = or_(Job.best_source_rank > rank, (Job.best_source_rank == rank) & longer)
     if not db.execute(update(Job).where(Job.id == row.id, cond).values(**fields, last_seen_at=_now())).rowcount:
         db.execute(update(Job).where(Job.id == row.id).values(last_seen_at=_now()))
     db.commit()

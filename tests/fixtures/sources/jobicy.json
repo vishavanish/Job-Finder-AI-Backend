@@ -1,0 +1,81 @@
+{
+ "apiVersion": "2.2.19",
+ "documentationUrl": "https://jobi.cy/apidocs",
+ "friendlyNotice": "Thanks for using Jobicy API! Please ensure Jobicy is clearly credited with a direct link to the source, and all application buttons redirect to the original job URL provided in this feed. That’s all! You might be building something amazing, we wish you the best of luck!",
+ "jobCount": 50,
+ "lastUpdate": "2026-10-16T03:50:03+00:00",
+ "nextCursor": "AgAAAABq0ii-AAAAAGrRjpEAAAAAAAJMj5GStyjVOt7ULMvdFdHp_0xjGsH--7hP_G6cSgT0AUpIWGbhbDWcHbFu_miwZHrOGQHnXgbD8YmE0PeJQ0DCAgI",
+ "hasMore": true,
+ "appliedFilters": {
+  "count": 50
+ },
+ "jobs": [
+  {
+   "id": 147750,
+   "url": "https://jobicy.com/jobs/147750-security-software-engineer-iam",
+   "jobSlug": "147750-security-software-engineer-iam",
+   "jobTitle": "Security Software Engineer, IAM",
+   "companyName": "Vercel",
+   "companyLogo": "https://jobicy.com/data/server-nyc0409/galaxy/mercury/2025/06/a6aded72-221.png",
+   "jobIndustry": [
+    "Cybersecurity"
+   ],
+   "jobType": [
+    "Full-Time"
+   ],
+   "jobGeo": "USA",
+   "jobLevel": "Senior",
+   "jobExcerpt": "About Vercel: Vercel is the agentic infrastructure company. We free people and agents to ship what’s next. For more than a decade, Vercel has shaped how the web is built. As the team behind Next.js, v0, and AI SDK, we create products that help builders move from idea to production with speed, security, and exceptional&hellip;",
+   "jobDescription": "<div><h2>About <a href=\"https://jobicy.com/company/vercel\" target=\"_blank\" rel=\"noopener\">Vercel</a>:</h2>\n<p>Vercel is the agentic infrastructure company. We free people and agents to ship what’s next.</p>\n<p>For more than a decade, Vercel has shaped how the web is built. As the team behind Next.js",
+   "pubDate": "2026-10-16T03:50:03+00:00",
+   "salaryMin": 208000,
+   "salaryMax": 312000,
+   "salaryCurrency": "USD",
+   "salaryPeriod": "yearly"
+  },
+  {
+   "id": 153330,
+   "url": "https://jobicy.com/jobs/153330-major-gifts-officer",
+   "jobSlug": "153330-major-gifts-officer",
+   "jobTitle": "Major Gifts Officer",
+   "companyName": "Mozilla",
+   "companyLogo": "https://jobicy.com/data/server-nyc0409/galaxy/mercury/2020/10/mozilla.jpg",
+   "jobIndustry": [
+    "Business Development"
+   ],
+   "jobType": [
+    "Full-Time"
+   ],
+   "jobGeo": "Canada,  Germany,  UK,  USA",
+   "jobLevel": "Director",
+   "jobExcerpt": "Mozilla Foundation is a non-profit building a better technology future — powered by people, open by design, fueled by imagination. We deliver people-first alternatives to today’s extractive systems. We build side by side with developers, innovators and advocates, united in the belief that a better technology future is not only possible — it’s ours to&hellip;",
+   "jobDescription": "<p><a href=\"https://foundation.mozilla.org/en/\" rel=\"nofollow ugc noopener\" target=\"_blank\">Mozilla Foundation</a> is a non-profit building a better technology future — powered by people, open by design, fueled by imagination.</p>\n<p>We deliver people-first alternatives to today’s extractive systems",
+   "pubDate": "2026-10-16T03:20:06+00:00",
+   "salaryMin": 102200,
+   "salaryMax": 131523,
+   "salaryCurrency": "USD",
+   "salaryPeriod": "yearly"
+  },
+  {
+   "id": 153321,
+   "url": "https://jobicy.com/jobs/153321-postgres-engineer",
+   "jobSlug": "153321-postgres-engineer",
+   "jobTitle": "Postgres Engineer",
+   "companyName": "Supabase",
+   "companyLogo": "https://jobicy.com/data/server-nyc0409/galaxy/mercury/2026/06/611d3bfa-221.png",
+   "jobIndustry": [
+    "Software Engineering"
+   ],
+   "jobType": [
+    "Full-Time"
+   ],
+   "jobGeo": "Anywhere",
+   "jobLevel": "Senior",
+   "jobExcerpt": "Supabase is the Postgres development platform, built by developers for developers. We provide a complete backend solution including Database, Auth, Storage, Edge Functions, Realtime, and Vector Search. All services are deeply integrated and designed for growth. About the Role We’re looking for a Senior Postgres Engineer to join our Postgres Team and help maintain and&hellip;",
+   "jobDescription": "<p><a href=\"https://jobicy.com/company/supabase\" target=\"_blank\" rel=\"noopener\">Supabase</a> is the Postgres development platform, built by developers for developers. We provide a complete backend solution including Database, Auth, Storage, Edge Functions, Realtime, and Vector Search. All services a",
+   "pubDate": "2026-10-16T03:20:05+00:00"
+  }
+ ],
+ "statusCode": 200,
+ "success": true
+}

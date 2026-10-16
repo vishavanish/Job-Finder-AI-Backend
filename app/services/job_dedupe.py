@@ -10,12 +10,15 @@ and only the city part of the location is compared, so
 "Acme Pvt. Ltd." / "Mumbai, Maharashtra, India" on LinkedIn and
 "ACME" / "Mumbai" on Indeed collapse to one key.
 
-When two copies collide, the LinkedIn copy wins (it supports Easy
-Apply); otherwise the copy with the longer description wins.
+When two copies collide, the better-ranked source wins: LinkedIn (it
+supports Easy Apply) > company ATS page > job board > aggregator/feed
+(app/services/source_info.py); within a rank, the longer description.
 """
 from __future__ import annotations
 
 import re
+
+from app.services.source_info import source_rank
 
 _LEGAL_SUFFIXES = {
     "pvt", "private", "ltd", "limited", "inc", "incorporated", "llc", "llp",
@@ -53,14 +56,12 @@ def job_key(job: dict) -> str:
     return f"{company}|{title}|{normalize_city(job.get('location', ''))}"
 
 
-def _is_linkedin(job: dict) -> bool:
-    return (job.get("source") or "").strip().lower() == "linkedin"
-
-
 def preferred(existing: dict, candidate: dict) -> dict:
-    """Which of two copies of the same job to keep."""
-    if _is_linkedin(existing) != _is_linkedin(candidate):
-        return existing if _is_linkedin(existing) else candidate
+    """Which of two copies of the same job to keep: the better-ranked
+    source (source_info.source_rank), then the longer description."""
+    existing_rank, candidate_rank = source_rank(existing.get("source")), source_rank(candidate.get("source"))
+    if existing_rank != candidate_rank:
+        return existing if existing_rank < candidate_rank else candidate
     if len(candidate.get("description") or "") > len(existing.get("description") or ""):
         return candidate
     return existing

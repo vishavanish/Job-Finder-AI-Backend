@@ -135,6 +135,7 @@ class ProviderCatalog(Base):
     rate_limit = Column(String(100), nullable=True)
     description = Column(String(500), nullable=True)
     enabled_global = Column(Boolean, nullable=False, default=True)
+    default_enabled = Column(Boolean, nullable=False, default=True)  # on for users who never switched it
 
     consecutive_failures = Column(Integer, nullable=False, default=0)
     last_success_at = Column(DateTime, nullable=True)

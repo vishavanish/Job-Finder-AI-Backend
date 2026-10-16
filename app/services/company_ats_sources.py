@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 import time
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 import logging
 import requests
 
@@ -400,6 +400,193 @@ def fetch_custom_rendered(
     return jobs
 
 
+# ---------------------------------------------------------------- public ATS boards (P3.1)
+# Slugs come from the caller. The ones that become a subdomain are limited
+# to DNS-label characters, so a slug can never change which host we call
+# (e.g. "evil.com#" would otherwise turn "{slug}.recruitee.com" into evil.com);
+# path slugs are URL-encoded.
+
+_SUBDOMAIN_SLUG = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+_PATH_SLUG = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+
+
+def _subdomain_slug(platform: str, slug: str, progress: Callable[[str], None]) -> str | None:
+    if _SUBDOMAIN_SLUG.match(slug or ""):
+        return slug.lower()
+    progress(f"{platform} '{slug}': slug may only contain letters, digits and '-' — skipping")
+    return None
+
+
+def _path_slug(platform: str, slug: str, progress: Callable[[str], None]) -> str | None:
+    if _PATH_SLUG.match(slug or ""):
+        return quote(slug, safe="")
+    progress(f"{platform} '{slug}': slug may only contain letters, digits, '.', '_' and '-' — skipping")
+    return None
+
+
+def _fetch(platform: str, slug: str, method: str, url: str, progress: Callable[[str], None], **kwargs):
+    """JSON (or text for XML feeds) from a public ATS endpoint, or None after reporting why."""
+    as_text = kwargs.pop("as_text", False)
+    try:
+        resp = requests.request(method, url, headers=HEADERS, timeout=20, allow_redirects=False, **kwargs)
+        if resp.status_code != 200:
+            progress(f"{platform} '{slug}' returned {resp.status_code}")
+            return None
+        return resp.text if as_text else resp.json()
+    except Exception as e:  # noqa: BLE001
+        progress(f"{platform} '{slug}' fetch failed: {type(e).__name__}")
+        return None
+
+
+def fetch_ashby(company_slug: str, progress: Callable[[str], None] = NoOpProgress) -> list[dict]:
+    slug = _path_slug("Ashby", company_slug, progress)
+    data = slug and _fetch("Ashby", company_slug, "GET",
+                           f"https://api.ashbyhq.com/posting-api/job-board/{slug}", progress)
+    if not data:
+        return []
+    jobs = []
+    for item in data.get("jobs", []):
+        if item.get("isListed") is False:
+            continue
+        location = item.get("location", "")
+        if item.get("isRemote") and "remote" not in location.lower():
+            location = f"{location} (Remote)" if location else "Remote"
+        jobs.append({
+            "source": "Ashby",
+            "title": (item.get("title") or "").strip(),
+            "company": company_slug,
+            "location": location,
+            "url": item.get("jobUrl", ""),
+            "description": item.get("descriptionPlain") or _strip_html(item.get("descriptionHtml", "")),
+            "posted": item.get("publishedAt", ""),
+        })
+    progress(f"Ashby '{company_slug}': {len(jobs)} jobs")
+    return jobs
+
+
+def fetch_recruitee(company_slug: str, progress: Callable[[str], None] = NoOpProgress) -> list[dict]:
+    slug = _subdomain_slug("Recruitee", company_slug, progress)
+    data = slug and _fetch("Recruitee", company_slug, "GET", f"https://{slug}.recruitee.com/api/offers/", progress)
+    if not data:
+        return []
+    jobs = []
+    for item in data.get("offers", []):
+        location = item.get("location") or ", ".join(filter(None, [item.get("city"), item.get("country")]))
+        if item.get("remote") and "remote" not in location.lower():
+            location = f"{location} (Remote)" if location else "Remote"
+        jobs.append({
+            "source": "Recruitee",
+            "title": item.get("title", ""),
+            "company": item.get("company_name") or company_slug,
+            "location": location,
+            "url": item.get("careers_url", ""),
+            "description": _strip_html(f"{item.get('description', '')} {item.get('requirements', '')}"),
+            "posted": item.get("published_at", ""),
+        })
+    progress(f"Recruitee '{company_slug}': {len(jobs)} jobs")
+    return jobs
+
+
+def fetch_workable(company_slug: str, progress: Callable[[str], None] = NoOpProgress) -> list[dict]:
+    """Workable's public careers API; the list has no descriptions (one
+    extra call per job would be needed), like Workday."""
+    slug = _path_slug("Workable", company_slug, progress)
+    if not slug:
+        return []
+    jobs, token = [], None
+    for _ in range(5):  # 5 pages is plenty for one company board
+        body = {"query": "", "location": [], "department": [], "worktype": [], "remote": []}
+        if token:
+            body["token"] = token
+        data = _fetch("Workable", company_slug, "POST",
+                      f"https://apply.workable.com/api/v3/accounts/{slug}/jobs", progress, json=body)
+        if not data:
+            break
+        for item in data.get("results", []):
+            loc = item.get("location") or {}
+            location = ", ".join(filter(None, [loc.get("city"), loc.get("region"), loc.get("country")]))
+            if item.get("remote"):
+                location = f"{location} (Remote)" if location else "Remote"
+            jobs.append({
+                "source": "Workable",
+                "title": item.get("title", ""),
+                "company": company_slug,
+                "location": location,
+                "url": f"https://apply.workable.com/{slug}/j/{item.get('shortcode', '')}/",
+                "description": "",
+                "posted": item.get("published", ""),
+            })
+        token = data.get("nextPage")
+        if not token:
+            break
+    progress(f"Workable '{company_slug}': {len(jobs)} jobs")
+    return jobs
+
+
+def fetch_personio(company_slug: str, progress: Callable[[str], None] = NoOpProgress) -> list[dict]:
+    import xml.etree.ElementTree as ET  # expat >= 2.4 blocks entity-expansion bombs
+
+    slug = _subdomain_slug("Personio", company_slug, progress)
+    text = slug and _fetch("Personio", company_slug, "GET", f"https://{slug}.jobs.personio.de/xml", progress,
+                           as_text=True)
+    if not text:
+        return []
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        progress(f"Personio '{company_slug}': feed was not valid XML")
+        return []
+    jobs = []
+    for pos in root.iterfind("position"):
+        parts = [f"{d.findtext('name') or ''}: {d.findtext('value') or ''}"
+                 for d in pos.iterfind("jobDescriptions/jobDescription")]
+        jobs.append({
+            "source": "Personio",
+            "title": (pos.findtext("name") or "").strip(),
+            "company": pos.findtext("subcompany") or company_slug,
+            "location": pos.findtext("office") or "",
+            "url": f"https://{slug}.jobs.personio.de/job/{(pos.findtext('id') or '').strip()}",
+            "description": _strip_html(" ".join(parts)),
+            "posted": pos.findtext("createdAt") or "",
+        })
+    progress(f"Personio '{company_slug}': {len(jobs)} jobs")
+    return jobs
+
+
+def fetch_breezy(company_slug: str, progress: Callable[[str], None] = NoOpProgress) -> list[dict]:
+    slug = _subdomain_slug("Breezy", company_slug, progress)
+    data = slug and _fetch("Breezy", company_slug, "GET", f"https://{slug}.breezy.hr/json", progress)
+    if not isinstance(data, list):
+        return []
+    jobs = []
+    for item in data:
+        loc = item.get("location") or {}
+        country = (loc.get("country") or {}).get("name")
+        location = loc.get("name") or ", ".join(filter(None, [loc.get("city"), country]))
+        if loc.get("is_remote") and "remote" not in location.lower():
+            location = f"{location} (Remote)" if location else "Remote"
+        jobs.append({
+            "source": "Breezy",
+            "title": item.get("name", ""),
+            "company": (item.get("company") or {}).get("name") or company_slug,
+            "location": location,
+            "url": item.get("url", ""),
+            "description": "",
+            "posted": item.get("published_date", ""),
+        })
+    progress(f"Breezy '{company_slug}': {len(jobs)} jobs")
+    return jobs
+
+
+SLUG_FETCHERS = {
+    "ashby": fetch_ashby,
+    "recruitee": fetch_recruitee,
+    "workable": fetch_workable,
+    "personio": fetch_personio,
+    "breezy": fetch_breezy,
+}
+
+
 def fetch_custom(
     company_slug: str,
     endpoint_url: str,
@@ -485,7 +672,8 @@ def scrape_company_pages(
     progress: Callable[[str], None] = NoOpProgress,
 ) -> list[dict]:
     """`targets` is a list of dicts matching CompanyAtsTarget:
-    {"platform": "greenhouse"|"lever"|"smartrecruiters"|"custom", "slug": "...",
+    {"platform": "greenhouse"|"lever"|"smartrecruiters"|"ashby"|"recruitee"|"workable"|"personio"|
+                 "breezy"|"workday"|"custom", "slug": "...",
      "custom_endpoint_url": ..., "custom_method": ..., "custom_json_body": ...,
      "custom_list_selector": ..., "custom_title_selector": ...,
      "custom_link_selector": ..., "custom_location_selector": ...}
@@ -503,6 +691,15 @@ def scrape_company_pages(
             all_jobs.extend(fetch_lever(slug, progress))
         elif platform == "smartrecruiters":
             all_jobs.extend(fetch_smartrecruiters(slug, progress))
+        elif platform in SLUG_FETCHERS:
+            all_jobs.extend(SLUG_FETCHERS[platform](slug, progress))
+        elif platform == "workday":
+            endpoint = target.get("custom_endpoint_url")
+            if not endpoint:
+                progress(f"'{slug}' is platform=workday but no custom_endpoint_url (the career page URL) "
+                         f"was given — skipping")
+            else:
+                all_jobs.extend(fetch_workday(endpoint, slug, progress=progress))
         elif platform == "custom":
             endpoint = target.get("custom_endpoint_url")
             if not endpoint:
