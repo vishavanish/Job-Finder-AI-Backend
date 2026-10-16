@@ -39,7 +39,8 @@ def _decode(blob: str) -> list[dict]:
     return json.loads(zlib.decompress(base64.b64decode(blob)).decode("utf-8"))
 
 
-def cached_feed(key: str, fetch: Callable[[], list[dict]], *, wait_seconds: float = 20) -> list[dict]:
+def cached_feed(key: str, fetch: Callable[[], list[dict]], *, wait_seconds: float = 20,
+                ttl: int | None = None) -> list[dict]:
     r = get_redis()
     settings = get_settings()
     cache_key, lock_key, fail_key = f"feedcache:{key}", f"feedlock:{key}", f"feedfail:{key}"
@@ -59,7 +60,7 @@ def cached_feed(key: str, fetch: Callable[[], list[dict]], *, wait_seconds: floa
             raise
         finally:
             r.delete(lock_key)
-        r.set(cache_key, _encode(jobs), ex=settings.FEED_CACHE_TTL_SECONDS)
+        r.set(cache_key, _encode(jobs), ex=ttl or settings.FEED_CACHE_TTL_SECONDS)
         return jobs
 
     deadline = time.monotonic() + wait_seconds

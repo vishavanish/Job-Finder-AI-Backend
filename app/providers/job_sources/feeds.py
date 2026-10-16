@@ -15,9 +15,10 @@ back. We only show each job with its source and original URL.
 """
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET  # expat >= 2.4 blocks entity-expansion bombs; no external entities
 
-from app.providers.job_sources.base import SourceError, get_json, get_text, iso, make_job
+from app.providers.job_sources.base import SourceError, get_json, get_text, iso, make_job, strip_html
 
 MAX_PAGES = 3
 
@@ -105,11 +106,12 @@ def fetch_arbeitnow() -> list[dict]:
     return jobs
 
 
-def fetch_themuse() -> list[dict]:
+def fetch_themuse(api_key: str = "") -> list[dict]:
+    """`api_key`: the platform's free registered key, when saved (scope themuse)."""
     jobs = []
     for page in range(1, MAX_PAGES + 1):
-        data = get_json("https://www.themuse.com/api/public/jobs", source="The Muse",
-                        params={"page": page, "location": "Flexible / Remote"})
+        params = {"page": page, "location": "Flexible / Remote", **({"api_key": api_key} if api_key else {})}
+        data = get_json("https://www.themuse.com/api/public/jobs", source="The Muse", params=params)
         for item in data.get("results") or []:
             locations = ", ".join(loc.get("name", "") for loc in item.get("locations") or [])
             remote = any(w in locations.lower() for w in ("remote", "flexible"))
@@ -156,3 +158,63 @@ FEEDS = {
     "themuse": fetch_themuse,
     "wwr": fetch_wwr,
 }
+
+
+# ---------------------------------------------------------------- HN "Who is hiring?" (P3.2)
+# One thread a month by the "whoishiring" account. Most top-level comments
+# start with a header line "Company | Role | Location | ..." (233 of 266 in
+# October 2026); posts without one are skipped rather than guessed.
+
+_HN_SPLIT = re.compile(r"\s*\|\s*|\s+[\u2013\u2014-]\s+")
+_HN_ROLE = re.compile(r"\b(engineers?|engineering|developers?|scientists?|designers?|managers?|lead|sre|devops|"
+                      r"analysts?|architects?|roles?|positions?|product|founding|interns?|head of|cto|staff|"
+                      r"recruiters?|marketing|sales|operations|researchers?|swe|programmers?)\b", re.IGNORECASE)
+_HN_WHERE = re.compile(r"\b(remote|onsite|on-site|hybrid|in[- ]office)\b", re.IGNORECASE)
+_HN_NOT_PLACE = re.compile(r"(full[- ]time|part[- ]time|contract|visa|equity|salary|series [a-e]\b|seed|"
+                           r"[$\u20ac\u00a3\u20b9]|\d+k\b|https?://)", re.IGNORECASE)
+
+
+def _hn_parse(comment: dict) -> dict | None:
+    text = comment.get("text") or ""
+    header = strip_html(text.split("<p>", 1)[0])
+    if not header or len(header) > 400:
+        return None
+    parts = [p.strip() for p in _HN_SPLIT.split(header) if p and p.strip()]
+    if len(parts) < 2:
+        return None
+    company_part = parts[0]
+    company = re.sub(r"\(.*?\)|https?://\S+", "", company_part).strip(" -,")
+    rest = parts[1:]
+    title = next((p for p in rest if _HN_ROLE.search(p) and not _HN_NOT_PLACE.search(p)), "")
+    if not company or not title:
+        return None
+    places = [p for p in rest if p != title and (_HN_WHERE.search(p) or
+              ("," in p and len(p) < 80 and not _HN_NOT_PLACE.search(p) and not _HN_ROLE.search(p)))]
+    hint = re.findall(r"\(([^)]*)\)", company_part)
+    places += [h for h in hint if _HN_WHERE.search(h)]
+    location = "; ".join(places)
+    remote = "remote" in header.lower()
+    # Remote with a region ("REMOTE (US)") or an on-site city restricts who can apply.
+    geo = location if remote else (f"{location} only" if location else "unknown only")
+    return {
+        **make_job(source="HN Who is hiring", title=title[:200], company=company[:200],
+                   location=location or ("Remote" if remote else ""),
+                   url=f"https://news.ycombinator.com/item?id={comment.get('id')}",
+                   description=text, posted=iso(comment.get("created_at"))),
+        "_geo": geo, "_tags": "",
+    }
+
+
+def fetch_hn_hiring() -> list[dict]:
+    found = get_json("https://hn.algolia.com/api/v1/search_by_date", source="HN Who is hiring",
+                     params={"tags": "story,author_whoishiring", "query": "who is hiring", "hitsPerPage": 5})
+    thread = next((h for h in found.get("hits") or []
+                   if str(h.get("title", "")).lower().startswith("ask hn: who is hiring")), None)
+    if thread is None or not str(thread.get("objectID", "")).isdigit():
+        raise SourceError("HN Who is hiring: this month's thread was not found")
+    item = get_json(f"https://hn.algolia.com/api/v1/items/{thread['objectID']}", source="HN Who is hiring")
+    jobs = [job for job in (_hn_parse(c) for c in item.get("children") or [] if c.get("text")) if job]
+    return jobs
+
+
+FEEDS["hn_hiring"] = fetch_hn_hiring

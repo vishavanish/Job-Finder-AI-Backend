@@ -31,9 +31,12 @@ ACTIONS = {"save": "saved", "hide": "hidden", "seen": "seen"}
 
 
 def _out(job: Job, uj: UserJob, sources: list[str]) -> UserJobOut:
+    fresh = job_store.freshness(job)
     return UserJobOut(id=job.id, title=job.title, company=job.company, location=job.location, url=job.url,
                       source=job.best_source, posted=job.posted, state=uj.state, keyword_score=uj.keyword_score,
-                      llm_score=uj.llm_score, reason=uj.reason, sources=sources, updated_at=uj.updated_at)
+                      llm_score=uj.llm_score, reason=uj.reason, sources=sources, match=uj.breakdown,
+                      posted_at=fresh["posted_at"], posted_hours_ago=fresh["posted_hours_ago"], early=fresh["early"],
+                      applicants=job.applicants, updated_at=uj.updated_at)
 
 
 @router.get("", response_model=UserJobList)

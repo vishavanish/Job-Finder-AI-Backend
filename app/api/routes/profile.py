@@ -26,10 +26,10 @@ from app.core.db import get_db
 from app.core.rate_limit import limiter
 from app.models.profile import JobPreference, Profile
 from app.models.profile_schemas import (
-    PreferencesIn, PreferencesOut, ProfileIn, ProfileOut, ResumeDetail, ResumeList, ResumeOut, ResumeUpdate,
+    EeoAnswers, PreferencesIn, PreferencesOut, ProfileIn, ProfileOut, ResumeDetail, ResumeList, ResumeOut, ResumeUpdate,
     SearchProfileIn, SearchProfileList, SearchProfileOut, SeedFromResumeIn, TitleSuggestions,
 )
-from app.services import resume_store, search_profiles
+from app.services import key_store, resume_store, search_profiles
 
 router = APIRouter(tags=["profile"])
 settings = get_settings()
@@ -37,13 +37,19 @@ settings = get_settings()
 
 # ---------------------------------------------------------------- profile
 
+def _eeo(row: Profile | None) -> EeoAnswers:
+    if row is None or not row.eeo_encrypted:
+        return EeoAnswers()
+    return EeoAnswers.model_validate_json(key_store.unseal(row.eeo_encrypted))
+
+
 @router.get("/profile", response_model=ProfileOut)
 def get_profile(user=Depends(get_current_user), db: Session = Depends(get_db)):
     row = db.query(Profile).filter(Profile.user_id == user.id).first()
     if row is None:
-        return ProfileOut(applicant_info={"email": user.email})
+        return ProfileOut(applicant_info={"email": user.email}, eeo=EeoAnswers())
     return ProfileOut(headline=row.headline, summary=row.summary, applicant_info=row.applicant_info or {},
-                      work_authorization=row.work_authorization or [], updated_at=row.updated_at)
+                      work_authorization=row.work_authorization or [], eeo=_eeo(row), updated_at=row.updated_at)
 
 
 @router.put("/profile", response_model=ProfileOut)
@@ -55,8 +61,10 @@ def put_profile(req: ProfileIn, user=Depends(get_current_user), db: Session = De
     row.headline, row.summary = req.headline, req.summary
     row.applicant_info = req.applicant_info.model_dump()
     row.work_authorization = [qa.model_dump() for qa in req.work_authorization]
+    if req.eeo is not None:  # sensitive: encrypted at rest, never logged or sent to AI models
+        row.eeo_encrypted = key_store.seal(req.eeo.model_dump_json())
     db.commit()
-    return ProfileOut(**req.model_dump(), updated_at=row.updated_at)
+    return ProfileOut(**req.model_dump(exclude={"eeo"}), eeo=_eeo(row), updated_at=row.updated_at)
 
 
 # ---------------------------------------------------------------- preferences

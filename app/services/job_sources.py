@@ -12,6 +12,7 @@ everywhere else. Source kinds and adapters: app/providers/job_sources/.
   feed     remote feeds — cached in Redis, filtered by keyword, region and age
   manual   Naukri jobs the user pasted; Apify for Naukri when enabled
 
+`key_lookup(scope, platform_only=False)` returns a key_store.ResolvedKey or None.
 `on_source_result(key, error)` reports each source's outcome so the caller
 can record health: error=None when it answered, the reason when it failed.
 A failing source never fails the search.
@@ -29,6 +30,7 @@ from app.providers.job_sources import aggregators, feeds, registry
 from app.providers.job_sources.base import (
     SourceError, SourceQuery, geo_allows, is_recent, matches_keyword,
 )
+from app.core.config import get_settings
 from app.services import job_dedupe, source_limits
 
 NoOpProgress: Callable[[str], None] = lambda msg: None
@@ -205,34 +207,55 @@ class _Outcomes:
 
 def _run_keyword_api(key: str, query: SourceQuery, *, user_id: str | None, key_lookup, outcomes: _Outcomes,
                      progress: Callable[[str], None]) -> list[dict]:
+    """Runs a keyed API. A source with several key scopes (Google Jobs)
+    tries them in order and stops at the first that returns jobs."""
+    from app.services.provider_catalog import user_key_only
+
     spec = registry.get(key)
-    resolved = key_lookup(spec.key_scope) if key_lookup else None
-    if not resolved:
-        progress(f"{spec.name}: no API key — skipped")
-        return []
-    if not source_limits.take_quota(key, user_id, resolved.source):
-        progress(f"{spec.name}: today's search limit reached — skipped until tomorrow")
-        return []
-    try:
-        jobs = aggregators.KEYWORD_APIS[key](query, resolved.value)
-    except SourceError as e:
-        outcomes.failure(key, str(e))
-        progress(f"{spec.name} failed: {e}")
-        return []
-    except Exception as e:  # noqa: BLE001 — never echo the exception text: it may contain the key
-        outcomes.failure(key, f"{spec.name}: {type(e).__name__}")
-        progress(f"{spec.name} failed: {type(e).__name__}")
-        return []
-    outcomes.success(key)
-    progress(f"{spec.name}: {len(jobs)} jobs for '{query.keyword}' in '{query.location}'")
-    return jobs
+    own_key_only = user_key_only(key)
+    tried, last_error = [], None
+    for scope in spec.key_scopes:
+        resolved = key_lookup(scope) if key_lookup else None
+        if not resolved or (own_key_only and resolved.source != "byok"):
+            continue
+        label = spec.name if len(spec.key_scopes) == 1 else f"{spec.name} ({scope})"
+        if not source_limits.take_quota(f"{key}:{scope}", user_id, resolved.source):
+            progress(f"{label}: today's search limit reached — skipped until tomorrow")
+            continue
+        tried.append(scope)
+        try:
+            jobs = aggregators.KEYWORD_APIS[scope](query, resolved.value)
+        except SourceError as e:
+            last_error = str(e)
+            progress(f"{label} failed: {e}")
+            continue
+        except Exception as e:  # noqa: BLE001 — never echo the exception text: it may contain the key
+            last_error = f"{label}: {type(e).__name__}"
+            progress(f"{label} failed: {type(e).__name__}")
+            continue
+        outcomes.success(key)
+        progress(f"{label}: {len(jobs)} jobs for '{query.keyword}' in '{query.location}'")
+        if jobs or scope == spec.key_scopes[-1]:
+            return jobs
+    if not tried and last_error is None:
+        progress(f"{spec.name}: no usable API key — skipped")
+    elif last_error and key not in outcomes.ok:
+        outcomes.failure(key, last_error)
+    return []
 
 
 def _run_feed(key: str, keywords: list[str], *, country: str, max_age_hours: int, limit: int,
-              outcomes: _Outcomes, progress: Callable[[str], None]) -> list[dict]:
+              outcomes: _Outcomes, progress: Callable[[str], None], key_lookup=None) -> list[dict]:
     spec = registry.get(key)
+    fetch = feeds.FEEDS[key]
+    if spec.platform_key_scope and key_lookup:
+        # The feed download is shared by all users, so only a platform/.env key is used.
+        resolved = key_lookup(spec.platform_key_scope, platform_only=True)
+        if resolved:
+            fetch = lambda: feeds.FEEDS[key](resolved.value)  # noqa: E731
+    ttl = get_settings().HN_FEED_CACHE_TTL_SECONDS if key == "hn_hiring" else None
     try:
-        feed = source_limits.cached_feed(key, feeds.FEEDS[key])
+        feed = source_limits.cached_feed(key, fetch, ttl=ttl)
     except source_limits.FeedUnavailable as e:
         progress(f"{spec.name}: skipped this time ({e})")
         return []
@@ -331,7 +354,7 @@ def scrape_all(
     for key in feed_keys:
         all_jobs.extend(_run_feed(key, keywords, country=country_indeed, max_age_hours=max_age_hours,
                                   limit=results_per_keyword * max(1, len(keywords)),
-                                  outcomes=outcomes, progress=progress))
+                                  outcomes=outcomes, progress=progress, key_lookup=key_lookup))
 
     if "naukri" in sources and manual_naukri_jobs:
         all_jobs.extend(manual_naukri_jobs)

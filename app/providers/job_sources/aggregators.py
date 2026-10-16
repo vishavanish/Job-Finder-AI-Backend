@@ -102,3 +102,112 @@ KEYWORD_APIS = {
     "jooble": search_jooble,
     "careerjet": search_careerjet,
 }
+
+
+# ---------------------------------------------------------------- Google Jobs via the user's own key (P3.2)
+# One catalog source ("google_jobs_api") with three providers, tried in the
+# order of registry key_scopes; job_sources moves on when one fails or finds
+# nothing. All three return Google Jobs listings, so jobs carry source
+# "Google Jobs" (rank: job board).
+
+def _country_code(country: str) -> str:
+    return ADZUNA_COUNTRIES.get((country or "").strip().lower(), "")
+
+
+def _google_query(q: SourceQuery) -> str:
+    what, where = _what_where(q)
+    return f"{what} {where}".strip() if where else f"{what} {q.country}".strip()
+
+
+def search_serpapi(q: SourceQuery, api_key: str) -> list[dict]:
+    params = {"engine": "google_jobs", "q": _google_query(q), "hl": "en", "api_key": api_key}
+    if _country_code(q.country):
+        params["gl"] = _country_code(q.country)
+    data = get_json("https://serpapi.com/search.json", source="SerpApi", params=params)
+    if data.get("error") and not data.get("jobs_results"):
+        if "hasn't returned any results" in str(data["error"]):
+            return []
+        raise SourceError(f"SerpApi: {str(data['error'])[:120]}")
+    jobs = []
+    for item in data.get("jobs_results") or []:
+        options = item.get("apply_options") or []
+        url = (options[0].get("link") if options else None) or item.get("share_link")
+        posted = (item.get("detected_extensions") or {}).get("posted_at", "")
+        jobs.append(make_job(source="Google Jobs", title=item.get("title"), company=item.get("company_name"),
+                             location=item.get("location"), url=url, description=item.get("description"),
+                             posted=iso(posted)))
+    return [j for j in jobs if is_recent(j["posted"], q.max_age_hours)]
+
+
+_JSEARCH_DATE = ((24, "today"), (72, "3days"), (168, "week"), (720, "month"))
+
+
+def search_jsearch(q: SourceQuery, api_key: str) -> list[dict]:
+    date_posted = next((v for hours, v in _JSEARCH_DATE if q.max_age_hours <= hours), "all")
+    params = {"query": _google_query(q), "page": 1, "num_pages": 1, "date_posted": date_posted}
+    if _country_code(q.country):
+        params["country"] = _country_code(q.country)
+    data = get_json("https://jsearch.p.rapidapi.com/search", source="JSearch", params=params,
+                    headers={"X-RapidAPI-Key": api_key, "X-RapidAPI-Host": "jsearch.p.rapidapi.com"})
+    jobs = []
+    for item in data.get("data") or []:
+        location = ", ".join(filter(None, [item.get("job_city"), item.get("job_state"), item.get("job_country")]))
+        if item.get("job_is_remote"):
+            location = f"{location} (Remote)" if location else "Remote"
+        jobs.append(make_job(source="Google Jobs", title=item.get("job_title"), company=item.get("employer_name"),
+                             location=location, url=item.get("job_apply_link") or item.get("job_google_link"),
+                             description=item.get("job_description"),
+                             posted=iso(item.get("job_posted_at_datetime_utc") or item.get("job_posted_at"))))
+    return jobs
+
+
+def _first(item: dict, *names: str):
+    for name in names:
+        value = item.get(name)
+        if value:
+            return value
+    return ""
+
+
+def search_brightdata(q: SourceQuery, api_key: str) -> list[dict]:
+    """Bright Data SERP API on a Google Jobs URL with parsed JSON.
+    EXPERIMENTAL: Bright Data doesn't publish the parsed Google Jobs schema,
+    so fields are read defensively and an unrecognised reply yields [] (the
+    next provider is then tried). Verify with a real key before relying on it."""
+    from urllib.parse import quote_plus
+
+    token, _, zone = api_key.partition(":")
+    if not (token and zone):
+        raise SourceError("Bright Data: key must be saved as API_KEY:ZONE")
+    gl = _country_code(q.country)
+    url = (f"https://www.google.com/search?q={quote_plus(_google_query(q) + ' jobs')}&ibp=htl;jobs&hl=en"
+           f"{'&gl=' + gl if gl else ''}&brd_json=1")
+    data = post_json("https://api.brightdata.com/request", source="Bright Data",
+                     json={"zone": zone, "url": url, "format": "raw"},
+                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    items = []
+    if isinstance(data, dict):
+        for key in ("jobs", "jobs_results", "job_listings", "google_jobs"):
+            if isinstance(data.get(key), list):
+                items = data[key]
+                break
+    jobs = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        jobs.append(make_job(
+            source="Google Jobs", title=_first(item, "title", "job_title"),
+            company=_first(item, "company", "company_name", "employer"),
+            location=_first(item, "location", "job_location"),
+            url=_first(item, "link", "url", "apply_link", "job_link"),
+            description=_first(item, "description", "snippet"),
+            posted=iso(_first(item, "posted", "posted_at", "date")),
+        ))
+    return [j for j in jobs if j["title"] and j["url"].startswith("http") and is_recent(j["posted"], q.max_age_hours)]
+
+
+KEYWORD_APIS.update({
+    "brightdata": search_brightdata,
+    "serpapi": search_serpapi,
+    "jsearch": search_jsearch,
+})

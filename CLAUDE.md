@@ -190,7 +190,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Shared Redis | `core/redis_client.py` | One client per process (`get_redis()`); tests swap in fakeredis. |
 | Frontend | separate repo `Job-Finder-AI-Frontend` | React 18 + Vite + react-router, plain JS (no TypeScript), axios client with hardcoded `API_URL`. Pages: Home, Keywords, Skills, ATS Targets, Providers, Applications, Profile, Login. Deployed on Vercel. |
 
-**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
+**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
 
 **CI:** `.github/workflows/tests.yml` runs the tests on every push and pull request (no secrets needed).
 
@@ -326,6 +326,32 @@ Plan: `docs/plans/P3.1-free-job-sources.md`. Research and live tests: `../resear
 - New env (all optional): `ADZUNA_API_KEY` (`APP_ID:APP_KEY`), `JOOBLE_API_KEY`, `CAREERJET_API_KEY` as `.env` fallbacks (keys saved under `/keys` or `/admin/keys` win, scopes `adzuna` / `jooble` / `careerjet`); `SOURCE_HTTP_TIMEOUT_SECONDS` (20), `FEED_CACHE_TTL_SECONDS` (3600), `SOURCE_BREAKER_FAILURES` (5), `SOURCE_BREAKER_COOLDOWN_SECONDS` (1800), `SOURCE_DAILY_CAP_OWN_KEY` (100), `SOURCE_DAILY_CAP_PLATFORM_KEY` (20), `SOURCE_DAILY_CAP_PLATFORM_TOTAL` (200).
 - `SearchRequest.sources` default changed from `["linkedin","indeed","naukri"]` to "all available"; clients that relied on the old default now also get the remote feeds (when searching remote) and keyed sources (when a key exists).
 - Admins can set `default_enabled` per source in `PATCH /admin/providers/{key}`.
+
+### 6.8 Phase 3.2 status — match insights, freshness, alerts, more sources (branch `dev`)
+
+Plan: `docs/plans/P3.2-match-insights-alerts.md` (all ten owner decisions approved 2026-10-16 with the recommended defaults).
+
+| Item | State |
+|------|-------|
+| Match breakdown | ✅ `search_profiles.match_breakdown` (skills matched/missing of total, synonyms included; `title_fit` 0–100) + scorer extras `seniority` (match/stretch/overqualified) and `missing_required` (≤ 3). Stored in `user_jobs.breakdown`; in the feed (`match`) and `GET /jobs`. Models that omit the extras still score. |
+| Freshness | ✅ `jobs.posted_at` (parsed from `posted`, incl. "3 days ago"; backfilled by `0007`); feed/`GET /jobs` carry `posted_at`, `posted_hours_ago`, `early` (< 24 h), `new_since_last_search` (`pipeline_progress.mark_user_search`). |
+| Applicant counts | ✅ LinkedIn only (`providers/job_sources/linkedin_applicants.py`): public job page, only for jobs shown, ≤ `APPLICANT_COUNT_MAX_PER_RUN` per keyword task, 2–4 s apart, stops at the first 429, re-checked after 24 h, skipped when LinkedIn is off/paused. `jobs.applicants`; feed entry updated with `replaces: true`. |
+| HN "Who is hiring?" | ✅ `hn_hiring` feed: this month's thread via Algolia, header line parsed without AI (179 of 266 posts in Oct 2026; posts without a parseable header are skipped), region filter, cached `HN_FEED_CACHE_TTL_SECONDS`. On by default for remote searches. |
+| Google Jobs (own key) | ✅ `google_jobs_api` (tier `free_key`, off by default): Bright Data (`API_KEY:ZONE`, **experimental — parsed schema unverified**) → SerpApi → JSearch, next provider on error or empty result. `user_key_only`: never runs on a platform/.env key in production. Per-provider daily caps. |
+| The Muse | ✅ sends the platform's `themuse` key when saved; stays off by default (403 to non-browser clients). |
+| Paid-only | ✅ Naukri via Apify unchanged (paid); free Naukri path = alert emails in P5. Serper.dev (no jobs endpoint), Scrappa, DataForSEO not built. |
+| Profile | ✅ `applicant_info.willing_to_relocate`, `relocation_locations`, `requires_sponsorship`; `eeo` answers (default `prefer_not_to_say`) sealed in `profiles.eeo_encrypted` (`key_store.seal`), returned only to the owner, never logged or sent to AI. Omitting `eeo` keeps saved answers. |
+| Job alerts | ✅ `/alerts` CRUD (≤ `JOB_ALERTS_MAX_PER_USER`), `run-now`, runs, run jobs. Beat tick (`job_finder.alerts_tick`, maintenance queue) claims due alerts with a conditional UPDATE; `job_finder.run_job_alert` runs the profile through `_process_job` (seen jobs never re-scored or re-sent), stores `job_alert_runs`, emails a plain-text digest. Entitlement `job_alerts` (on, 5 runs/day). Disabled users and accounts without search/scoring are skipped with a reason. |
+| Tests | ✅ 202 total (29 for P3.2). |
+| Not in P3.2 | In-app notification centre (runs are listed per alert), HTML email, per-alert source choice, Bright Data verified with a real key, applicant counts for non-LinkedIn sources (none publish them). |
+
+**Operational changes introduced in P3.2**
+- Migration `0007` (run `alembic upgrade head`).
+- **New process: Celery beat — exactly one per deployment.** `start.sh` starts it unless `START_BEAT=0`; on the Oracle VM add a `job_finder_beat.service` unit (`celery -A app.core.celery_app:celery_app beat --loglevel=info`) and set `START_BEAT=0` for the main unit. `run_dev.py` (`.\dev`, `.\backend`) starts it locally. `/health` shows `alerts_scheduler.last_tick`.
+- **Workers must also consume the maintenance queue:** `worker_queues` is now `default,apply,maintenance` (`*_dev` locally). `start.sh` and `worker.cmd` already use it; update any systemd unit with a hard-coded `-Q`.
+- Alert digests use the OTP email settings (`EMAIL_BACKEND=smtp` in production). Optional `APP_PUBLIC_URL` adds the app link to emails.
+- New env (all optional): `JOB_ALERTS_MAX_PER_USER` (3), `JOB_ALERT_TICK_SECONDS` (600), `JOB_ALERT_DEFAULT_MIN_SCORE` (75), `HN_FEED_CACHE_TTL_SECONDS` (21600), `APPLICANT_COUNT_MAX_PER_RUN` (20), `BRIGHTDATA_API_KEY` / `SERPAPI_API_KEY` / `JSEARCH_API_KEY` (local testing only — production uses each user's own key), `THEMUSE_API_KEY`, `APP_PUBLIC_URL`.
+- Key scopes users can save: `brightdata` (`API_KEY:ZONE`), `serpapi`, `jsearch`; platform scope `themuse`.
 
 ---
 
@@ -782,6 +808,7 @@ All routes are already served under `/api/v1` (`settings.API_V1_PREFIX`); new ro
 | Providers | `GET /providers`, `PUT /providers/settings` (incl. free-only mode) |
 | Models | `GET /models` (enabled), `PUT /models/preferences`, `POST /keys` (BYOK), `DELETE /keys/{id}` |
 | Jobs | `POST /pipeline/run/stream`, `GET /pipeline/{run_id}`, `GET /pipeline/{run_id}/jobs`, `GET /jobs?state=`, `POST /jobs/{id}/save|hide|seen` |
+| Alerts | `GET/POST /alerts`, `PUT/DELETE /alerts/{id}`, `POST /alerts/{id}/run-now`, `GET /alerts/{id}/runs`, `GET /alerts/runs/{run_id}/jobs` |
 | ATS | `POST /ats/discover` (job title), `GET /ats/companies`, `POST /company-ats/fetch` (existing) |
 | Apply | `POST /apply` (existing), `GET /apply/runs`, `POST /apply/runs/{id}/answer`, `POST /apply/runs/{id}/approve`, `POST /apply/runs/{id}/cancel`, `POST /applications/manual` |
 | Tracker | `GET /applications`, `GET/PATCH /applications/{id}`, `GET /applications/{id}/events`, `GET /applications/stats` |
@@ -801,7 +828,7 @@ Conventions: Pydantic request/response models for every route, consistent error 
 | `default` | search, score, ats fetch, pipeline fan-out, resume parse | Multiple workers fine |
 | `apply` | Playwright apply runs | Low concurrency; one browser per run; memory-limited |
 | `email` | Gmail polling per account | Celery beat schedule; idempotent |
-| `maintenance` | ATS crawler/refresh, retention cleanup, provider health checks, usage rollups | Beat schedule |
+| `maintenance` | Job-alerts tick (P3.2); later ATS crawler/refresh, retention cleanup, provider health checks, usage rollups | Beat schedule (one beat process) |
 
 Rules: tasks are idempotent; every task receives `user_id`; secrets are resolved by `key_ref` inside the worker; progress is reported with `update_state(state="PROGRESS")`; worker `-Q` lists **must** match `settings.*_queue` names; set `acks_late` and sensible `time_limit`/`soft_time_limit` per queue.
 

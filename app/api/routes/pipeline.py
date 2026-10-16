@@ -40,6 +40,7 @@ async def run_pipeline_stream(
     feed turns up later (LinkedIn over Indeed), an updated entry with the
     SAME `id` and `replaces: true` is appended — upsert entries by `id`."""
     search_params, score_params = build_pipeline_params(req, db=db, user=user, client=client_info(request))
+    score_params["previous_search_at"] = pipeline_progress.mark_user_search(user.id)
     keywords = search_params["keywords"]
 
     run_id = pipeline_progress.create_run(user_id=user.id, total_keywords=len(keywords))
@@ -92,6 +93,7 @@ async def run_pipeline(
         apply_params = build_apply_params(req.apply, user_id=user.id)
 
     search_params, score_params = build_pipeline_params(req, db=db, user=user, client=client_info(request))
+    score_params["previous_search_at"] = pipeline_progress.mark_user_search(user.id)
     response = dispatch(
         pipeline_task,
         args=[search_params, score_params, apply_params],

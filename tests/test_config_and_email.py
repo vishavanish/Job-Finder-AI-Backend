@@ -14,7 +14,7 @@ def test_worker_consumes_every_queue_the_api_publishes_to():
 
 
 def test_dev_queues_are_suffixed():
-    assert get_settings().worker_queues == "default_dev,apply_dev"
+    assert get_settings().worker_queues == "default_dev,apply_dev,maintenance_dev"
 
 
 def test_email_uses_gmail_internal_date():

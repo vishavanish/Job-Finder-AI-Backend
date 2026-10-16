@@ -226,5 +226,6 @@ def key_scopes_in_use(db: Session) -> list[str]:
     """Scopes a user might want a key for: enabled models + key-using sources."""
     from app.models.ai import ProviderCatalog
     scopes = {m.key_scope for m in db.query(AiModel).filter(AiModel.enabled_global.is_(True)).all()}
-    scopes |= {r.key_scope for r in db.query(ProviderCatalog).filter(ProviderCatalog.key_scope.isnot(None)).all()}
-    return sorted(s for s in scopes if s)
+    for r in db.query(ProviderCatalog).filter(ProviderCatalog.key_scope.isnot(None)).all():
+        scopes |= set(r.key_scope.split(","))  # a source may accept several keys ("brightdata,serpapi,jsearch")
+    return sorted(s.strip() for s in scopes if s and s.strip())

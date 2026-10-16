@@ -223,6 +223,40 @@ def weighted_keyword_score(text: str, terms: list[dict]) -> float:
     return round(hit / total * 100, 1)
 
 
+_TITLE_WORD = re.compile(r"[a-z0-9+#.]+")
+_TITLE_NOISE = {"senior", "sr", "junior", "jr", "lead", "principal", "staff", "and", "or", "the", "of", "for",
+                "in", "with", "a", "an", "i", "ii", "iii", "remote", "-", "&"}
+
+
+def _title_words(title: str) -> set[str]:
+    return {w.strip(".") for w in _TITLE_WORD.findall((title or "").lower())} - _TITLE_NOISE - {""}
+
+
+def title_fit(job_title: str, targets: list[str]) -> int | None:
+    """0-100: the best share of a target title's words found in the job title."""
+    job_words = _title_words(job_title)
+    best = None
+    for target in targets or []:
+        words = _title_words(target)
+        if words:
+            share = round(len(words & job_words) / len(words) * 100)
+            best = share if best is None else max(best, share)
+    return best
+
+
+def match_breakdown(job: dict, score_params: dict) -> dict:
+    """The free, deterministic part of a job's match breakdown (P3.2): which
+    of the user's skills (with synonyms) the job mentions, and title fit.
+    The scorer adds `seniority` and `missing_required`."""
+    terms = score_params.get("skill_terms") or [{"terms": [s], "weight": 2} for s in score_params.get("skills") or []]
+    text = job_text(job)
+    matched, missing = [], []
+    for term in terms:
+        (matched if any(contains(text, t) for t in term["terms"]) else missing).append(term["terms"][0])
+    return {"skills_matched": matched, "skills_missing": missing, "skills_total": len(terms),
+            "title_fit": title_fit(job.get("title", ""), score_params.get("career_targets") or [])}
+
+
 def job_text(job: dict) -> str:
     return f"{job.get('title', '')}\n{job.get('description', '')}".lower()
 

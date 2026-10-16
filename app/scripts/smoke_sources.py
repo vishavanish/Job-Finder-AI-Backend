@@ -5,7 +5,7 @@ real sites). Prints how many jobs each source returned or why it failed.
     python -m app.scripts.smoke_sources                 # keyless feeds + ATS boards
     python -m app.scripts.smoke_sources --keyword "Data Engineer"
 
-Keyed APIs (Adzuna, Jooble, Careerjet) run only when their key is in .env
+Keyed APIs (Adzuna, Jooble, Careerjet, Bright Data, SerpApi, JSearch) run only when their key is in .env
 (ADZUNA_API_KEY="APP_ID:APP_KEY", JOOBLE_API_KEY, CAREERJET_API_KEY).
 Nothing is written to the database or Redis.
 """
@@ -20,7 +20,8 @@ from app.services import company_ats_sources
 
 ATS_SAMPLES = {"ashby": "ramp", "recruitee": "bunq", "workable": "huggingface", "personio": "personio",
                "breezy": "breezy"}
-KEY_SETTINGS = {"adzuna": "ADZUNA_API_KEY", "jooble": "JOOBLE_API_KEY", "careerjet": "CAREERJET_API_KEY"}
+KEY_SETTINGS = {"adzuna": "ADZUNA_API_KEY", "jooble": "JOOBLE_API_KEY", "careerjet": "CAREERJET_API_KEY",
+                "brightdata": "BRIGHTDATA_API_KEY", "serpapi": "SERPAPI_API_KEY", "jsearch": "JSEARCH_API_KEY"}
 
 
 def main() -> None:

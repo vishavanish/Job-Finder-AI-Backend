@@ -112,16 +112,28 @@ def make_job(*, source: str, title: Any, company: Any, location: Any, url: Any, 
 
 # ---------------------------------------------------------------- dates
 
+_RELATIVE = re.compile(r"(\d+)\+?\s*(minute|min|hour|hr|day|week|month)s?\s+ago", re.IGNORECASE)
+_RELATIVE_UNITS = {"minute": 60, "min": 60, "hour": 3600, "hr": 3600, "day": 86400, "week": 604800,
+                   "month": 2592000}
+
+
 def parse_date(value: Any) -> datetime | None:
-    """Epoch seconds/ms, ISO 8601 or RFC 2822 -> aware UTC datetime."""
+    """Epoch seconds/ms, ISO 8601, RFC 2822 or "3 days ago" -> aware UTC datetime."""
     if value is None or value == "":
         return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     if isinstance(value, (int, float)) or (isinstance(value, str) and value.isdigit()):
         n = float(value)
         if n > 10_000_000_000:  # milliseconds
             n /= 1000
         return datetime.fromtimestamp(n, tz=timezone.utc)
     text = str(value).strip()
+    rel = _RELATIVE.search(text)
+    if rel:
+        return datetime.now(timezone.utc) - timedelta(seconds=int(rel.group(1)) * _RELATIVE_UNITS[rel.group(2).lower()])
+    if text.lower() in ("just posted", "today", "just now"):
+        return datetime.now(timezone.utc)
     for parse in (lambda t: datetime.fromisoformat(t.replace("Z", "+00:00").replace(" UTC", "+00:00")),
                   parsedate_to_datetime):
         try:
@@ -183,7 +195,10 @@ def matches_keyword(job: dict, keyword: str, extra_text: str = "") -> bool:
         f"{job.get('title', '')} {extra_text} {job.get('description', '')}")
 
 
-_WORLDWIDE = ("anywhere", "worldwide", "global", "world", "remote")
+_WORLDWIDE = ("anywhere", "worldwide", "global", "world")
+# Words that say how, not where: "REMOTE (US)" is restricted to the US, plain "Remote" is not.
+_WORK_MODE_WORDS = re.compile(
+    r"\b(remote[- ]first|remote|onsite|on-site|hybrid|fully|full[- ]time|part[- ]time|contract|ok)\b")
 
 
 def geo_allows(restriction: str, country: str) -> bool:
@@ -191,8 +206,8 @@ def geo_allows(restriction: str, country: str) -> bool:
     worldwide, or names the user's country (whole words: "in" must not
     match "United Kingdom")."""
     text = (restriction or "").strip().lower()
-    if not text:
-        return True
+    if not re.sub(r"[^a-z]+", "", _WORK_MODE_WORDS.sub(" ", text)):
+        return True  # nothing but "Remote" / "Full-time": no region restriction
     if any(w in text for w in _WORLDWIDE) and "only" not in text:
         return True
     c = (country or "").strip().lower()

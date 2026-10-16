@@ -24,7 +24,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.jobs import Job, JobSourceSeen, UserJob
+from app.providers.job_sources.base import parse_date
 from app.services.source_info import source_rank
+
+EARLY_HOURS = 24
 
 # States set by the user (or the apply engine) that a feed never overwrites.
 STICKY_STATES = {"saved", "hidden", "applied"}
@@ -44,6 +47,7 @@ def _fields(job: dict) -> dict:
         "location": _clip(job.get("location"), 255), "url": str(job.get("url") or ""),
         "description": str(job.get("description") or ""), "posted": _clip(job.get("posted"), 64),
         "best_source": _clip(job.get("source"), 100), "best_source_rank": source_rank(job.get("source")),
+        "posted_at": parse_date(job.get("posted")),
     }
 
 
@@ -103,6 +107,26 @@ def as_job(row: Job) -> dict:
             "location": row.location, "url": row.url, "description": row.description, "posted": row.posted}
 
 
+def _aware(dt: datetime | None) -> datetime | None:
+    return dt.replace(tzinfo=timezone.utc) if dt is not None and dt.tzinfo is None else dt
+
+
+def freshness(row: Job, previous_search_at: str | None = None) -> dict:
+    """posted_at, hours since posting, the Early badge (< 24 h) and whether
+    the job first appeared after the user's previous search (P3.2)."""
+    posted = _aware(row.posted_at)
+    hours = None
+    if posted is not None:
+        hours = max(0, int((_now() - posted).total_seconds() // 3600))
+    new = None
+    previous = parse_date(previous_search_at) if previous_search_at else None
+    if previous is not None and row.first_seen_at is not None:
+        new = _aware(row.first_seen_at) > previous
+    return {"posted_at": posted.isoformat() if posted else None, "posted_hours_ago": hours,
+            "early": hours is not None and hours < EARLY_HOURS, "new_since_last_search": new,
+            "applicants": row.applicants}
+
+
 def sources(db: Session, job_ids: list[str]) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     if not job_ids:
@@ -136,10 +160,12 @@ def decide(uj: UserJob | None, *, include_seen: bool, profile_hash: str) -> str:
 
 def record_user_job(db: Session, *, user_id: str, job_id: str, state: str, keyword_score: float | None,
                     llm_score: float | None, reason: str | None, profile_hash: str | None,
-                    search_profile_id: str | None, run_id: str | None) -> UserJob:
+                    search_profile_id: str | None, run_id: str | None, breakdown: dict | None = None) -> UserJob:
     """Upsert. Saved/hidden/applied are kept; only the scores move."""
     values = {"keyword_score": keyword_score, "llm_score": llm_score, "reason": reason,
               "profile_hash": profile_hash, "search_profile_id": search_profile_id, "last_run_id": run_id}
+    if breakdown is not None:
+        values["breakdown"] = breakdown
     uj = get_user_job(db, user_id, job_id)
     if uj is None:
         try:

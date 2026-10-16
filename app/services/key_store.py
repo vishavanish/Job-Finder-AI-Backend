@@ -41,6 +41,10 @@ ENV_FALLBACK = {
     "adzuna": "ADZUNA_API_KEY",
     "jooble": "JOOBLE_API_KEY",
     "careerjet": "CAREERJET_API_KEY",
+    "brightdata": "BRIGHTDATA_API_KEY",
+    "serpapi": "SERPAPI_API_KEY",
+    "jsearch": "JSEARCH_API_KEY",
+    "themuse": "THEMUSE_API_KEY",
 }
 
 MIN_KEY_LENGTH = 8
@@ -74,6 +78,21 @@ def _decrypt(row: Secret) -> str:
         return Fernet(data_key).decrypt(row.ciphertext.encode()).decode()
     except InvalidToken as e:
         raise RuntimeError(f"stored key {row.id} could not be decrypted (master key changed?)") from e
+
+
+def seal(value: str) -> str:
+    """Envelope-encrypts any small sensitive text for a DB column (same scheme as stored keys)."""
+    wrapped, ciphertext = _encrypt(value)
+    return f"{wrapped}|{ciphertext}"
+
+
+def unseal(sealed: str) -> str:
+    wrapped, _, ciphertext = (sealed or "").partition("|")
+    try:
+        data_key = master_fernet().decrypt(wrapped.encode())
+        return Fernet(data_key).decrypt(ciphertext.encode()).decode()
+    except InvalidToken as e:
+        raise RuntimeError("sealed value could not be decrypted (master key changed?)") from e
 
 
 def masked(row: Secret) -> dict:

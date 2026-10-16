@@ -19,7 +19,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Column, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 
 from app.core.db import Base
 from app.models.user import User  # noqa: F401 — see app/models/application.py for why
@@ -49,6 +49,9 @@ class Job(Base):
     posted = Column(String(64), nullable=False, default="")
     best_source = Column(String(100), nullable=False, default="")
     best_source_rank = Column(Integer, nullable=False, default=2)  # source_info.source_rank; lower is better
+    posted_at = Column(DateTime, nullable=True)                 # parsed from `posted` when possible
+    applicants = Column(String(32), nullable=True)              # as LinkedIn shows it: "143", "Over 200"
+    applicants_checked_at = Column(DateTime, nullable=True)
     first_seen_at = Column(DateTime, default=_now, nullable=False)
     last_seen_at = Column(DateTime, default=_now, nullable=False)
 
@@ -79,6 +82,7 @@ class UserJob(Base):
     keyword_score = Column(Float, nullable=True)
     llm_score = Column(Float, nullable=True)
     reason = Column(Text, nullable=True)
+    breakdown = Column(JSON, nullable=True)  # match breakdown (search_profiles.match_breakdown + AI fields)
     profile_hash = Column(String(32), nullable=True)
     search_profile_id = Column(String(36), nullable=True)
     last_run_id = Column(String(36), nullable=True)
