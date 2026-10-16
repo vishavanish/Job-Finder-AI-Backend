@@ -169,7 +169,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 |------|---------|-------|
 | Router wiring | `app/api/routes/__init__.py` | search, company_ats, score, apply, pipeline, tasks, auth, applications. Mounted under `/api/v1` already (`settings.API_V1_PREFIX`). |
 | Config | `app/core/config.py` | `pydantic-settings`, reads `.env` at the repo root. Queue names get a `_dev` suffix unless `ENVIRONMENT=production`. |
-| Database | `app/core/db.py`, `app/models/` | One SQLAlchemy engine on **Supabase Postgres** (`DATABASE_URL`). Tables: `users`, `applications`, `application_status_events`, `pipeline_runs`, `pipeline_run_jobs` (the last two are unused — streaming state lives in Redis). |
+| Database | `app/core/db.py`, `app/models/` | One SQLAlchemy engine on **Supabase Postgres** (`DATABASE_URL`). Tables: `users`, `applications`, `application_status_events`, `pipeline_runs`, `pipeline_run_jobs` (the last two are unused — streaming state lives in Redis), plus P1–P3 tables (admin, AI, profile/resumes/preferences/search profiles, `jobs`/`job_sources_seen`/`user_jobs`). |
 | Search | `routes/search.py`, `services/job_sources.py`, `services/naukri_apify_source.py` | JobSpy (LinkedIn/Indeed), Naukri via manual list or Apify; retries and pacing |
 | Dedupe | `services/job_dedupe.py`, `job_sources._deduplicate_jobs`, `pipeline_progress.claim_job_key` | Key = normalized company + title + city. **LinkedIn copy wins.** (Added in Phase 0 — before that, dedupe was by exact URL, so cross-source duplicates were never merged.) |
 | Scoring | `routes/score.py`, `services/scorer.py`, `core/celery_tasks._score_one_job_llm` | Keyword prefilter → LLM score via the **AI router** (P2). Batched path `scorer.score_jobs`, per-job path `scorer.score_one_job`. A reply that can't be parsed counts as a failed call. |
@@ -190,7 +190,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Shared Redis | `core/redis_client.py` | One client per process (`get_redis()`); tests swap in fakeredis. |
 | Frontend | separate repo `Job-Finder-AI-Frontend` | React 18 + Vite + react-router, plain JS (no TypeScript), axios client with hardcoded `API_URL`. Pages: Home, Keywords, Skills, ATS Targets, Providers, Applications, Profile, Login. Deployed on Vercel. |
 
-**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
+**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
 
 **CI:** `.github/workflows/tests.yml` runs the tests on every push and pull request (no secrets needed).
 
@@ -225,7 +225,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | 6.2 #4 signup | ✅ P1: OTP-verified signup + admin `invite_only` flag (default = inverse of `ALLOW_SELF_REGISTRATION`). |
 | 6.2 #5 `record_status` by `job_key` | ✅ done (+ migration `0002`) |
 | 6.2 #6 email date | ✅ `internalDate` used. Token files → encrypted DB is P5. |
-| 6.2 #7 dedupe before scoring | ✅ done (`pipeline_progress.claim_job_key`). Limitation: across keyword tasks the first claimer wins, so an Indeed copy claimed first is kept over a later LinkedIn copy — fixed properly by the canonical `jobs` table in P3. |
+| 6.2 #7 dedupe before scoring | ✅ done (`pipeline_progress.claim_job_key`). The first-claimer limitation is gone since P3: the canonical `jobs` row holds the best copy and a later LinkedIn copy replaces the shown one (Section 6.6). |
 | 6.2 #9 leaked keys | ⚠️ legacy `.env.example` now has placeholders; **owner must rotate the keys**. |
 | 6.2 #10, #11, #12 | ✅ done |
 | Stuck `pending` | ✅ fixed in code (`worker_queues`, `task_default_queue`, `start.sh`); confirm on the deployed worker. |
@@ -271,7 +271,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Usage ledger | ✅ every attempt (tokens, latency, cost, key source); `GET /usage`, `GET /admin/usage`, `GET /admin/users/{id}/usage`. |
 | Provider catalog + Free tools only | ✅ `GET /providers`, `PUT /providers/settings`, `/admin/providers`. Free tools only skips paid sources **and** paid models. |
 | Tests | ✅ 101 total (20 for P2) |
-| Not in P2 | STT/TTS/embeddings providers (P7); new job sources (RemoteOK, Adzuna… — P3); source auto-disable on repeated failures (only success/last error recorded); all screens (frontend F2). |
+| Not in P2 | STT/TTS/embeddings providers (P7); new job sources (RemoteOK, Adzuna… — moved to a follow-up after P3); source auto-disable on repeated failures (only success/last error recorded); all screens (frontend F2). |
 
 **Operational changes introduced in P2**
 - Migration `0004` (run `alembic upgrade head`). Seeds the three current models and four job sources.
@@ -279,6 +279,28 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 - **`SECRETS_MASTER_KEY` now protects stored keys durably.** Changing it makes stored keys unreadable — back it up; never rotate it without re-wrapping.
 - `ScoreRequest.gemini_model/groq_model/hf_model` are deprecated and ignored; the router picks the model.
 - New env: `AI_BREAKER_FAILURES` (3), `AI_BREAKER_COOLDOWN_SECONDS` (300), `AI_REQUEST_TIMEOUT_SECONDS` (60).
+
+### 6.6 Phase 3 status (branch `dev`)
+
+| Item | State |
+|------|-------|
+| Profile & preferences | ✅ `GET/PUT /profile` (headline, summary, applicant info, work-authorization Q&A), `GET/PUT /preferences` (titles, seniority, locations, work modes, job types, salary, notice, industries, avoided companies, posted within, languages). |
+| Resumes | ✅ `POST /resumes` (multipart PDF/DOCX ≤ `RESUME_MAX_BYTES`, type sniffed from bytes, duplicates refused), versions + master, `GET /resumes[/{id}]`, `GET /resumes/{id}/file`, `PUT /resumes/{id}` (reviewed parse → `reviewed`), `POST /resumes/{id}/master`, `POST /resumes/{id}/parse`, `DELETE`. **Storage (owner decision 2026-10-16): file envelope-encrypted in the DB table `resume_files`** (same scheme as `key_store`), behind `resume_store._store_file/load_file` so object storage can replace it. Text via pypdf / python-docx; scanned PDFs get `no_text`. |
+| Resume parsing | ✅ Celery `parse_resume_task` on the default queue → AI router task `resume_parse` → validated `ParsedResume`; the resume text is read from the DB in the worker, never sent through the broker. `parse_status`: unparsed / pending / parsed / reviewed / failed / no_text. |
+| Keywords & Skills | ✅ `/search-profiles` CRUD (skills with core/strong/familiar weight, synonyms, years; titles; must-have / nice-to-have / exclude), one default per user, `POST /search-profiles/from-resume`, `POST /search-profiles/{id}/suggest-titles` (new router task `title_suggest`). |
+| Pipeline with profiles | ✅ `PipelineRequest.search_profile_id`: keywords = titles, prefilter = weighted skill terms (synonyms; `c++`/`.net`-safe matching), must-have/exclude/avoided-company filters before scoring, career targets = titles, resume context = master resume (or `score.resume_summary`), locations/posted-within from preferences unless `search` sets them. **The legacy body (`search.keywords` + `score`) still works** (owner asked for the best option: keep both until the frontend switches; then deprecate). |
+| Canonical jobs | ✅ `jobs` (unique `job_key`, best copy), `job_sources_seen` (every source + URL). `job_store.upsert_copy` is race-safe (unique insert + conditional UPDATE): LinkedIn beats others, else the longer description. Feed entries use the canonical job id; when a better copy turns up after a job is shown, an entry with the **same `id` and `replaces: true`** is appended (clients upsert by `id`; `GET /pipeline/{run_id}/jobs` returns `next_offset`). |
+| Seen jobs | ✅ `user_jobs` (seen / filtered / saved / hidden / applied + scores + `profile_hash`). **Owner decision: a job counts as seen once it is shown in a feed.** Later runs skip seen, hidden and applied jobs; `include_seen: true` re-shows seen/saved with the stored score (no LLM call). Jobs filtered below the threshold are skipped until the profile/resume changes. `GET /jobs?state=`, `POST /jobs/{id}/save|hide|seen`. |
+| Acceptance | ✅ tests: Indeed copy found by one keyword task + LinkedIn copy by another → one feed job, LinkedIn kept, scored once; second run shows nothing already seen. |
+| Tests | ✅ 122 total (21 for P3) |
+| Not in P3 | New job sources (owner: separate follow-up, several free ones — RemoteOK, Remotive, Arbeitnow, Jobicy, The Muse keyless; Adzuna/Jooble free key; JobSpy's Google/Glassdoor sites); applying the new filters/seen-skip to the non-streaming `/pipeline/run` and `/score` (they keep the old behaviour); answer bank (P4); `applied` state is set by the apply engine in P4; frontend screens (F3). |
+
+**Operational changes introduced in P3**
+- Migration `0005` (run `alembic upgrade head`).
+- New dependencies: `pypdf`, `python-docx` (+ `lxml`) — `pip install -r requirements.txt` on deploy.
+- The worker must run for resume parsing (default queue).
+- New env (all optional): `RESUME_MAX_BYTES` (5 MB), `RESUME_MAX_PER_USER` (20), `RESUME_PARSE_MAX_CHARS` (20000), `SEARCH_PROFILES_MAX_PER_USER` (20), `RATE_LIMIT_RESUME_UPLOAD` (10/hour), `RATE_LIMIT_PROFILE_AI` (20/hour).
+- Stored resumes, like stored keys, depend on `SECRETS_MASTER_KEY`.
 
 ---
 
@@ -493,7 +515,7 @@ stateDiagram-v2
 
 `ai_models` row: `provider`, `model_id`, `display_name`, `tier` (`free | paid`), `capabilities` (`chat, json, vision, stt, tts, embeddings`), `cost_per_1k_in/out`, `rate_limit`, `context_window`, `enabled_global`, `allowed_plans`, `priority`, `key_ref`, `health`.
 
-**Task types:** `score`, `resume_parse`, `resume_tailor`, `cover_letter`, `form_answer`, `email_classify`, `interview_chat`, `interview_eval`, `embeddings`, `stt`, `tts`.
+**Task types:** `score`, `resume_parse`, `title_suggest`, `resume_tailor`, `cover_letter`, `form_answer`, `email_classify`, `interview_chat`, `interview_eval`, `embeddings`, `stt`, `tts`.
 
 **Resolution order for a request:** user's chosen model for the task (if enabled and allowed) → admin default for the task → fallback chain by `priority` (e.g., Gemini → Groq → HF, as in today's scorer). A **circuit breaker** skips a model after repeated failures and retries it later.
 
@@ -727,11 +749,11 @@ All routes are already served under `/api/v1` (`settings.API_V1_PREFIX`); new ro
 | Group | Endpoints |
 |-------|-----------|
 | Auth | `POST /auth/google`, `/auth/otp/request`, `/auth/otp/verify`, `/auth/refresh`, `/auth/logout`, `GET /auth/me` |
-| Profile | `GET/PUT /profile`, `POST /resumes` (upload), `GET /resumes`, `POST /resumes/{id}/master`, `POST /resumes/{id}/parse` |
-| Preferences | `GET/PUT /preferences`, `GET/POST/PUT/DELETE /search-profiles` |
+| Profile | `GET/PUT /profile`, `POST /resumes` (upload), `GET /resumes`, `GET/PUT/DELETE /resumes/{id}`, `GET /resumes/{id}/file`, `POST /resumes/{id}/master`, `POST /resumes/{id}/parse` |
+| Preferences | `GET/PUT /preferences`, `GET/POST/PUT/DELETE /search-profiles`, `POST /search-profiles/from-resume`, `POST /search-profiles/{id}/suggest-titles` |
 | Providers | `GET /providers`, `PUT /providers/settings` (incl. free-only mode) |
 | Models | `GET /models` (enabled), `PUT /models/preferences`, `POST /keys` (BYOK), `DELETE /keys/{id}` |
-| Jobs | `POST /pipeline/run/stream`, `GET /pipeline/{run_id}`, `GET /pipeline/{run_id}/jobs`, `POST /jobs/{id}/save|hide` |
+| Jobs | `POST /pipeline/run/stream`, `GET /pipeline/{run_id}`, `GET /pipeline/{run_id}/jobs`, `GET /jobs?state=`, `POST /jobs/{id}/save|hide|seen` |
 | ATS | `POST /ats/discover` (job title), `GET /ats/companies`, `POST /company-ats/fetch` (existing) |
 | Apply | `POST /apply` (existing), `GET /apply/runs`, `POST /apply/runs/{id}/answer`, `POST /apply/runs/{id}/approve`, `POST /apply/runs/{id}/cancel`, `POST /applications/manual` |
 | Tracker | `GET /applications`, `GET/PATCH /applications/{id}`, `GET /applications/{id}/events`, `GET /applications/stats` |

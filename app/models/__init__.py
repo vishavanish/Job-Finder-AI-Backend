@@ -12,3 +12,5 @@ from app.models.admin import AuditLog, FeatureFlag, UserEntitlement  # noqa: F40
 from app.models.ai import (  # noqa: F401
     AiModel, ProviderCatalog, Secret, TaskModelDefault, UsageLedger, UserModelPref, UserProviderSetting,
 )
+from app.models.profile import JobPreference, Profile, Resume, ResumeFile, SearchProfile  # noqa: F401
+from app.models.jobs import Job, JobSourceSeen, UserJob  # noqa: F401

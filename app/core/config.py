@@ -110,6 +110,14 @@ class Settings(BaseSettings):
     RATE_LIMIT_SCORE: str = "10/minute"
     RATE_LIMIT_APPLY: str = "5/minute"
     RATE_LIMIT_APPLICATIONS: str = "30/minute"
+    RATE_LIMIT_RESUME_UPLOAD: str = "10/hour"
+    RATE_LIMIT_PROFILE_AI: str = "20/hour"   # resume re-parse, title suggestions
+
+    # ---- profile & search (P3) ----
+    RESUME_MAX_BYTES: int = 5 * 1024 * 1024
+    RESUME_MAX_PER_USER: int = 20
+    RESUME_PARSE_MAX_CHARS: int = 20000      # resume text sent to the parser model
+    SEARCH_PROFILES_MAX_PER_USER: int = 20
     # ---- app / infra ----
     APP_NAME: str = "Job Finder API"
     API_V1_PREFIX: str = "/api/v1"

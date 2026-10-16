@@ -60,6 +60,7 @@ jiter==0.16.0
 kombu==5.6.2
 libsql-client==0.3.1
 limits==5.8.0
+lxml==6.1.3
 markdown-it-py==4.2.0
 markdownify==0.13.1
 MarkupSafe==3.0.3
@@ -89,7 +90,9 @@ pydantic_core==2.46.4
 pyee==13.0.1
 Pygments==2.21.0
 pyparsing==3.3.2
+pypdf==5.4.0
 python-dateutil==2.9.0.post0
+python-docx==1.1.2
 python-dotenv==1.2.2
 python-jobspy==1.1.80
 python-jose==3.5.0

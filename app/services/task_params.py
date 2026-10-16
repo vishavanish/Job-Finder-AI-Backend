@@ -19,9 +19,11 @@ from __future__ import annotations
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.models.schemas import ApplyRequest, ScoreRequest, ScoreRequestPartial, SearchRequest
+from app.models.schemas import (
+    ApplyRequest, PipelineRequest, ScoreRequest, ScoreRequestPartial, ScoreThresholds, SearchRequest,
+)
 from app.models.user import User
-from app.services import provider_catalog
+from app.services import provider_catalog, search_profiles
 from app.services.secret_refs import stash_secret_field
 
 
@@ -73,6 +75,56 @@ def build_score_params(req: ScoreRequest | ScoreRequestPartial, *, user_id: str)
         "groq_api_key_ref": stash_secret_field(req.groq_api_key),
         "hf_api_key_ref": stash_secret_field(req.hf_api_key),
     }
+
+
+def build_pipeline_params(req: PipelineRequest, *, db: Session, user: User) -> tuple[dict, dict]:
+    """(search_params, score_params) for /pipeline/run and /pipeline/run/stream.
+
+    Profile mode fills keywords, skills and context from the saved search
+    profile, preferences and master resume; fields the caller set
+    explicitly in `search` still win. Both modes add the filters and the
+    seen-job settings the keyword tasks use (CLAUDE.md 7.3, 7.5)."""
+    prefs = search_profiles.preferences(db, user.id)
+    search = req.search
+    filters: dict = {"avoid_companies": search_profiles.avoided_companies(prefs)}
+
+    if req.search_profile_id:
+        profile = search_profiles.get_owned(db, user.id, req.search_profile_id)
+        explicit = search.model_fields_set
+        updates: dict = {}
+        if "keywords" not in explicit:
+            titles = profile.titles or (prefs.titles if prefs else []) or []
+            if not titles:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail={
+                    "code": "search_profile_no_titles",
+                    "message": "Add at least one job title to this search profile."})
+            updates["keywords"] = list(titles)
+        if "locations" not in explicit and prefs and prefs.locations:
+            updates["locations"] = list(prefs.locations)
+        if "max_age_hours" not in explicit and prefs and prefs.posted_within_hours:
+            updates["max_age_hours"] = prefs.posted_within_hours
+        search = search.model_copy(update=updates)
+
+        if req.score is not None:
+            score = build_score_params(req.score, user_id=user.id)
+            score["resume_summary"] = req.score.resume_summary
+        else:
+            thresholds = req.thresholds or ScoreThresholds()
+            score = {"user_id": user.id, **thresholds.model_dump(),
+                     "resume_summary": search_profiles.resume_context(db, user.id)}
+        skills = profile.skills or []
+        score["skills"] = [s["name"] for s in skills] + list(profile.nice_to_have or [])
+        score["skill_terms"] = search_profiles.skill_terms(skills, profile.nice_to_have or [])
+        score["career_targets"] = list(profile.titles or [])
+        filters.update(must_have=list(profile.must_have or []), exclude=list(profile.exclude or []))
+        score["search_profile_id"] = profile.id
+    else:
+        score = build_score_params(req.score, user_id=user.id)
+
+    score["filters"] = filters
+    score["include_seen"] = req.include_seen
+    score["profile_hash"] = search_profiles.profile_hash(score)
+    return build_search_params(search, db=db, user=user), score
 
 
 def build_apply_params(req: ApplyRequest, *, user_id: str) -> dict:

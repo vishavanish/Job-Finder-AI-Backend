@@ -31,7 +31,7 @@ from app.core.config import get_settings
 from app.services import browser_apply, company_ats_sources, job_sources, scorer
 # --- add near the top, alongside existing imports ---
 from celery import group, chord
-from app.services import pipeline_progress, secret_refs
+from app.services import job_store, pipeline_progress, search_profiles, secret_refs
 from app.services.job_dedupe import job_key
 from app.core.db import SessionLocal
 from app.services import provider_catalog
@@ -136,6 +136,71 @@ def _score_jobs(db, jobs: list[dict], score_params: dict, *, ref: str | None, pr
     )
 
 
+def _prefilter_score(job: dict, score_params: dict) -> float:
+    """Weighted skill terms (search profile) or the plain skills list (legacy)."""
+    terms = score_params.get("skill_terms")
+    if terms:
+        return search_profiles.weighted_keyword_score(search_profiles.job_text(job), terms)
+    return keyword_score(job.get("description", ""), score_params["skills"])
+
+
+def _process_job(db, run_id: str, job: dict, *, score_params: dict, request_keys: dict[str, str]) -> str:
+    """One scraped copy through dedupe -> filters -> seen check -> score ->
+    feed (CLAUDE.md 7.5). Returns what happened to it."""
+    user_id = score_params.get("user_id")
+    key = job_key(job)
+    canonical = job_store.upsert_copy(db, job, key)
+
+    # Claim before any scoring: another keyword task in this run may
+    # already have this job. If so, it may still need our better copy.
+    if not pipeline_progress.claim_job_key(run_id=run_id, job_key=key):
+        _replace_if_better(db, run_id, key, canonical)
+        return "duplicates"
+
+    best = job_store.as_job(canonical)
+    if search_profiles.blocked_reason(best, score_params.get("filters") or {}):
+        return "blocked"
+
+    phash = score_params.get("profile_hash")
+    uj = job_store.get_user_job(db, user_id, canonical.id) if user_id else None
+    decision = job_store.decide(uj, include_seen=bool(score_params.get("include_seen")), profile_hash=phash)
+    if decision == "skip":
+        return "seen"
+
+    def remember(state: str, kw: float | None, llm: float | None, reason: str | None) -> None:
+        if user_id:
+            job_store.record_user_job(db, user_id=user_id, job_id=canonical.id, state=state, keyword_score=kw,
+                                      llm_score=llm, reason=reason, profile_hash=phash,
+                                      search_profile_id=score_params.get("search_profile_id"), run_id=run_id)
+
+    if decision == "reuse":
+        scored = {**best, "keyword_score": uj.keyword_score, "llm_score": uj.llm_score, "llm_reason": uj.reason or ""}
+    else:
+        best["keyword_score"] = _prefilter_score(best, score_params)
+        if best["keyword_score"] < score_params.get("keyword_prefilter_min_pct", 30):
+            # cheap prefilter still applies — no point burning an LLM call on a clear non-match
+            remember("filtered", best["keyword_score"], None, None)
+            return "filtered"
+        scored = _score_one_job_llm(best, db=db, score_params=score_params, request_keys=request_keys, ref=run_id)
+        if scored.get("llm_score", 0) < score_params.get("llm_min_score_to_keep", 70):
+            remember("filtered", scored.get("keyword_score"), scored.get("llm_score"), scored.get("llm_reason"))
+            return "filtered"
+
+    scored["auto_apply_capable"] = scored.get("source") in AUTO_APPLY_CAPABLE_SOURCES
+    payload = pipeline_progress.record_scored_job(run_id=run_id, job=scored)
+    pipeline_progress.remember_recorded(run_id=run_id, job_key=key, payload=payload)
+    remember("seen", scored.get("keyword_score"), scored.get("llm_score"), scored.get("llm_reason"))
+    # A better copy may have been stored by another task while we scored.
+    _replace_if_better(db, run_id, key, job_store.reload(db, canonical))
+    return "kept"
+
+
+def _replace_if_better(db, run_id: str, key: str, canonical) -> None:
+    best = job_store.as_job(canonical)
+    best["auto_apply_capable"] = best["source"] in AUTO_APPLY_CAPABLE_SOURCES
+    pipeline_progress.replace_recorded(run_id=run_id, job_key=key, best=best)
+
+
 @celery_app.task(bind=True, name="job_finder.search_and_score_keyword")
 def search_and_score_keyword(
     self, run_id: str, keyword: str, locations: list[str], sources: list[str],
@@ -159,38 +224,23 @@ def search_and_score_keyword(
                            # manual jobs are added once at the top level, not per keyword
                            manual_naukri_jobs=[], progress=progress_cb)
 
-        skills = score_params["skills"]
-        min_pct = score_params.get("keyword_prefilter_min_pct", 30)
         request_keys = _request_keys(score_params)
-
-        scored_count = 0
-        duplicate_count = 0
+        counts = {"duplicates": 0, "blocked": 0, "seen": 0, "kept": 0}
         for job in raw_jobs:
-            # Claim before any scoring: another keyword task in this run
-            # may already have scored the same job (CLAUDE.md 6.2 #7).
-            if not pipeline_progress.claim_job_key(run_id=run_id, job_key=job_key(job)):
-                duplicate_count += 1
-                continue
+            outcome = _process_job(db, run_id, job, score_params=score_params, request_keys=request_keys)
+            if outcome in counts:
+                counts[outcome] += 1
+            if outcome == "kept":
+                progress_cb(f"'{keyword}': scored+kept {job.get('title', '')}")
 
-            job["keyword_score"] = keyword_score(job.get("description", ""), skills)
-            if job["keyword_score"] < min_pct:
-                continue  # cheap prefilter still applies — no point burning an LLM call on a clear non-match
-
-            scored = _score_one_job_llm(job, db=db, score_params=score_params, request_keys=request_keys,
-                                        ref=run_id)
-
-            if scored.get("llm_score", 0) < score_params.get("llm_min_score_to_keep", 70):
-                continue
-
-            scored["auto_apply_capable"] = scored.get("source") in AUTO_APPLY_CAPABLE_SOURCES
-            pipeline_progress.record_scored_job(run_id=run_id, job=scored)
-            scored_count += 1
-            progress_cb(f"'{keyword}': scored+kept {scored['title']} ({scored['llm_score']})")
-
-        if duplicate_count:
-            progress_cb(f"'{keyword}': skipped {duplicate_count} job(s) already scored in this run")
+        if counts["duplicates"]:
+            progress_cb(f"'{keyword}': skipped {counts['duplicates']} job(s) already handled in this run")
+        if counts["seen"]:
+            progress_cb(f"'{keyword}': skipped {counts['seen']} job(s) you have already seen")
+        if counts["blocked"]:
+            progress_cb(f"'{keyword}': dropped {counts['blocked']} job(s) by your must-have/exclude/avoid rules")
         pipeline_progress.increment_keyword_completed(run_id=run_id)
-        return {"keyword": keyword, "raw_found": len(raw_jobs), "duplicates": duplicate_count, "kept": scored_count}
+        return {"keyword": keyword, "raw_found": len(raw_jobs), **counts}
 
     except Exception as e:  # noqa: BLE001
         logger.exception("search_and_score_keyword failed for run_id=%s keyword=%s", run_id, keyword)
@@ -357,3 +407,29 @@ def pipeline_task(self, search_params: dict, score_params: dict, apply_params: d
         "score_result": score_result,
         "apply_result": apply_result,
     }
+
+@celery_app.task(name="job_finder.parse_resume")
+def parse_resume_task(resume_id: str, user_id: str) -> dict:
+    """AI-parses one resume (CLAUDE.md 7.2). The text is read from the DB
+    here — resume content never travels through the broker."""
+    from app.models.profile import Resume
+    from app.services import resume_store
+
+    db = SessionLocal()
+    try:
+        row = db.query(Resume).filter(Resume.id == resume_id, Resume.user_id == user_id).first()
+        if row is None:
+            return {"resume_id": resume_id, "status": "missing"}
+        try:
+            resume_store.parse_resume(db, row)
+        except Exception:  # noqa: BLE001 — a crash must not leave the resume "pending" forever
+            db.rollback()
+            logger.exception("resume parse crashed for resume=%s", resume_id)
+            row = db.get(Resume, resume_id)
+            if row is None:
+                return {"resume_id": resume_id, "status": "missing"}
+            row.parse_status, row.parse_error = "failed", "Reading the resume failed. Try again."
+        db.commit()
+        return {"resume_id": resume_id, "status": row.parse_status}
+    finally:
+        db.close()
