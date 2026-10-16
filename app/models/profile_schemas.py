@@ -48,6 +48,25 @@ class ApplicantInfoIn(BaseModel):
     current_ctc: str = Field("", max_length=50)
     expected_ctc: str = Field("", max_length=50)
     total_experience_years: Optional[float] = Field(None, ge=0, le=60)
+    # P3.2: relocation and sponsorship answers for apply forms
+    willing_to_relocate: Optional[Literal["yes", "no", "depends"]] = None
+    relocation_locations: list[str] = Field(default_factory=list, max_length=20)
+    requires_sponsorship: Optional[bool] = None
+
+
+PREFER_NOT = "prefer_not_to_say"
+
+
+class EeoAnswers(BaseModel):
+    """Optional diversity answers some employers ask for (P3.2). Stored
+    encrypted, filled only by the user, never sent to an AI model or a log."""
+    model_config = ConfigDict(extra="forbid")
+
+    gender: str = Field(PREFER_NOT, max_length=100)
+    ethnicity: str = Field(PREFER_NOT, max_length=100)
+    veteran_status: str = Field(PREFER_NOT, max_length=100)
+    disability_status: str = Field(PREFER_NOT, max_length=100)
+    pronouns: str = Field(PREFER_NOT, max_length=50)
 
 
 class QA(BaseModel):
@@ -60,6 +79,7 @@ class ProfileIn(BaseModel):
     summary: Optional[str] = Field(None, max_length=5000)
     applicant_info: ApplicantInfoIn = Field(default_factory=ApplicantInfoIn)
     work_authorization: list[QA] = Field(default_factory=list, max_length=30)
+    eeo: Optional[EeoAnswers] = Field(None, description="Leave out to keep the saved answers")
 
 
 class ProfileOut(ProfileIn):
@@ -282,6 +302,11 @@ class UserJobOut(BaseModel):
     llm_score: Optional[float] = None
     reason: Optional[str] = None
     sources: list[str] = Field(default_factory=list, description="Every source this job was found on")
+    match: Optional[dict] = Field(None, description="Skills matched/missing, title fit, seniority, missing required")
+    posted_at: Optional[str] = None
+    posted_hours_ago: Optional[int] = None
+    early: bool = False
+    applicants: Optional[str] = Field(None, description="LinkedIn applicant count as shown, e.g. 143 or Over 200")
     updated_at: datetime
 
 

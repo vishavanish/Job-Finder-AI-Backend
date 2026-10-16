@@ -6,7 +6,7 @@ Start the whole stack for local development with one command:
     python run_dev.py [--backend-only]
 
 Runs database migrations, then the API (http://127.0.0.1:8000), the Celery
-worker and the frontend (http://localhost:5173) in this one terminal, each
+worker, Celery beat (job alerts) and the frontend (http://localhost:5173) in this one terminal, each
 line prefixed with where it came from. Ctrl+C stops all three.
 
 Local runs use output/dev.db (SQLite), never the Supabase DATABASE_URL in
@@ -39,7 +39,7 @@ DEV_ENV = {
     "PYTHONUNBUFFERED": "1",
 }
 
-COLORS = {"api": "\033[36m", "worker": "\033[35m", "web": "\033[32m", "dev": "\033[33m"}
+COLORS = {"api": "\033[36m", "worker": "\033[35m", "beat": "\033[34m", "web": "\033[32m", "dev": "\033[33m"}
 RESET = "\033[0m"
 _print_lock = threading.Lock()
 
@@ -130,7 +130,12 @@ def main() -> None:
         "api": start("api", [PYTHON, "-m", "uvicorn", "app.main:app", "--reload",
                              "--host", "127.0.0.1", "--port", "8000"], BACKEND, env),
         "worker": start("worker", [PYTHON, "-m", "celery", "-A", "app.core.celery_app:celery_app", "worker",
-                                   "--pool=solo", "--loglevel=info", "-Q", "default_dev,apply_dev"], BACKEND, env),
+                                   "--pool=solo", "--loglevel=info", "-Q", "default_dev,apply_dev,maintenance_dev"],
+                        BACKEND, env),
+        # One beat process: starts due job alerts (P3.2).
+        "beat": start("beat", [PYTHON, "-m", "celery", "-A", "app.core.celery_app:celery_app", "beat",
+                               "--loglevel=info", "--schedule", str(BACKEND / "output" / "celerybeat-schedule")],
+                      BACKEND, env),
     }
     if with_web:
         procs["web"] = start("web", [NPM, "run", "dev"], FRONTEND, env)

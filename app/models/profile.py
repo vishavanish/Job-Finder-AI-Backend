@@ -46,6 +46,7 @@ class Profile(Base):
     summary = Column(Text, nullable=True)
     applicant_info = Column(JSON, nullable=False, default=dict)
     work_authorization = Column(JSON, nullable=False, default=list)  # [{question, answer}]
+    eeo_encrypted = Column(Text, nullable=True)  # EeoAnswers JSON, envelope-encrypted (key_store.seal)
     created_at = Column(DateTime, default=_now, nullable=False)
     updated_at = Column(DateTime, default=_now, onupdate=_now, nullable=False)
 

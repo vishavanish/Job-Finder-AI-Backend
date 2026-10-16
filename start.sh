@@ -17,6 +17,14 @@ celery -A app.core.celery_app:celery_app worker \
     --concurrency=2 \
     -Q "${QUEUES}" &
 
+# Exactly ONE beat process per deployment (it schedules job alerts; P3.2).
+# On the Oracle VM with separate systemd units, run beat as its own unit
+# (job_finder_beat.service) instead and set START_BEAT=0 here.
+if [ "${START_BEAT:-1}" = "1" ]; then
+    echo "Starting Celery beat..."
+    celery -A app.core.celery_app:celery_app beat --loglevel=info &
+fi
+
 echo "Starting FastAPI..."
 
 exec uvicorn app.main:app \

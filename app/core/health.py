@@ -52,10 +52,13 @@ def run_health_check() -> dict:
     redis_ok, redis_detail = check_redis()
     llm_ok, llm_detail = check_llm_config()
  
+    from app.services.job_alerts import last_tick
     checks = {
         "database": {"ok": db_ok, "detail": db_detail},
         "redis": {"ok": redis_ok, "detail": redis_detail},
         "llm_config": {"ok": llm_ok, "detail": llm_detail},
+        # Informational: when Celery beat last ran the job-alerts tick (None = beat not running).
+        "alerts_scheduler": {"ok": True, "last_tick": last_tick() if redis_ok else None},
     }
  
     if not db_ok or not redis_ok:

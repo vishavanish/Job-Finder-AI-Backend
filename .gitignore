@@ -46,3 +46,5 @@ Thumbs.db
 *.log
 .env.local
 .env.*.local
+# celery beat state
+celerybeat-schedule*

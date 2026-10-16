@@ -52,6 +52,16 @@ if settings.REDIS_URL.startswith("rediss://"):
     celery_app.conf.broker_use_ssl = _ssl_opts
     celery_app.conf.redis_backend_use_ssl = _ssl_opts
 
+# Celery beat (run ONE beat process): job alerts tick (P3.2). Later phases add
+# Gmail polling (P5) and the ATS crawler (P6) here.
+celery_app.conf.beat_schedule = {
+    "job-alerts-tick": {
+        "task": "job_finder.alerts_tick",
+        "schedule": float(settings.JOB_ALERT_TICK_SECONDS),
+        "options": {"queue": settings.maintenance_queue, "expires": settings.JOB_ALERT_TICK_SECONDS},
+    },
+}
+
 import app.core.celery_tasks  # noqa: E402, F401
 
 _LOG_FILE_NAME = "celery_worker.log"

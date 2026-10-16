@@ -23,6 +23,8 @@ from app.services.source_info import has_partial_description
 logger = logging.getLogger("job_finder_api.scorer")
 NoOpProgress: Callable[[str], None] = lambda msg: None
 
+SENIORITY_VALUES = ("match", "stretch", "overqualified")
+
 LLM_SYSTEM_PROMPT_TEMPLATE = """You are an expert technical recruiter evaluating job fit.
 
     You will receive:
@@ -48,10 +50,15 @@ LLM_SYSTEM_PROMPT_TEMPLATE = """You are an expert technical recruiter evaluating
         - Be realistic about seniority.
         - Do not invent candidate experience.
         - Keep the reason to ONE sentence.
+        - "seniority": "match", "stretch" (the role is more senior than the candidate) or
+          "overqualified" (the role is clearly junior for the candidate).
+        - "missing_required": up to 3 skills the job clearly REQUIRES that the résumé does not show
+          (an empty list if none). Never list optional or nice-to-have skills.
 
     Return ONLY valid JSON, no markdown, no explanation outside the JSON.
     Required format:
-    [{{"index": 0, "score": 87, "reason": "Strong FastAPI and LangGraph overlap with relevant backend responsibilities."}}]
+    [{{"index": 0, "score": 87, "reason": "Strong FastAPI and LangGraph overlap with relevant backend responsibilities.",
+       "seniority": "match", "missing_required": ["Kubernetes"]}}]
 """
 
 
@@ -138,6 +145,12 @@ def _parse_and_apply_scores(raw_text: str, jobs: list[dict], progress: Callable[
             score = 0
         jobs[idx]["llm_score"] = max(0, min(100, score))
         jobs[idx]["llm_reason"] = str(entry.get("reason", ""))[:500]
+        # Optional extras (P3.2): a model that leaves them out still produces a valid score.
+        if entry.get("seniority") in SENIORITY_VALUES:
+            jobs[idx]["llm_seniority"] = entry["seniority"]
+        missing = entry.get("missing_required")
+        if isinstance(missing, list):
+            jobs[idx]["llm_missing"] = [str(m).strip()[:60] for m in missing if str(m).strip()][:3]
         applied += 1
     return applied > 0
 

@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     ADZUNA_API_KEY: str = ""      # "APP_ID:APP_KEY"
     JOOBLE_API_KEY: str = ""
     CAREERJET_API_KEY: str = ""
+    # Google Jobs through the user's own free key (P3.2). .env values are for local testing only:
+    # these sources never use a shared key in normal runs.
+    BRIGHTDATA_API_KEY: str = ""  # "API_KEY:ZONE"
+    SERPAPI_API_KEY: str = ""
+    JSEARCH_API_KEY: str = ""
+    THEMUSE_API_KEY: str = ""     # platform key for The Muse feed (shared cache)
 
     # ---- job sources (CLAUDE.md 7.4) ----
     SOURCE_HTTP_TIMEOUT_SECONDS: int = 20
@@ -58,6 +64,13 @@ class Settings(BaseSettings):
     SOURCE_DAILY_CAP_OWN_KEY: int = 100         # keyed-API calls per user per day with their own key
     SOURCE_DAILY_CAP_PLATFORM_KEY: int = 20     # ... per user per day on the shared platform key
     SOURCE_DAILY_CAP_PLATFORM_TOTAL: int = 200  # ... all users together per day on the platform key
+    HN_FEED_CACHE_TTL_SECONDS: int = 21600      # HN "Who is hiring?" changes slowly
+    APPLICANT_COUNT_MAX_PER_RUN: int = 20       # LinkedIn job pages checked per keyword task
+
+    # ---- job alerts (P3.2) ----
+    JOB_ALERTS_MAX_PER_USER: int = 3
+    JOB_ALERT_TICK_SECONDS: int = 600
+    JOB_ALERT_DEFAULT_MIN_SCORE: int = 75
 
     # ---- AI router (CLAUDE.md 7.9) ----
     AI_BREAKER_FAILURES: int = 3          # consecutive failures before a model is skipped
@@ -102,11 +115,15 @@ class Settings(BaseSettings):
         return f"apply{self.queue_suffix}"
 
     @property
+    def maintenance_queue(self) -> str:
+        return f"maintenance{self.queue_suffix}"
+
+    @property
     def worker_queues(self) -> str:
         """Comma-separated -Q list for a worker that serves every queue
         the API publishes to. start.sh reads this so the worker can never
         drift from the names routes dispatch to (the stuck-`pending` bug)."""
-        return f"{self.default_queue},{self.apply_queue}"
+        return f"{self.default_queue},{self.apply_queue},{self.maintenance_queue}"
 
     # ---- signup ----
     # Interim switch until OTP-verified signup (CLAUDE.md 7.1) lands.
@@ -134,6 +151,7 @@ class Settings(BaseSettings):
     SEARCH_PROFILES_MAX_PER_USER: int = 20
     # ---- app / infra ----
     APP_NAME: str = "Job Finder API"
+    APP_PUBLIC_URL: str = ""  # frontend URL, used in emails (e.g. alert digests)
     API_V1_PREFIX: str = "/api/v1"
     CORS_ORIGINS: list[str] = ["*"]
 

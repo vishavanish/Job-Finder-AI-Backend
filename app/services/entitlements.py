@@ -50,12 +50,14 @@ FEATURES: dict[str, Entitlement] = {
     "live_copilot": Entitlement("live_copilot", False),  # off by default (CLAUDE.md 7.10)
     "resume_tailoring": Entitlement("resume_tailoring", True),
     "premium_models": Entitlement("premium_models", False),
+    "job_alerts": Entitlement("job_alerts", True, quota_per_day=5),  # alert runs per day (P3.2)
 }
 
 FEATURE_LABELS = {
     "job_search": "job search", "scoring": "AI job scoring", "ats_discovery": "company career pages",
     "auto_apply": "auto apply", "gmail_tracking": "Gmail tracking", "voice_prep": "interview practice",
     "live_copilot": "Live Copilot", "resume_tailoring": "resume tailoring", "premium_models": "premium AI models",
+    "job_alerts": "job alerts",
 }
 
 # Global kill switches: feature -> feature flag that must be true.

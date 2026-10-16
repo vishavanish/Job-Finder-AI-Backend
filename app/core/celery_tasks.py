@@ -25,6 +25,9 @@ carry `user_id` and, for legacy request-body keys, short-lived key refs.
 from __future__ import annotations
 
 import logging
+import random
+import time
+from datetime import datetime, timedelta, timezone
 
 from app.core.celery_app import celery_app
 from app.core.config import get_settings
@@ -124,7 +127,8 @@ def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str
         user_id=user_id,
         client_ip=search_params.get("client_ip", ""),
         client_user_agent=search_params.get("client_user_agent", ""),
-        key_lookup=lambda scope: key_store.resolve(db, user_id=user_id, scope=scope),
+        key_lookup=lambda scope, platform_only=False: key_store.resolve(
+            db, user_id=None if platform_only else user_id, scope=scope),
         on_source_result=on_source_result,
         progress=progress,
     )
@@ -186,14 +190,17 @@ def _process_job(db, run_id: str, job: dict, *, score_params: dict, request_keys
     if decision == "skip":
         return "seen"
 
-    def remember(state: str, kw: float | None, llm: float | None, reason: str | None) -> None:
+    def remember(state: str, kw: float | None, llm: float | None, reason: str | None,
+                 breakdown: dict | None = None) -> None:
         if user_id:
             job_store.record_user_job(db, user_id=user_id, job_id=canonical.id, state=state, keyword_score=kw,
                                       llm_score=llm, reason=reason, profile_hash=phash,
-                                      search_profile_id=score_params.get("search_profile_id"), run_id=run_id)
+                                      search_profile_id=score_params.get("search_profile_id"), run_id=run_id,
+                                      breakdown=breakdown)
 
     if decision == "reuse":
-        scored = {**best, "keyword_score": uj.keyword_score, "llm_score": uj.llm_score, "llm_reason": uj.reason or ""}
+        scored = {**best, "keyword_score": uj.keyword_score, "llm_score": uj.llm_score, "llm_reason": uj.reason or "",
+                  "match": uj.breakdown or search_profiles.match_breakdown(best, score_params)}
     else:
         best["keyword_score"] = _prefilter_score(best, score_params)
         if best["keyword_score"] < score_params.get("keyword_prefilter_min_pct", 30):
@@ -204,14 +211,62 @@ def _process_job(db, run_id: str, job: dict, *, score_params: dict, request_keys
         if scored.get("llm_score", 0) < score_params.get("llm_min_score_to_keep", 70):
             remember("filtered", scored.get("keyword_score"), scored.get("llm_score"), scored.get("llm_reason"))
             return "filtered"
+        scored["match"] = {**search_profiles.match_breakdown(best, score_params),
+                           "seniority": scored.get("llm_seniority"),
+                           "missing_required": scored.get("llm_missing")}
 
+    scored.update(job_store.freshness(canonical, score_params.get("previous_search_at")))
     scored["auto_apply_capable"] = scored.get("source") in AUTO_APPLY_CAPABLE_SOURCES
     payload = pipeline_progress.record_scored_job(run_id=run_id, job=scored)
     pipeline_progress.remember_recorded(run_id=run_id, job_key=key, payload=payload)
-    remember("seen", scored.get("keyword_score"), scored.get("llm_score"), scored.get("llm_reason"))
+    remember("seen", scored.get("keyword_score"), scored.get("llm_score"), scored.get("llm_reason"),
+             breakdown=scored.get("match"))
     # A better copy may have been stored by another task while we scored.
     _replace_if_better(db, run_id, key, job_store.reload(db, canonical))
     return "kept"
+
+
+def add_applicant_counts(db, run_id: str | None, keys: list[str], *, progress=lambda m: None,
+                         sleep=time.sleep) -> int:
+    """LinkedIn applicant counts for jobs just shown (P3.2): at most
+    APPLICANT_COUNT_MAX_PER_RUN pages, 2-4 s apart, re-checked after 24 h,
+    stopped at the first 429 or when LinkedIn is paused/off. Updates the
+    canonical job and, for a pipeline run, its feed entry. Returns how
+    many counts were found."""
+    from app.models.ai import ProviderCatalog
+    from app.models.jobs import Job
+    from app.providers.job_sources import linkedin_applicants
+
+    row = db.get(ProviderCatalog, "linkedin")
+    if row is None or not row.enabled_global or provider_catalog.paused_until(row):
+        return 0
+    stale = datetime.now(timezone.utc) - timedelta(hours=24)
+    found = checked = 0
+    for key in keys:
+        if checked >= settings.APPLICANT_COUNT_MAX_PER_RUN:
+            break
+        job = db.query(Job).filter(Job.job_key == key).first()
+        if job is None or (job.best_source or "").lower() != "linkedin":
+            continue
+        last = job.applicants_checked_at
+        if last is not None and (last if last.tzinfo else last.replace(tzinfo=timezone.utc)) > stale:
+            continue
+        if checked:
+            sleep(random.uniform(2, 4))
+        checked += 1
+        try:
+            count = linkedin_applicants.fetch_count(job.url)
+        except linkedin_applicants.RateLimited:
+            progress("LinkedIn applicant counts: rate-limited — stopping for this run")
+            break
+        job.applicants_checked_at = datetime.now(timezone.utc)
+        if count:
+            job.applicants = count
+            found += 1
+        db.commit()
+        if count and run_id:
+            pipeline_progress.update_recorded(run_id=run_id, job_key=key, fields={"applicants": count})
+    return found
 
 
 def _replace_if_better(db, run_id: str, key: str, canonical) -> None:
@@ -245,12 +300,16 @@ def search_and_score_keyword(
 
         request_keys = _request_keys(score_params)
         counts = {"duplicates": 0, "blocked": 0, "seen": 0, "kept": 0}
+        kept_keys: list[str] = []
         for job in raw_jobs:
             outcome = _process_job(db, run_id, job, score_params=score_params, request_keys=request_keys)
             if outcome in counts:
                 counts[outcome] += 1
             if outcome == "kept":
+                kept_keys.append(job_key(job))
                 progress_cb(f"'{keyword}': scored+kept {job.get('title', '')}")
+        if "linkedin" in sources:
+            add_applicant_counts(db, run_id, kept_keys, progress=progress_cb)
 
         if counts["duplicates"]:
             progress_cb(f"'{keyword}': skipped {counts['duplicates']} job(s) already handled in this run")
@@ -450,5 +509,113 @@ def parse_resume_task(resume_id: str, user_id: str) -> dict:
             row.parse_status, row.parse_error = "failed", "Reading the resume failed. Try again."
         db.commit()
         return {"resume_id": resume_id, "status": row.parse_status}
+    finally:
+        db.close()
+
+
+# ============================================================
+# JOB ALERTS (P3.2)
+# ============================================================
+
+@celery_app.task(name="job_finder.alerts_tick")
+def alerts_tick() -> dict:
+    """Beat, every JOB_ALERT_TICK_SECONDS: start every alert that is due."""
+    from app.services import job_alerts
+    db = SessionLocal()
+    try:
+        won = job_alerts.claim_due(db)
+    finally:
+        db.close()
+    for alert_id in won:
+        run_job_alert.apply_async(args=[alert_id, "schedule"], queue=settings.default_queue)
+    return {"started": len(won)}
+
+
+@celery_app.task(bind=True, name="job_finder.run_job_alert")
+def run_job_alert(self, alert_id: str, trigger: str = "schedule") -> dict:
+    """One alert run: the alert's search profile through the normal pipeline
+    path, then the digest. Results are also a normal pipeline run (`run_id`
+    in counts), so GET /pipeline/{run_id}/jobs shows them too."""
+    from app.models.alerts import JobAlert, JobAlertRun
+    from app.models.schemas import PipelineRequest
+    from app.models.user import User
+    from app.providers.email import get_email_sender
+    from app.services import job_alerts
+    from app.services.task_params import build_pipeline_params
+    from fastapi import HTTPException
+
+    progress_cb = _make_progress_cb(self, "run_job_alert")
+    db = SessionLocal()
+    run = None
+    try:
+        alert = db.get(JobAlert, alert_id)
+        if alert is None:
+            return {"skipped": "alert deleted"}
+        user = db.get(User, alert.user_id)
+        run = JobAlertRun(alert_id=alert.id, user_id=alert.user_id, trigger=trigger, counts={}, job_ids=[])
+        db.add(run)
+        db.commit()
+
+        reason = job_alerts.may_run(db, user)
+        if reason:
+            run.status, run.error, run.finished_at = "skipped", reason, job_alerts.utcnow()
+            db.commit()
+            return {"skipped": reason}
+
+        try:
+            search_params, score_params = build_pipeline_params(
+                PipelineRequest(search_profile_id=alert.search_profile_id), db=db, user=user)
+        except HTTPException as e:
+            detail = e.detail if isinstance(e.detail, dict) else {"message": str(e.detail)}
+            raise RuntimeError(detail.get("message") or "the search could not be prepared") from e
+        score_params["llm_min_score_to_keep"] = alert.min_score
+        score_params["previous_search_at"] = pipeline_progress.mark_user_search(user.id)
+
+        keywords = search_params["keywords"]
+        run_id = pipeline_progress.create_run(user_id=user.id, total_keywords=len(keywords))
+        request_keys = _request_keys(score_params)
+        counts = {"run_id": run_id, "raw": 0, "kept": 0, "duplicates": 0, "blocked": 0, "seen": 0, "filtered": 0}
+        kept_keys: list[str] = []
+        for keyword in keywords:
+            raw_jobs = _scrape(db, search_params, keywords=[keyword], locations=search_params["locations"],
+                               sources=search_params["sources"], manual_naukri_jobs=[], progress=progress_cb)
+            counts["raw"] += len(raw_jobs)
+            for job in raw_jobs:
+                outcome = _process_job(db, run_id, job, score_params=score_params, request_keys=request_keys)
+                if outcome in counts:
+                    counts[outcome] += 1
+                if outcome == "kept":
+                    kept_keys.append(job_key(job))
+            pipeline_progress.increment_keyword_completed(run_id=run_id)
+        if "linkedin" in search_params["sources"]:
+            add_applicant_counts(db, run_id, kept_keys, progress=progress_cb)
+
+        latest: dict[str, dict] = {}
+        for entry in pipeline_progress.get_jobs(run_id=run_id):
+            latest[entry["id"]] = entry  # replacements share the id; keep the newest copy
+        jobs = sorted(latest.values(), key=lambda j: j.get("llm_score") or 0, reverse=True)
+        run.job_ids = [j["id"] for j in jobs]
+        run.counts = counts
+        run.status, run.finished_at = "done", job_alerts.utcnow()
+        alert.last_run_at = run.finished_at
+        db.commit()
+
+        if jobs and alert.email_digest:
+            subject, body = job_alerts.digest_text(alert, jobs)
+            try:
+                get_email_sender().send(to=user.email, subject=subject, body=body)
+                run.emailed_at = job_alerts.utcnow()
+            except Exception as e:  # noqa: BLE001 — the run's results stay in the app
+                logger.warning("alert %s: digest email failed: %s", alert.id, type(e).__name__)
+                run.error = f"digest email failed: {type(e).__name__}"
+            db.commit()
+        return {"alert_id": alert.id, "run_id": run_id, "new_jobs": len(jobs)}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("job alert %s failed", alert_id)
+        db.rollback()
+        if run is not None:
+            run.status, run.error, run.finished_at = "failed", str(e)[:500], datetime.now(timezone.utc).replace(tzinfo=None)
+            db.commit()
+        return {"alert_id": alert_id, "error": str(e)[:200]}
     finally:
         db.close()

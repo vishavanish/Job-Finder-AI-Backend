@@ -136,6 +136,13 @@ def record_scored_job(*, run_id: str, job: dict) -> dict:
         "llm_score": job.get("llm_score"),
         "llm_reason": job.get("llm_reason", ""),
         "auto_apply_capable": bool(job.get("auto_apply_capable")),
+        # P3.2: match breakdown and freshness (None when unknown)
+        "match": job.get("match"),
+        "posted_at": job.get("posted_at"),
+        "posted_hours_ago": job.get("posted_hours_ago"),
+        "early": bool(job.get("early")),
+        "new_since_last_search": job.get("new_since_last_search"),
+        "applicants": job.get("applicants"),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     _push(run_id, payload)
@@ -174,6 +181,35 @@ def replace_recorded(*, run_id: str, job_key: str, best: dict) -> bool:
     _push(run_id, updated)
     remember_recorded(run_id=run_id, job_key=job_key, payload=updated)
     return True
+
+
+def update_recorded(*, run_id: str, job_key: str, fields: dict) -> bool:
+    """Appends an updated copy of a job already in the feed with some
+    fields changed (e.g. the LinkedIn applicant count found after it was
+    shown) — same `id`, `replaces: true`."""
+    raw = _redis().hget(_recorded_key(run_id), job_key)
+    if not raw:
+        return False
+    shown = json.loads(raw)
+    if all(shown.get(k) == v for k, v in fields.items()):
+        return False
+    updated = {**shown, **fields, "replaces": True, "created_at": datetime.now(timezone.utc).isoformat()}
+    _push(run_id, updated)
+    remember_recorded(run_id=run_id, job_key=job_key, payload=updated)
+    return True
+
+
+LAST_SEARCH_TTL_SECONDS = 90 * 24 * 3600
+
+
+def mark_user_search(user_id: str) -> str | None:
+    """Records that the user started a search now; returns when their
+    previous one started (ISO), for "new since your last search"."""
+    r = _redis()
+    key = f"user_last_search:{user_id}"
+    previous = r.getset(key, datetime.now(timezone.utc).isoformat())
+    r.expire(key, LAST_SEARCH_TTL_SECONDS)
+    return previous
 
 
 def count_jobs(*, run_id: str) -> int:

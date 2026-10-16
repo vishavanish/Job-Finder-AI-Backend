@@ -61,6 +61,13 @@ def is_enabled_for(row: ProviderCatalog, choices: dict[str, bool]) -> bool:
     return choices.get(row.key, bool(row.default_enabled))
 
 
+def user_key_only(source_key: str) -> bool:
+    """Sources that must run on the user's own key. Outside production a
+    platform/.env key is accepted too, for local testing."""
+    spec = registry.get(source_key)
+    return bool(spec and spec.user_key_only) and get_settings().ENVIRONMENT == "production"
+
+
 def paused_until(row: ProviderCatalog) -> datetime | None:
     """When a failing source may run again, or None if it isn't paused."""
     settings = get_settings()
@@ -81,9 +88,12 @@ def availability(db: Session, user: User, row: ProviderCatalog, *, choices: dict
     if user.free_only_mode and row.tier in PAID_TIERS:
         return False, "paid source — \"Free tools only\" is on"
     if row.requires_key and row.key_scope and not has_request_key:
-        if not (key_store.has_user_key(db, user.id, row.key_scope)
-                or key_store.platform_key_available(db, row.key_scope)):
-            return False, f"needs a {row.key_scope} API key"
+        scopes = [s.strip() for s in row.key_scope.split(",") if s.strip()]
+        shared_ok = not user_key_only(row.key)
+        if not any(key_store.has_user_key(db, user.id, s) or (shared_ok and key_store.platform_key_available(db, s))
+                   for s in scopes):
+            owner = "your own " if not shared_ok else "a "
+            return False, f"needs {owner}{' or '.join(scopes)} API key"
     until = paused_until(row)
     if until:
         return False, f"paused after repeated errors — retrying after {until:%H:%M} UTC"
