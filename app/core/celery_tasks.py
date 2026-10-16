@@ -88,10 +88,23 @@ def _score_one_job_llm(job: dict, *, db, score_params: dict, request_keys: dict[
 def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str], sources: list[str],
             manual_naukri_jobs: list, progress) -> list[dict]:
     """job_sources.scrape_all with the params a route built, plus source
-    health: sources that returned jobs are marked healthy."""
+    health: sources that answered are marked healthy, failures counted
+    (enough in a row pauses the source — provider_catalog.paused_until).
+    Free-source keys are looked up here, in the worker, never enqueued."""
+    from app.services import key_store
     for note in search_params.get("skipped_sources") or []:
         progress(f"skipped source — {note}")
     naukri_apify = search_params.get("enable_naukri_apify", False)
+    user_id = search_params.get("user_id")
+    healthy: set[str] = set()
+    failed: dict[str, str] = {}
+
+    def on_source_result(key: str, error: str | None) -> None:
+        if error is None:
+            healthy.add(key)
+        else:
+            failed[key] = error
+
     jobs = job_sources.scrape_all(
         keywords=keywords,
         locations=locations,
@@ -108,11 +121,17 @@ def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str
         enable_naukri_apify=naukri_apify,
         apify_naukri_actor_id=search_params.get("apify_naukri_actor_id", ""),
         apify_api_token=_apify_token(db, search_params) if naukri_apify else "",
+        user_id=user_id,
+        client_ip=search_params.get("client_ip", ""),
+        client_user_agent=search_params.get("client_user_agent", ""),
+        key_lookup=lambda scope: key_store.resolve(db, user_id=user_id, scope=scope),
+        on_source_result=on_source_result,
         progress=progress,
     )
     try:
-        plan = provider_catalog.SourcePlan(sources=list(sources), naukri_apify=naukri_apify)
-        provider_catalog.mark_success(db, provider_catalog.sources_seen(jobs, plan))
+        provider_catalog.mark_success(db, healthy)
+        for key, error in failed.items():
+            provider_catalog.mark_failure(db, key, error)
     except Exception:  # noqa: BLE001 — health bookkeeping must never fail a search
         db.rollback()
         logger.exception("could not record source health")

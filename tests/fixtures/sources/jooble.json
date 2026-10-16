@@ -1,0 +1,26 @@
+{
+ "totalCount": 2,
+ "jobs": [
+  {
+   "id": 11,
+   "title": "Senior Python Engineer",
+   "company": "Gamma Tech",
+   "location": "Bengaluru",
+   "snippet": "&nbsp;...Django and <b>Python</b> microservices...",
+   "salary": "",
+   "source": "naukri.com",
+   "type": "Full-time",
+   "link": "https://jooble.org/desc/11",
+   "updated": "2026-10-16T06:00:00.0000000"
+  },
+  {
+   "id": 12,
+   "title": "Python Developer",
+   "company": "Old Corp",
+   "location": "Bengaluru",
+   "snippet": "Old posting",
+   "link": "https://jooble.org/desc/12",
+   "updated": "2026-01-01T06:00:00.0000000"
+  }
+ ]
+}

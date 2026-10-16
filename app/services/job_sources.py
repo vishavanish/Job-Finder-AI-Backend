@@ -1,23 +1,35 @@
 """
 app/services/job_sources.py
 -----------------------------
-Ported from the original job_sources.py. Behaviour is identical; every
-value that was previously imported from config.py is now a function
-argument, sourced from app.models.schemas.SearchRequest.
+Runs one search across every requested job source (CLAUDE.md 7.4) and
+returns validated, de-duplicated jobs in the plain-dict shape used
+everywhere else. Source kinds and adapters: app/providers/job_sources/.
+
+  jobspy   LinkedIn, Indeed, Glassdoor, Google Jobs — one JobSpy call per
+           keyword x location, paced (search_delay_sec) with LinkedIn retries
+  keyword  Adzuna, Jooble, Careerjet — free keys resolved by the caller's
+           `key_lookup` (never passed in params), daily caps per user
+  feed     remote feeds — cached in Redis, filtered by keyword, region and age
+  manual   Naukri jobs the user pasted; Apify for Naukri when enabled
+
+`on_source_result(key, error)` reports each source's outcome so the caller
+can record health: error=None when it answered, the reason when it failed.
+A failing source never fails the search.
 """
 from __future__ import annotations
 
 import random
 import time
-from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
 from jobspy import scrape_jobs
 
-from app.services import job_dedupe
-
-SOURCE_DISPLAY_NAMES = {"linkedin": "LinkedIn", "indeed": "Indeed", "naukri": "Naukri"}
+from app.providers.job_sources import aggregators, feeds, registry
+from app.providers.job_sources.base import (
+    SourceError, SourceQuery, geo_allows, is_recent, matches_keyword,
+)
+from app.services import job_dedupe, source_limits
 
 NoOpProgress: Callable[[str], None] = lambda msg: None
 
@@ -64,8 +76,15 @@ def _run_jobspy(
     linkedin_max_retries: int,
     linkedin_retry_delay_sec: float,
     progress: Callable[[str], None],
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, str | None]:
+    """(rows, last error). JobSpy logs most per-site failures itself and
+    returns no rows, so an empty frame is not treated as an error."""
     attempt = 0
+    error = None
+    extra = {}
+    if "google" in sources:
+        when = "since yesterday" if max_age_hours <= 24 else "in the last week"
+        extra["google_search_term"] = f"{keyword} jobs near {location} {when}"
     max_attempts = linkedin_max_retries + 1 if "linkedin" in sources else 1
     df = pd.DataFrame()
 
@@ -81,8 +100,11 @@ def _run_jobspy(
                 hours_old=max_age_hours,
                 country_indeed=country_indeed,
                 linkedin_fetch_description=linkedin_fetch_description,
+                **extra,
             )
+            error = None
         except Exception as e:  # noqa: BLE001
+            error = f"JobSpy: {type(e).__name__}"
             progress(f"JobSpy search failed for '{keyword}': {e}")
             df = pd.DataFrame()
 
@@ -93,14 +115,14 @@ def _run_jobspy(
         )
 
         if not df.empty and got_linkedin_rows:
-            return df
+            return df, None
 
         if attempt < max_attempts:
             wait = linkedin_retry_delay_sec + random.uniform(0, 5)
             progress(f"0 rows / possible rate limit — waiting {wait:.0f}s before retry")
             time.sleep(wait)
 
-    return df
+    return df, error
 
 
 def _normalize(df: pd.DataFrame) -> list[dict]:
@@ -110,7 +132,8 @@ def _normalize(df: pd.DataFrame) -> list[dict]:
     jobs = []
     for record in df.to_dict("records"):
         site = _pick(record, "site", "SITE").lower()
-        source = SOURCE_DISPLAY_NAMES.get(site, site.title() or "Unknown")
+        spec = registry.by_jobspy_site(site)
+        source = spec.name if spec else (site.title() or "Unknown")
         url = _pick(record, "job_url", "job_url_direct", "url", "JOB_URL")
         if url and not url.startswith(("http://", "https://")):
             url = "https://" + url.lstrip("/")
@@ -157,6 +180,82 @@ def _deduplicate_jobs(jobs: list[dict], progress: Callable[[str], None]) -> list
     return unique
 
 
+class _Outcomes:
+    """Per-source result of one scrape_all call, for source health."""
+
+    def __init__(self) -> None:
+        self.ok: set[str] = set()
+        self.errors: dict[str, str] = {}
+
+    def success(self, key: str) -> None:
+        self.ok.add(key)
+
+    def failure(self, key: str, error: str) -> None:
+        self.errors[key] = error[:300]
+
+    def report(self, callback: Callable[[str, str | None], None] | None) -> None:
+        if callback is None:
+            return
+        for key in self.ok:
+            callback(key, None)
+        for key, error in self.errors.items():
+            if key not in self.ok:  # answered at least once in this search -> healthy
+                callback(key, error)
+
+
+def _run_keyword_api(key: str, query: SourceQuery, *, user_id: str | None, key_lookup, outcomes: _Outcomes,
+                     progress: Callable[[str], None]) -> list[dict]:
+    spec = registry.get(key)
+    resolved = key_lookup(spec.key_scope) if key_lookup else None
+    if not resolved:
+        progress(f"{spec.name}: no API key — skipped")
+        return []
+    if not source_limits.take_quota(key, user_id, resolved.source):
+        progress(f"{spec.name}: today's search limit reached — skipped until tomorrow")
+        return []
+    try:
+        jobs = aggregators.KEYWORD_APIS[key](query, resolved.value)
+    except SourceError as e:
+        outcomes.failure(key, str(e))
+        progress(f"{spec.name} failed: {e}")
+        return []
+    except Exception as e:  # noqa: BLE001 — never echo the exception text: it may contain the key
+        outcomes.failure(key, f"{spec.name}: {type(e).__name__}")
+        progress(f"{spec.name} failed: {type(e).__name__}")
+        return []
+    outcomes.success(key)
+    progress(f"{spec.name}: {len(jobs)} jobs for '{query.keyword}' in '{query.location}'")
+    return jobs
+
+
+def _run_feed(key: str, keywords: list[str], *, country: str, max_age_hours: int, limit: int,
+              outcomes: _Outcomes, progress: Callable[[str], None]) -> list[dict]:
+    spec = registry.get(key)
+    try:
+        feed = source_limits.cached_feed(key, feeds.FEEDS[key])
+    except source_limits.FeedUnavailable as e:
+        progress(f"{spec.name}: skipped this time ({e})")
+        return []
+    except SourceError as e:
+        outcomes.failure(key, str(e))
+        progress(f"{spec.name} failed: {e}")
+        return []
+    except Exception as e:  # noqa: BLE001
+        outcomes.failure(key, f"{spec.name}: {type(e).__name__}")
+        progress(f"{spec.name} failed: {type(e).__name__}")
+        return []
+    if feed:
+        outcomes.success(key)
+    matched = []
+    for job in feed:
+        if not geo_allows(job.get("_geo", ""), country) or not is_recent(job.get("posted", ""), max_age_hours):
+            continue
+        if any(matches_keyword(job, kw, job.get("_tags", "")) for kw in keywords):
+            matched.append({k: v for k, v in job.items() if not k.startswith("_")})
+    progress(f"{spec.name}: {len(matched)} matching remote jobs (of {len(feed)} in the feed)")
+    return matched[:limit]
+
+
 def scrape_all(
     keywords: list[str],
     locations: list[str],
@@ -174,14 +273,24 @@ def scrape_all(
     enable_naukri_apify: bool = False,
     apify_naukri_actor_id: str = "",
     apify_api_token: str = "",
+    user_id: str | None = None,
+    client_ip: str = "",
+    client_user_agent: str = "",
+    key_lookup: Callable[[str], Any] | None = None,
+    on_source_result: Callable[[str, str | None], None] | None = None,
     progress: Callable[[str], None] = NoOpProgress,
 ) -> list[dict]:
     sources = [s.strip().lower() for s in sources if s]
     locations = [loc.strip() for loc in locations if loc.strip()] or ["India"]
+    if enable_naukri_auto:
+        # Deprecated: JobSpy's Naukri search now always gets "recaptcha required" (tested 2026-10-16).
+        progress("automatic Naukri search is no longer available (Naukri requires a captcha) — "
+                 "use manual import or Naukri via Apify")
 
-    auto_sources = [s for s in sources if s != "naukri" or enable_naukri_auto]
-    if "naukri" in sources and not enable_naukri_auto:
-        progress("Naukri auto-scraping is off — pass manual_naukri_jobs to include Naukri results")
+    jobspy_sites = [registry.get(s).jobspy_site for s in sources if registry.kind(s) == "jobspy"]
+    keyword_apis = [s for s in sources if registry.kind(s) == "keyword"]
+    feed_keys = [s for s in sources if registry.kind(s) == "feed"]
+    outcomes = _Outcomes()
 
     all_jobs: list[dict] = []
     total_searches = len(keywords) * len(locations)
@@ -189,9 +298,9 @@ def scrape_all(
     for keyword in keywords:
         for location in locations:
             search_num += 1
-            if auto_sources:
-                df = _run_jobspy(
-                    keyword, location, auto_sources,
+            if jobspy_sites:
+                df, error = _run_jobspy(
+                    keyword, location, jobspy_sites,
                     results_per_keyword=results_per_keyword,
                     max_age_hours=max_age_hours,
                     country_indeed=country_indeed,
@@ -200,27 +309,47 @@ def scrape_all(
                     linkedin_retry_delay_sec=linkedin_retry_delay_sec,
                     progress=progress,
                 )
-                all_jobs.extend(_normalize(df))
-            if search_num < total_searches:
+                rows = _normalize(df)
+                for site in jobspy_sites:
+                    key = registry.by_jobspy_site(site).key
+                    if any(registry.key_for_name(j["source"]) == key for j in rows):
+                        outcomes.success(key)
+                    elif error:
+                        outcomes.failure(key, error)
+                all_jobs.extend(rows)
+            query = SourceQuery(keyword=keyword, location=location, country=country_indeed,
+                                max_age_hours=max_age_hours, results_wanted=results_per_keyword,
+                                client_ip=client_ip, client_user_agent=client_user_agent)
+            for key in keyword_apis:
+                all_jobs.extend(_run_keyword_api(key, query, user_id=user_id, key_lookup=key_lookup,
+                                                 outcomes=outcomes, progress=progress))
+            if jobspy_sites and search_num < total_searches:
                 delay = search_delay_sec + random.uniform(0, 3)
                 progress(f"pausing {delay:.0f}s before next search")
                 time.sleep(delay)
 
+    for key in feed_keys:
+        all_jobs.extend(_run_feed(key, keywords, country=country_indeed, max_age_hours=max_age_hours,
+                                  limit=results_per_keyword * max(1, len(keywords)),
+                                  outcomes=outcomes, progress=progress))
+
     if "naukri" in sources and manual_naukri_jobs:
         all_jobs.extend(manual_naukri_jobs)
 
-    if "naukri" in sources and enable_naukri_apify:
+    if enable_naukri_apify:
         from app.services.naukri_apify_source import fetch_naukri_all_keywords
-        all_jobs.extend(
-            fetch_naukri_all_keywords(
-                keywords, locations[0],
-                apify_api_token=apify_api_token,
-                apify_naukri_actor_id=apify_naukri_actor_id,
-                results_per_keyword=results_per_keyword,
-                progress=progress,
-            )
+        apify_jobs = fetch_naukri_all_keywords(
+            keywords, locations[0],
+            apify_api_token=apify_api_token,
+            apify_naukri_actor_id=apify_naukri_actor_id,
+            results_per_keyword=results_per_keyword,
+            progress=progress,
         )
+        if apify_jobs:
+            outcomes.success("naukri_apify")
+        all_jobs.extend(apify_jobs)
 
+    outcomes.report(on_source_result)
     progress(f"total raw jobs collected: {len(all_jobs)}")
     all_jobs = _validate_jobs(all_jobs, progress)
     all_jobs = _deduplicate_jobs(all_jobs, progress)

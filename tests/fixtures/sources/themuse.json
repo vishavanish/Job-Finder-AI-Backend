@@ -1,0 +1,105 @@
+{
+ "page": 1,
+ "page_count": 1,
+ "items_per_page": 20,
+ "took": 11,
+ "timed_out": false,
+ "total": 414512,
+ "results": [
+  {
+   "contents": "<p><b><em><b>**Up to $25,000 Sign on Bonus, based on relevant experience**</b></em></b></p>\n\n<p><b> Unit Specializes in: </b>4 west is a cardiac telemetry unit designated for the care of the acutely ill adult patient with a variety of diagnoses. Whether it is assisting to manage chronic illnesses or",
+   "name": "Registered Nurse Registered Nurse Med/Surg Telemetry Full Time Nights",
+   "type": "external",
+   "publication_date": "2025-06-10T09:59:33Z",
+   "short_name": "registered-nurse-registered-nurse-medsurg-telemetry-full-time-nights-6ec354",
+   "model_type": "jobs",
+   "id": 19225596,
+   "locations": [
+    {
+     "name": "Dearborn, MI"
+    }
+   ],
+   "categories": [],
+   "levels": [
+    {
+     "name": "Mid Level",
+     "short_name": "mid"
+    }
+   ],
+   "tags": [],
+   "refs": {
+    "landing_page": "https://www.themuse.com/jobs/dmcsinaigracehospital/registered-nurse-registered-nurse-medsurg-telemetry-full-time-nights-6ec354"
+   },
+   "company": {
+    "id": 15000905,
+    "short_name": "dmcsinaigracehospital",
+    "name": "DMC Sinai-Grace Hospital"
+   }
+  },
+  {
+   "contents": "<p><b>Job Description:</b><br><br>At Bank of America, we are guided by a common purpose to help make financial lives better through the power of every connection. Responsible Growth is how we run our company and how we deliver for our clients, teammates, communities and shareholders every day. <br> ",
+   "name": "Relationship Banker - Sarasota Market",
+   "type": "external",
+   "publication_date": "2025-01-17T00:02:34Z",
+   "short_name": "relationship-banker-sarasota-market-ede304",
+   "model_type": "jobs",
+   "id": 17625191,
+   "locations": [
+    {
+     "name": "Sarasota, FL"
+    }
+   ],
+   "categories": [],
+   "levels": [
+    {
+     "name": "Mid Level",
+     "short_name": "mid"
+    }
+   ],
+   "tags": [],
+   "refs": {
+    "landing_page": "https://www.themuse.com/jobs/bankofamerica/relationship-banker-sarasota-market-ede304"
+   },
+   "company": {
+    "id": 12145,
+    "short_name": "bankofamerica",
+    "name": "Bank of America"
+   }
+  },
+  {
+   "contents": "<p><strong>Requisition ID:  297045</strong> <br><ul><li> <strong> Relocation Authorized:  National - Family </strong> </li><li> <strong> Telework Type: Full-Time Office/Project  </strong> </li><li> <strong> Work Location: Richland, WA </strong> </li><li><strong> Salary Range: 106,900 - 154,700 annua",
+   "name": "HLW Piping Field Engineer",
+   "type": "external",
+   "publication_date": "2026-09-17T04:04:17Z",
+   "short_name": "hlw-piping-field-engineer",
+   "model_type": "jobs",
+   "id": 21955900,
+   "locations": [
+    {
+     "name": "Richland, WA"
+    }
+   ],
+   "categories": [
+    {
+     "name": "Science and Engineering"
+    }
+   ],
+   "levels": [
+    {
+     "name": "Senior Level",
+     "short_name": "senior"
+    }
+   ],
+   "tags": [],
+   "refs": {
+    "landing_page": "https://www.themuse.com/jobs/bechtel/hlw-piping-field-engineer"
+   },
+   "company": {
+    "id": 15001041,
+    "short_name": "bechtel",
+    "name": "Bechtel"
+   }
+  }
+ ],
+ "aggregations": {}
+}

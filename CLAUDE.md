@@ -170,14 +170,14 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Router wiring | `app/api/routes/__init__.py` | search, company_ats, score, apply, pipeline, tasks, auth, applications. Mounted under `/api/v1` already (`settings.API_V1_PREFIX`). |
 | Config | `app/core/config.py` | `pydantic-settings`, reads `.env` at the repo root. Queue names get a `_dev` suffix unless `ENVIRONMENT=production`. |
 | Database | `app/core/db.py`, `app/models/` | One SQLAlchemy engine on **Supabase Postgres** (`DATABASE_URL`). Tables: `users`, `applications`, `application_status_events`, `pipeline_runs`, `pipeline_run_jobs` (the last two are unused — streaming state lives in Redis), plus P1–P3 tables (admin, AI, profile/resumes/preferences/search profiles, `jobs`/`job_sources_seen`/`user_jobs`). |
-| Search | `routes/search.py`, `services/job_sources.py`, `services/naukri_apify_source.py` | JobSpy (LinkedIn/Indeed), Naukri via manual list or Apify; retries and pacing |
-| Dedupe | `services/job_dedupe.py`, `job_sources._deduplicate_jobs`, `pipeline_progress.claim_job_key` | Key = normalized company + title + city. **LinkedIn copy wins.** (Added in Phase 0 — before that, dedupe was by exact URL, so cross-source duplicates were never merged.) |
+| Search | `routes/search.py`, `services/job_sources.py`, `providers/job_sources/` (registry, feeds, aggregators), `services/source_limits.py`, `services/naukri_apify_source.py` | JobSpy (LinkedIn, Indeed, Glassdoor, Google Jobs), keyed APIs (Adzuna, Jooble, Careerjet), cached remote feeds (RemoteOK, Remotive, Himalayas, Jobicy, Arbeitnow, The Muse, We Work Remotely), Naukri via manual list or Apify; retries and pacing (P3.1, Section 6.7) |
+| Dedupe | `services/job_dedupe.py`, `services/source_info.py`, `job_sources._deduplicate_jobs`, `pipeline_progress.claim_job_key` | Key = normalized company + title + city. **LinkedIn copy wins**, then company ATS > job board > aggregator/feed (P3.1); longer description within a rank. (Added in Phase 0 — before that, dedupe was by exact URL, so cross-source duplicates were never merged.) |
 | Scoring | `routes/score.py`, `services/scorer.py`, `core/celery_tasks._score_one_job_llm` | Keyword prefilter → LLM score via the **AI router** (P2). Batched path `scorer.score_jobs`, per-job path `scorer.score_one_job`. A reply that can't be parsed counts as a failed call. |
 | AI models & router | `services/ai_router.py`, `services/model_registry.py`, `providers/llm/`, `routes/models.py`, `routes/admin_ai.py` | Registry rows in `ai_models`; adapters: `gemini`, `groq`, `huggingface`, `anthropic` (official SDK), `openai_compatible` (any `/chat/completions` base URL). Chain: user choice → admin default → priority; Redis circuit breaker; every attempt in `usage_ledger`. |
 | Keys | `services/key_store.py`, `models/ai.Secret` | Envelope-encrypted platform + BYOK keys, masked (`last4`) everywhere. Lookup: user key → platform key → `.env` key. Request-body keys still work as one-run keys (`secret_refs`). |
-| Job-source catalog | `services/provider_catalog.py`, `routes/providers.py` | `provider_catalog` rows (linkedin, indeed, naukri free; naukri_apify paid). Routes drop sources that are off (admin/user), paid under Free tools only, or missing a key; `skipped_sources` says why. |
+| Job-source catalog | `services/provider_catalog.py`, `routes/providers.py` | `provider_catalog` rows for every source in `providers/job_sources/registry.py` (Section 7.4). Routes drop sources that are off (admin/user/`default_enabled`), paid under Free tools only, missing a key, paused after repeated errors, or remote-only feeds on a non-remote search; `skipped_sources` says why. |
 | Streaming pipeline | `routes/pipeline.py`, `services/pipeline_progress.py` | Fan-out per keyword (plain Celery `group`, **not** `chord` — chords are unreliable on Upstash), results in a Redis list, polled by offset |
-| Company ATS | `routes/company_ats.py`, `services/company_ats_sources.py` | Greenhouse, Lever, SmartRecruiters, Workday, Oracle Fusion, SuccessFactors, custom (JSON probe → Playwright DOM fallback). SSRF guard `_reject_private_targets`. **No Recruitee fetcher yet.** |
+| Company ATS | `routes/company_ats.py`, `services/company_ats_sources.py` | Greenhouse, Lever, SmartRecruiters, Workday, Oracle Fusion, SuccessFactors, Ashby, Recruitee, Workable, Personio, Breezy (P3.1), custom (JSON probe → Playwright DOM fallback). SSRF guard `_reject_private_targets` (custom + workday URLs); subdomain slugs limited to DNS-label characters. |
 | Apply | `routes/apply.py`, `services/browser_apply.py` | Playwright, LinkedIn Easy Apply prefill (`_FILL_DISPATCH`, `AUTO_APPLY_CAPABLE_SOURCES = {"LinkedIn"}`), never auto-submits, capability filter; client-supplied `browser_profile_dir` is ignored (`task_params.build_apply_params`). The frontend calls `POST /apply/{id}/close`, which the backend does **not** implement. |
 | Tracking | `routes/applications.py`, `services/applications_store.py` | `record_status()` single write path (upsert + history event) |
 | Gmail | `services/email_tracker.py`, `scripts/gmail_authorize.py` | Multi-account polling via `token_<label>.json` files, keyword prefilter. Classifier, matching and status update are **not built**; no Celery beat schedule exists yet. |
@@ -190,7 +190,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Shared Redis | `core/redis_client.py` | One client per process (`get_redis()`); tests swap in fakeredis. |
 | Frontend | separate repo `Job-Finder-AI-Frontend` | React 18 + Vite + react-router, plain JS (no TypeScript), axios client with hardcoded `API_URL`. Pages: Home, Keywords, Skills, ATS Targets, Providers, Applications, Profile, Login. Deployed on Vercel. |
 
-**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
+**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
 
 **CI:** `.github/workflows/tests.yml` runs the tests on every push and pull request (no secrets needed).
 
@@ -302,6 +302,31 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 - New env (all optional): `RESUME_MAX_BYTES` (5 MB), `RESUME_MAX_PER_USER` (20), `RESUME_PARSE_MAX_CHARS` (20000), `SEARCH_PROFILES_MAX_PER_USER` (20), `RATE_LIMIT_RESUME_UPLOAD` (10/hour), `RATE_LIMIT_PROFILE_AI` (20/hour).
 - Stored resumes, like stored keys, depend on `SECRETS_MASTER_KEY`.
 
+### 6.7 Phase 3.1 status — free job sources (branch `dev`)
+
+Plan: `docs/plans/P3.1-free-job-sources.md`. Research and live tests: `../research/job-tools-research.md` (owner's parent folder).
+
+| Item | State |
+|------|-------|
+| Adapters | ✅ `app/providers/job_sources/`: `registry.py` (key → kind: jobspy / keyword / feed / manual / apify), `feeds.py`, `aggregators.py`, `base.py` (HTTP, `SourceError`, normalising, date/keyword/region filters). `job_sources.scrape_all` runs every kind; signature kept, new keywords: `user_id`, `client_ip`, `client_user_agent`, `key_lookup`, `on_source_result`. |
+| New sources | ✅ JobSpy Glassdoor + Google Jobs (off by default); Adzuna (`APP_ID:APP_KEY`), Jooble, Careerjet (free keys, user key → platform key → `.env`); RemoteOK, Remotive, Himalayas, Jobicy, We Work Remotely (keyless remote feeds); Arbeitnow, The Muse (off by default — EU/US roles; The Muse returns 403 to non-browser clients). |
+| Default sources (owner decision 2026-10-16) | ✅ `SearchRequest.sources` omitted ⇒ every source that can run, unrunnable ones left out quietly. Remote feeds run only when a location says Remote or preferences have the `remote` work mode. `sources` is validated against the registry. |
+| Naukri | ✅ manual import only; `enable_naukri_auto` is deprecated and ignored with a note (JobSpy's Naukri search gets `406 recaptcha required`). `naukri_apify` runs on its own flag. |
+| Feed cache | ✅ `source_limits.cached_feed`: one download per feed per `FEED_CACHE_TTL_SECONDS`, Redis lock for parallel keyword tasks, 2-min failure marker (only the fetching task records the failure). Feeds are filtered per keyword (specific words, not role words), region (`geo_allows`) and age. |
+| Quotas | ✅ `source_limits.take_quota`: keyed-API calls per user per day (`SOURCE_DAILY_CAP_OWN_KEY` / `SOURCE_DAILY_CAP_PLATFORM_KEY`) plus a platform-wide cap (`SOURCE_DAILY_CAP_PLATFORM_TOTAL`). |
+| Health / auto-pause | ✅ the worker records success/failure per source (`on_source_result`); `SOURCE_BREAKER_FAILURES` in a row pause a source for `SOURCE_BREAKER_COOLDOWN_SECONDS` (`provider_catalog.paused_until`, shown as `health.paused_until`). |
+| Dedup rank | ✅ `source_info.source_rank` + `jobs.best_source_rank`: LinkedIn > company ATS > board > aggregator/feed; longer description within a rank. |
+| Snippets | ✅ Adzuna/Jooble/Careerjet descriptions are labelled as snippets in the scoring prompt. |
+| Company ATS | ✅ Ashby, Recruitee, Workable (v3), Personio (XML), Breezy; `platform: "workday"` now dispatched (needs `custom_endpoint_url`, SSRF-checked). |
+| Tests | ✅ 173 total (51 for P3.1), offline with recorded fixtures in `tests/fixtures/sources/`. Live check: `python -m app.scripts.smoke_sources` (not in CI). |
+| Not in P3.1 | Naukri alert-email parser (P5), ATS company-slug discovery crawler (P6), browser extension for Naukri/Foundit/Instahyre (P8), per-minute pacing for keyed APIs (daily caps only), full descriptions for Workday/Workable/Breezy lists (one extra call per job), frontend Providers/Jobs badges (F3). |
+
+**Operational changes introduced in P3.1**
+- Migration `0006` (run `alembic upgrade head`).
+- New env (all optional): `ADZUNA_API_KEY` (`APP_ID:APP_KEY`), `JOOBLE_API_KEY`, `CAREERJET_API_KEY` as `.env` fallbacks (keys saved under `/keys` or `/admin/keys` win, scopes `adzuna` / `jooble` / `careerjet`); `SOURCE_HTTP_TIMEOUT_SECONDS` (20), `FEED_CACHE_TTL_SECONDS` (3600), `SOURCE_BREAKER_FAILURES` (5), `SOURCE_BREAKER_COOLDOWN_SECONDS` (1800), `SOURCE_DAILY_CAP_OWN_KEY` (100), `SOURCE_DAILY_CAP_PLATFORM_KEY` (20), `SOURCE_DAILY_CAP_PLATFORM_TOTAL` (200).
+- `SearchRequest.sources` default changed from `["linkedin","indeed","naukri"]` to "all available"; clients that relied on the old default now also get the remote feeds (when searching remote) and keyed sources (when a key exists).
+- Admins can set `default_enabled` per source in `PATCH /admin/providers/{key}`.
+
 ---
 
 ## 7. Modules in detail
@@ -363,16 +388,19 @@ Every job source is a row in `provider_catalog` and implements `JobSource.search
 
 **Free-tools-only mode:** a toggle in the user's Providers page. When on, only `tier in (free, free_key)` sources run and paid actors (Apify, SerpApi) are skipped.
 
-**Suggested catalog** `[verify current terms and limits before enabling each]`
+**Catalog (built in P3.1 — Section 6.7; live-tested 2026-10-16)**
 
-| Source | Tier | Notes |
-|--------|------|-------|
-| LinkedIn, Indeed, Glassdoor, ZipRecruiter, Google Jobs via **JobSpy** | free | Scraping; rate limits and ToS risk; keep pacing/retries |
-| **Naukri** | free path: manual import + parsing Naukri alert emails from the user's Gmail; paid path: Apify actor | No official public API |
-| Greenhouse, Lever, Recruitee, Workday public endpoints | free | Also power ATS Target Discovery |
-| RemoteOK, Remotive, Arbeitnow | free | Public JSON feeds, remote-focused |
-| Adzuna, Jooble, The Muse, USAJOBS | free_key | Free API keys, country-dependent coverage |
-| Apify actors, SerpApi (Google Jobs) | paid / byok | Optional |
+| Source | Kind | Tier | Default | Notes |
+|--------|------|------|---------|-------|
+| LinkedIn, Indeed via **JobSpy** | jobspy | free | on | Scraping (ToS risk high); pacing/retries |
+| Glassdoor, Google Jobs via JobSpy | jobspy | free | off | Scraping; Google often returns nothing |
+| Adzuna, Jooble, Careerjet | keyword | free_key | on (when a key exists) | Official APIs covering India; snippet descriptions; daily caps per user |
+| RemoteOK, Remotive, Himalayas, Jobicy, We Work Remotely | feed | free | on (remote searches only) | Cached hourly; filtered by keyword, region, age; link back to the source |
+| Arbeitnow, The Muse | feed | free | off | EU / US roles; The Muse refuses non-browser clients (403) — we don't disguise requests |
+| **Naukri** | manual | free | — | Manual import now; Naukri alert emails from Gmail in P5; JobSpy path is blocked by captcha |
+| Naukri via Apify | apify | paid | flag | Optional, user's Apify key |
+| Greenhouse, Lever, SmartRecruiters, Workday, Ashby, Recruitee, Workable, Personio, Breezy, Oracle, SuccessFactors | company ATS | free | — | `/company-ats/fetch` per company; power ATS Target Discovery (P6) |
+| SerpApi / JSearch (Google Jobs) | — | free_key/paid | not built | Free quotas too small to be worth it for now |
 
 ### 7.5 Job pipeline: search → dedupe → score → stream
 
@@ -381,7 +409,7 @@ Every job source is a row in `provider_catalog` and implements `JobSource.search
 3. The client polls `GET /pipeline/{run_id}/jobs?offset=N` every ~2 s; results arrive live.
 4. **Uniqueness rules**
    - Key = normalized `company | title | city` (`job_dedupe.job_key`): case, punctuation, legal suffixes (Pvt, Ltd, Inc…) ignored; only the city of the location is compared.
-   - Same job on several sources → **LinkedIn copy kept**, otherwise the longer description.
+   - Same job on several sources → **LinkedIn copy kept**, then company ATS > job board > aggregator/feed (`source_info.source_rank`), otherwise the longer description.
    - Across runs: a `user_jobs` table remembers jobs the user has seen, saved, hidden or applied to, so they are not shown as new again.
    - Applications list also dedupes by the same normalization.
 

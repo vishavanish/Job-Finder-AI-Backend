@@ -25,7 +25,8 @@ router = APIRouter(prefix="/providers", tags=["providers"])
 
 def _health(row) -> dict:
     return {"consecutive_failures": row.consecutive_failures or 0, "last_success_at": row.last_success_at,
-            "last_error_at": row.last_error_at, "last_error": row.last_error}
+            "last_error_at": row.last_error_at, "last_error": row.last_error,
+            "paused_until": provider_catalog.paused_until(row)}
 
 
 def _view(db: Session, user) -> dict:
@@ -36,7 +37,8 @@ def _view(db: Session, user) -> dict:
         sources.append({
             "key": row.key, "name": row.name, "tier": row.tier, "tos_risk": row.tos_risk,
             "requires_key": row.requires_key, "key_scope": row.key_scope, "description": row.description,
-            "rate_limit": row.rate_limit, "enabled": choices.get(row.key, True),
+            "rate_limit": row.rate_limit, "enabled": provider_catalog.is_enabled_for(row, choices),
+            "default_enabled": bool(row.default_enabled),
             "available": ok, "reason": reason, "health": _health(row),
         })
     return {"free_only": bool(user.free_only_mode), "sources": sources}

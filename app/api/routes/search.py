@@ -13,7 +13,7 @@ from app.core.rate_limit import limiter
 from app.core.task_dispatch import dispatch
 from app.models.schemas import SearchRequest, TaskResponse
 from app.core.celery_tasks import search_task
-from app.services.task_params import build_search_params
+from app.services.task_params import build_search_params, client_info
 
 router = APIRouter(prefix="/search", tags=["search"])
 logger = logging.getLogger("job_finder_api.search")
@@ -29,7 +29,7 @@ async def start_search(request: Request, req: SearchRequest, user=Depends(requir
     available "default"-queue worker process can pick it up). Poll
     GET /tasks/{task_id} for status and the resulting job list."""
     response = dispatch(
-        search_task, args=[build_search_params(req, db=db, user=user)], queue=settings.default_queue, user_id=user.id,
+        search_task, args=[build_search_params(req, db=db, user=user, client=client_info(request))], queue=settings.default_queue, user_id=user.id,
     )
     logger.info("[task=%s] dispatched to '%s' for user=%s", response.task_id, settings.default_queue, user.id)
     return response

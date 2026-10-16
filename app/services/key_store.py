@@ -38,6 +38,9 @@ ENV_FALLBACK = {
     "huggingface": "HF_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "apify": "APIFY_API_TOKEN",
+    "adzuna": "ADZUNA_API_KEY",
+    "jooble": "JOOBLE_API_KEY",
+    "careerjet": "CAREERJET_API_KEY",
 }
 
 MIN_KEY_LENGTH = 8

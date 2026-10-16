@@ -14,7 +14,7 @@ from app.core.task_dispatch import dispatch
 from app.models.schemas import PipelineRequest, TaskResponse
 from app.core.celery_tasks import dispatch_pipeline_group, pipeline_task
 from app.services import pipeline_progress
-from app.services.task_params import build_apply_params, build_pipeline_params
+from app.services.task_params import build_apply_params, build_pipeline_params, client_info
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 logger = logging.getLogger("job_finder_api.pipeline")
@@ -39,7 +39,7 @@ async def run_pipeline_stream(
     Each job appears once per run. If a better copy of a job already in the
     feed turns up later (LinkedIn over Indeed), an updated entry with the
     SAME `id` and `replaces: true` is appended — upsert entries by `id`."""
-    search_params, score_params = build_pipeline_params(req, db=db, user=user)
+    search_params, score_params = build_pipeline_params(req, db=db, user=user, client=client_info(request))
     keywords = search_params["keywords"]
 
     run_id = pipeline_progress.create_run(user_id=user.id, total_keywords=len(keywords))
@@ -91,7 +91,7 @@ async def run_pipeline(
             logger.warning("ignored client-supplied browser_profile_dir override")
         apply_params = build_apply_params(req.apply, user_id=user.id)
 
-    search_params, score_params = build_pipeline_params(req, db=db, user=user)
+    search_params, score_params = build_pipeline_params(req, db=db, user=user, client=client_info(request))
     response = dispatch(
         pipeline_task,
         args=[search_params, score_params, apply_params],

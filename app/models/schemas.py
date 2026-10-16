@@ -73,8 +73,10 @@ class SearchRequest(BaseModel):
         min_length=1,
     )
     locations: list[str] = Field(default_factory=lambda: ["Mumbai, India", "Pune, India"])
-    sources: list[Literal["linkedin", "indeed", "naukri"]] = Field(
-        default_factory=lambda: ["linkedin", "indeed", "naukri"]
+    sources: Optional[list[str]] = Field(
+        None,
+        description="Source keys from GET /providers (e.g. linkedin, indeed, adzuna, remoteok). "
+                    "Leave out to use every source that can run for you.",
     )
     results_per_keyword: int = Field(25, ge=1, le=200)
     max_age_hours: int = Field(24, ge=1, le=720)
@@ -85,7 +87,8 @@ class SearchRequest(BaseModel):
     linkedin_max_retries: int = Field(2, ge=0, le=10)
     linkedin_retry_delay_sec: float = Field(30, ge=0)
 
-    enable_naukri_auto: bool = False
+    enable_naukri_auto: bool = Field(
+        False, description="Deprecated and ignored: Naukri blocks automated search (captcha).")
     manual_naukri_jobs: list[Job] = Field(
         default_factory=list,
         description="Jobs you pasted in manually (Naukri blocks automated scraping).",
@@ -96,6 +99,21 @@ class SearchRequest(BaseModel):
     apify_api_token: Optional[SecretStr] = Field(
         None, description="Overrides server APIFY_API_TOKEN for this call only."
     )
+
+
+    @field_validator("sources")
+    @classmethod
+    def _known_sources(cls, value: Optional[list[str]]) -> Optional[list[str]]:
+        if value is None:
+            return None
+        from app.providers.job_sources.registry import SEARCHABLE_KEYS
+        cleaned = list(dict.fromkeys(v.strip().lower() for v in value if v and v.strip()))
+        unknown = [v for v in cleaned if v not in SEARCHABLE_KEYS]
+        if unknown:
+            raise ValueError(f"unknown source(s): {', '.join(unknown)}; known: {', '.join(SEARCHABLE_KEYS)}")
+        if not cleaned:
+            raise ValueError("list at least one source, or leave `sources` out to use all available")
+        return cleaned
 
 
 class SearchResult(BaseModel):
@@ -109,7 +127,8 @@ class SearchResult(BaseModel):
 # ============================================================
 
 class CompanyAtsTarget(BaseModel):
-    platform: Literal["greenhouse", "lever", "smartrecruiters", "workday", "custom"]
+    platform: Literal["greenhouse", "lever", "smartrecruiters", "workday", "ashby", "recruitee", "workable",
+                      "personio", "breezy", "custom"]
     slug: str
     custom_endpoint_url: Optional[str] = None
     custom_method: Literal["GET", "POST"] = "GET"
