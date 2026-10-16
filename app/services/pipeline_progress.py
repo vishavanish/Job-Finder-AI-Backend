@@ -60,15 +60,18 @@ def _keys_key(run_id: str) -> str:
     return f"pipeline:{run_id}:job_keys"
 
 
+def _recorded_key(run_id: str) -> str:
+    return f"pipeline:{run_id}:recorded"
+
+
 def claim_job_key(*, run_id: str, job_key: str) -> bool:
     """SADD — True only for the FIRST caller to claim this job_key in the
     run. Keyword tasks call this before the LLM step, so a job that
     several keywords (or sources) surface is scored once, not N times.
 
-    Limitation: across keyword tasks the first claimer wins, so an Indeed
-    copy claimed first blocks a later LinkedIn copy. Within one keyword,
-    scrape_all already prefers LinkedIn. Full LinkedIn-wins across runs
-    needs the canonical `jobs` table (CLAUDE.md P3)."""
+    The claimer scores the canonical copy (job_store), and a better copy
+    found later by another keyword task replaces the shown one through
+    replace_recorded — so the first claimer no longer decides the source."""
     r = _redis()
     key = _keys_key(run_id)
     is_new = bool(r.sadd(key, job_key))
@@ -113,13 +116,15 @@ def is_cancelled(run_id: str) -> bool:
     return _redis().hget(_meta_key(run_id), "status") == "cancelled"
 
 
-def record_scored_job(*, run_id: str, job: dict) -> None:
+def record_scored_job(*, run_id: str, job: dict) -> dict:
     """RPUSH — append-only, safe under concurrent callers from multiple
     group() workers with zero coordination needed; Redis serializes
-    concurrent RPUSH calls on the same key natively."""
-    r = _redis()
+    concurrent RPUSH calls on the same key natively.
+
+    `id` is the canonical job id when the job came from job_store, so the
+    feed, save/hide and later replacements all use the same id."""
     payload = {
-        "id": str(uuid.uuid4()),
+        "id": job.get("id") or str(uuid.uuid4()),
         "source": job.get("source", ""),
         "title": job.get("title", ""),
         "company": job.get("company", ""),
@@ -133,9 +138,46 @@ def record_scored_job(*, run_id: str, job: dict) -> None:
         "auto_apply_capable": bool(job.get("auto_apply_capable")),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    _push(run_id, payload)
+    return payload
+
+
+def _push(run_id: str, payload: dict) -> None:
+    r = _redis()
     key = _jobs_key(run_id)
     r.rpush(key, json.dumps(payload))
     r.expire(key, RUN_TTL_SECONDS)  # refresh TTL — an active run never expires mid-flight
+
+
+def remember_recorded(*, run_id: str, job_key: str, payload: dict) -> None:
+    """Which feed entry a job_key became, so a better copy can replace it."""
+    r = _redis()
+    r.hset(_recorded_key(run_id), job_key, json.dumps(payload))
+    r.expire(_recorded_key(run_id), RUN_TTL_SECONDS)
+
+
+def replace_recorded(*, run_id: str, job_key: str, best: dict) -> bool:
+    """If this job is already in the feed from a different copy than
+    `best` (the canonical copy), appends an updated entry with the SAME id
+    and `replaces: true`. Clients upsert feed entries by `id`. Scores are
+    kept: it is the same job. Returns True if an update was pushed."""
+    raw = _redis().hget(_recorded_key(run_id), job_key)
+    if not raw:
+        return False
+    shown = json.loads(raw)
+    if shown.get("source") == best.get("source") and shown.get("url") == best.get("url"):
+        return False
+    updated = {**shown, **{k: best.get(k, shown.get(k)) for k in
+                           ("source", "title", "company", "location", "url", "description", "posted")},
+               "auto_apply_capable": bool(best.get("auto_apply_capable")), "replaces": True,
+               "created_at": datetime.now(timezone.utc).isoformat()}
+    _push(run_id, updated)
+    remember_recorded(run_id=run_id, job_key=job_key, payload=updated)
+    return True
+
+
+def count_jobs(*, run_id: str) -> int:
+    return int(_redis().llen(_jobs_key(run_id)))
 
 
 def get_jobs(*, run_id: str, offset: int = 0) -> list[dict]:

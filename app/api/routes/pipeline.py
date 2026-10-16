@@ -14,7 +14,7 @@ from app.core.task_dispatch import dispatch
 from app.models.schemas import PipelineRequest, TaskResponse
 from app.core.celery_tasks import dispatch_pipeline_group, pipeline_task
 from app.services import pipeline_progress
-from app.services.task_params import build_apply_params, build_score_params, build_search_params
+from app.services.task_params import build_apply_params, build_pipeline_params
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 logger = logging.getLogger("job_finder_api.pipeline")
@@ -34,14 +34,18 @@ async def run_pipeline_stream(
     in parallel (Celery group), each pushing scored jobs to Redis the
     instant they're ready. Returns immediately with a run_id — poll
     GET /pipeline/{run_id}/jobs to watch results arrive live, and
-    GET /pipeline/{run_id} for run-level progress (X/Y keywords done)."""
-    search_params = build_search_params(req.search, db=db, user=user)
-    score_params = build_score_params(req.score, user_id=user.id)
+    GET /pipeline/{run_id} for run-level progress (X/Y keywords done).
 
-    run_id = pipeline_progress.create_run(user_id=user.id, total_keywords=len(req.search.keywords))
-    dispatch_pipeline_group.apply_async(args=[run_id, search_params, score_params],queue=settings.default_queue)
-    logger.info("[run=%s] dispatched %d-keyword group for user=%s", run_id, len(req.search.keywords), user.id)
-    return {"run_id": run_id, "skipped_sources": search_params["skipped_sources"]}
+    Each job appears once per run. If a better copy of a job already in the
+    feed turns up later (LinkedIn over Indeed), an updated entry with the
+    SAME `id` and `replaces: true` is appended — upsert entries by `id`."""
+    search_params, score_params = build_pipeline_params(req, db=db, user=user)
+    keywords = search_params["keywords"]
+
+    run_id = pipeline_progress.create_run(user_id=user.id, total_keywords=len(keywords))
+    dispatch_pipeline_group.apply_async(args=[run_id, search_params, score_params], queue=settings.default_queue)
+    logger.info("[run=%s] dispatched %d-keyword group for user=%s", run_id, len(keywords), user.id)
+    return {"run_id": run_id, "keywords": keywords, "skipped_sources": search_params["skipped_sources"]}
 
 @router.get("/{run_id}")
 async def get_pipeline_run(run_id: str, user=Depends(get_current_user)):
@@ -53,14 +57,17 @@ async def get_pipeline_run(run_id: str, user=Depends(get_current_user)):
 
 @router.get("/{run_id}/jobs")
 async def get_pipeline_run_jobs(run_id: str, offset: int = 0, user=Depends(get_current_user)):
-    """Poll this every ~2s, passing `offset` = however many jobs you
-    already have client-side, to fetch only the NEW ones each tick."""
+    """Poll this every ~2s, passing `offset` = the previous response's
+    `next_offset`, to fetch only the NEW entries each tick. An entry whose
+    `id` you already have (`replaces: true`) is a better copy of that job:
+    replace it in place."""
     meta = pipeline_progress.get_run_meta(run_id=run_id)
     if not meta or meta["user_id"] != user.id:
         raise HTTPException(404, "no run found with this id")
 
+    offset = max(offset, 0)
     jobs = pipeline_progress.get_jobs(run_id=run_id, offset=offset)
-    return {"run_status": meta["status"], "jobs": jobs} 
+    return {"run_status": meta["status"], "jobs": jobs, "next_offset": offset + len(jobs)}
     
 @router.post(
     "/run",
@@ -84,10 +91,10 @@ async def run_pipeline(
             logger.warning("ignored client-supplied browser_profile_dir override")
         apply_params = build_apply_params(req.apply, user_id=user.id)
 
+    search_params, score_params = build_pipeline_params(req, db=db, user=user)
     response = dispatch(
         pipeline_task,
-        args=[build_search_params(req.search, db=db, user=user),
-              build_score_params(req.score, user_id=user.id), apply_params],
+        args=[search_params, score_params, apply_params],
         queue=settings.default_queue,
         user_id=user.id,
     )

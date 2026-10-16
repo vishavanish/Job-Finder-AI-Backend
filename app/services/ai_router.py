@@ -39,7 +39,7 @@ from app.services import entitlements, key_store
 logger = logging.getLogger("job_finder_api.ai_router")
 
 # Text tasks the router serves today (CLAUDE.md 7.9; stt/tts/embeddings arrive with P7).
-TASKS = ("score", "resume_parse", "resume_tailor", "cover_letter", "form_answer",
+TASKS = ("score", "resume_parse", "title_suggest", "resume_tailor", "cover_letter", "form_answer",
          "email_classify", "interview_chat", "interview_eval")
 
 # Providers that cannot run without a key (openai_compatible may be a keyless local server).

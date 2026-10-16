@@ -12,7 +12,7 @@ from enum import Enum
 from typing import Any, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, HttpUrl, SecretStr, field_validator
+from pydantic import BaseModel, EmailStr, Field, HttpUrl, SecretStr, field_validator, model_validator
 
 # ============================================================
 # SHARED / CORE
@@ -216,17 +216,48 @@ class ApplyResult(BaseModel):
     )
 
 
+class ScoreThresholds(BaseModel):
+    keyword_prefilter_min_pct: float = Field(30, ge=0, le=100)
+    llm_top_n_to_rank: int = Field(40, ge=1, le=200)
+    llm_min_score_to_keep: float = Field(70, ge=0, le=100)
+
+
 class PipelineRequest(BaseModel):
-    search: SearchRequest
-    score: "ScoreRequestPartial"
+    """Two ways to describe what to look for (CLAUDE.md 7.3):
+
+    - **search_profile_id** (preferred): keywords, skills, must/nice/exclude
+      terms come from the saved Keywords & Skills profile; the resume context
+      from the master resume (or `score.resume_summary`); locations and
+      posted-within from the user's preferences unless `search` sets them.
+    - **legacy**: `search.keywords` + `score` (resume_summary, skills, …) sent
+      every time. Still works; deprecated once the frontend uses profiles.
+
+    Either way, jobs the user has already seen, hidden or applied to are
+    skipped (`include_seen: true` shows seen/saved ones again), avoided
+    companies are dropped, and each job is scored once per run."""
+    search: SearchRequest = Field(default_factory=SearchRequest)
+    score: Optional["ScoreRequestPartial"] = None
+    search_profile_id: Optional[str] = Field(None, max_length=36)
+    thresholds: Optional[ScoreThresholds] = Field(
+        None, description="Profile mode: score thresholds (default 30 / 40 / 70). Ignored when `score` is sent."
+    )
+    include_seen: bool = Field(False, description="Show jobs already seen or saved in earlier runs again")
     apply: Optional[ApplyRequest] = None
+
+    @model_validator(mode="after")
+    def _profile_or_score(self):
+        if not self.search_profile_id and (self.score is None or not self.score.skills):
+            raise ValueError("send search_profile_id, or score with resume_summary and at least one skill")
+        return self
 
 
 class ScoreRequestPartial(BaseModel):
     """Same as ScoreRequest but without `jobs` — the pipeline supplies jobs
-    from the search step automatically."""
+    from the search step automatically. With a search profile, `skills` and
+    `career_targets` come from the profile and only `resume_summary`, the
+    thresholds and one-run keys here are used."""
     resume_summary: str
-    skills: list[str] = Field(..., min_length=1)
+    skills: list[str] = Field(default_factory=list)
     career_targets: list[str] = Field(
         default_factory=lambda: ["AI Engineer", "LLM Application Developer", "Senior Backend Developer"]
     )
