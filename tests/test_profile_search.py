@@ -165,6 +165,22 @@ def test_filtered_job_is_rescored_only_when_the_profile_changes(fake_pipeline, m
     assert len(_feed(_run(fake_pipeline, {"a": [job]}, changed))) == 1
 
 
+def test_job_is_retried_when_every_ai_model_failed(fake_pipeline, make_user, monkeypatch):
+    user_id, _ = make_user()
+    job = {**LINKEDIN, "company": "Retry Co", "url": "https://linkedin.example/retry"}
+    real_llm = celery_tasks._score_one_job_llm
+    monkeypatch.setattr(celery_tasks, "_score_one_job_llm", lambda j, **kw: {
+        **j, "llm_failed": True, "llm_score": 0, "llm_reason": "LLM scoring unavailable for this job."})
+    assert _feed(_run(fake_pipeline, {"a": [job]}, _params(user_id, llm_min_score_to_keep=70))) == []
+    db = SessionLocal()
+    try:
+        assert db.query(UserJob).filter_by(user_id=user_id).count() == 0  # not stored as filtered
+    finally:
+        db.close()
+    monkeypatch.setattr(celery_tasks, "_score_one_job_llm", real_llm)
+    assert len(_feed(_run(fake_pipeline, {"a": [job]}, _params(user_id, llm_min_score_to_keep=70)))) == 1
+
+
 def test_seen_state_does_not_overwrite_saved(make_user):
     user_id, _ = make_user()
     db = SessionLocal()
