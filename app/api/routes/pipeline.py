@@ -56,6 +56,18 @@ async def get_pipeline_run(run_id: str, user=Depends(get_current_user)):
     return meta
 
 
+@router.post("/{run_id}/cancel")
+async def cancel_pipeline_run(run_id: str, user=Depends(get_current_user)):
+    """Stops a streaming run: keyword tasks that haven't started skip their
+    work; jobs already in the feed stay. Idempotent."""
+    meta = pipeline_progress.get_run_meta(run_id=run_id)
+    if not meta or meta["user_id"] != user.id:
+        raise HTTPException(404, "no run found with this id")
+    if meta["status"] not in ("completed", "failed", "cancelled"):
+        pipeline_progress.mark_run_status(run_id=run_id, status="cancelled", error="cancelled by you")
+    return pipeline_progress.get_run_meta(run_id=run_id)
+
+
 @router.get("/{run_id}/jobs")
 async def get_pipeline_run_jobs(run_id: str, offset: int = 0, user=Depends(get_current_user)):
     """Poll this every ~2s, passing `offset` = the previous response's

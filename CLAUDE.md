@@ -807,10 +807,10 @@ All routes are already served under `/api/v1` (`settings.API_V1_PREFIX`); new ro
 | Preferences | `GET/PUT /preferences`, `GET/POST/PUT/DELETE /search-profiles`, `POST /search-profiles/from-resume`, `POST /search-profiles/{id}/suggest-titles` |
 | Providers | `GET /providers`, `PUT /providers/settings` (incl. free-only mode) |
 | Models | `GET /models` (enabled), `PUT /models/preferences`, `POST /keys` (BYOK), `DELETE /keys/{id}` |
-| Jobs | `POST /pipeline/run/stream`, `GET /pipeline/{run_id}`, `GET /pipeline/{run_id}/jobs`, `GET /jobs?state=`, `POST /jobs/{id}/save|hide|seen` |
+| Jobs | `POST /pipeline/run/stream`, `GET /pipeline/{run_id}`, `GET /pipeline/{run_id}/jobs`, `POST /pipeline/{run_id}/cancel` (F3), `GET /jobs?state=`, `POST /jobs/{id}/save|hide|seen` |
 | Alerts | `GET/POST /alerts`, `PUT/DELETE /alerts/{id}`, `POST /alerts/{id}/run-now`, `GET /alerts/{id}/runs`, `GET /alerts/runs/{run_id}/jobs` |
 | ATS | `POST /ats/discover` (job title), `GET /ats/companies`, `POST /company-ats/fetch` (existing) |
-| Apply | `POST /apply` (existing), `GET /apply/runs`, `POST /apply/runs/{id}/answer`, `POST /apply/runs/{id}/approve`, `POST /apply/runs/{id}/cancel`, `POST /applications/manual` |
+| Apply | `POST /apply` (existing), `GET /apply/runs`, `POST /apply/runs/{id}/answer`, `POST /apply/runs/{id}/approve`, `POST /apply/runs/{id}/cancel`, `POST /applications/manual` (built for F3: `{job_id}` → `submitted`/`manual` + job state `applied`) |
 | Tracker | `GET /applications`, `GET/PATCH /applications/{id}`, `GET /applications/{id}/events`, `GET /applications/stats` |
 | Gmail | `GET /gmail/connect`, `GET /gmail/callback`, `GET /gmail/accounts`, `DELETE /gmail/accounts/{id}`, `GET /gmail/review`, `POST /gmail/review/{id}/resolve` |
 | Voice | `POST /voice/sessions`, `WS /voice/sessions/{id}/stream` (mock), `WS /voice/copilot/{id}/stream` (live), `POST /voice/copilot/{id}/expand`, `GET /voice/sessions/{id}/feedback`, `GET /voice/history`, `DELETE /voice/sessions/{id}`, `GET/POST /story-bank` |

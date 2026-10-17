@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.rate_limit import limiter
@@ -25,7 +26,9 @@ from app.core.auth import get_current_user
 from app.core.config import get_settings
 from app.core.db import get_db
 from app.models.application import Application
+from app.models.jobs import Job
 from app.models.schemas import ApplicationLogEntry, ApplicationLogResult, ApplicationStatusUpdate
+from app.services import job_store
 from app.services.applications_store import record_status
 
 router = APIRouter(prefix="/applications", tags=["applications"], dependencies=[Depends(get_current_user)])
@@ -130,3 +133,34 @@ async def update_application_status(
     )
     logger.info("application %s manually set to status=%s by user=%s", application_id, body.status, user.id)
     return _to_entry(updated)
+
+class ManualApplyIn(BaseModel):
+    job_id: str = Field(..., min_length=1, max_length=36, description="Canonical job id (a feed entry's `id`)")
+
+
+@router.post("/manual", response_model=ApplicationLogEntry, status_code=201)
+@limiter.limit(lambda: get_settings().RATE_LIMIT_APPLICATIONS)
+async def mark_applied_manually(
+    request: Request,
+    body: ManualApplyIn,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """"Apply manually → Mark as applied" (CLAUDE.md 7.7): the user applied
+    on the job's own page. Records a `submitted` application with
+    status_source `manual` and moves the job to the user's Applied list so
+    later searches skip it."""
+    job = db.get(Job, body.job_id)
+    if job is None:
+        raise HTTPException(404, detail={"code": "job_not_found", "message": "No job with this id."})
+    row = record_status(
+        user_id=user.id,
+        job={"url": job.url, "title": job.title, "company": job.company, "source": job.best_source,
+             "location": job.location},
+        status="submitted",
+        status_source="manual",
+        note="marked as applied by the user",
+    )
+    job_store.set_state(db, user_id=user.id, job_id=job.id, state="applied")
+    db.commit()
+    return _to_entry(row)
