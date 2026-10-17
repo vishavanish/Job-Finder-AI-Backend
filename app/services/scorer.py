@@ -24,6 +24,7 @@ logger = logging.getLogger("job_finder_api.scorer")
 NoOpProgress: Callable[[str], None] = lambda msg: None
 
 SENIORITY_VALUES = ("match", "stretch", "overqualified")
+SINGLE_JOB_MAX_TOKENS = 3000
 
 LLM_SYSTEM_PROMPT_TEMPLATE = """You are an expert technical recruiter evaluating job fit.
 
@@ -217,13 +218,18 @@ def score_one_job(
     request_keys: dict[str, str] | None = None, ref: str | None = None,
 ) -> dict:
     """Scores exactly ONE job (the streaming pipeline scores per job so
-    results appear live). Same prompt and parser as the batch path."""
+    results appear live). Same prompt and parser as the batch path.
+    `llm_failed` is set when no model answered, so callers don't mistake
+    a failed call for a low score."""
     wrapper = [job]
     engine = _rank_via_router(
         db, wrapper, user_id=user_id, resume_summary=resume_summary, career_targets=career_targets,
-        request_keys=request_keys, ref=ref, max_tokens=500, progress=NoOpProgress,
+        # Reasoning models (Gemini 2.5, GPT-OSS) spend output tokens on thinking
+        # first; 500 left them with a truncated or empty answer.
+        request_keys=request_keys, ref=ref, max_tokens=SINGLE_JOB_MAX_TOKENS, progress=NoOpProgress,
     )
     if engine is None:
+        job["llm_failed"] = True
         job.setdefault("llm_score", 0)
         job.setdefault("llm_reason", "LLM scoring unavailable for this job.")
     return job

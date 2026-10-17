@@ -208,6 +208,9 @@ def _process_job(db, run_id: str, job: dict, *, score_params: dict, request_keys
             remember("filtered", best["keyword_score"], None, None)
             return "filtered"
         scored = _score_one_job_llm(best, db=db, score_params=score_params, request_keys=request_keys, ref=run_id)
+        if scored.get("llm_failed"):
+            # Not a low score — no model answered. Record nothing so the next run retries it.
+            return "unscored"
         if scored.get("llm_score", 0) < score_params.get("llm_min_score_to_keep", 70):
             remember("filtered", scored.get("keyword_score"), scored.get("llm_score"), scored.get("llm_reason"))
             return "filtered"
@@ -299,7 +302,7 @@ def search_and_score_keyword(
                            manual_naukri_jobs=[], progress=progress_cb)
 
         request_keys = _request_keys(score_params)
-        counts = {"duplicates": 0, "blocked": 0, "seen": 0, "kept": 0}
+        counts = {"duplicates": 0, "blocked": 0, "seen": 0, "filtered": 0, "unscored": 0, "kept": 0}
         kept_keys: list[str] = []
         for job in raw_jobs:
             outcome = _process_job(db, run_id, job, score_params=score_params, request_keys=request_keys)
@@ -317,6 +320,11 @@ def search_and_score_keyword(
             progress_cb(f"'{keyword}': skipped {counts['seen']} job(s) you have already seen")
         if counts["blocked"]:
             progress_cb(f"'{keyword}': dropped {counts['blocked']} job(s) by your must-have/exclude/avoid rules")
+        if counts["filtered"]:
+            progress_cb(f"'{keyword}': {counts['filtered']} job(s) scored below your thresholds")
+        if counts["unscored"]:
+            progress_cb(f"'{keyword}': {counts['unscored']} job(s) not scored — every AI model failed; "
+                        "they will be retried next run")
         pipeline_progress.increment_keyword_completed(run_id=run_id)
         return {"keyword": keyword, "raw_found": len(raw_jobs), **counts}
 
