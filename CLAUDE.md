@@ -353,6 +353,27 @@ Plan: `docs/plans/P3.2-match-insights-alerts.md` (all ten owner decisions approv
 - New env (all optional): `JOB_ALERTS_MAX_PER_USER` (3), `JOB_ALERT_TICK_SECONDS` (600), `JOB_ALERT_DEFAULT_MIN_SCORE` (75), `HN_FEED_CACHE_TTL_SECONDS` (21600), `APPLICANT_COUNT_MAX_PER_RUN` (20), `BRIGHTDATA_API_KEY` / `SERPAPI_API_KEY` / `JSEARCH_API_KEY` (local testing only — production uses each user's own key), `THEMUSE_API_KEY`, `APP_PUBLIC_URL`.
 - Key scopes users can save: `brightdata` (`API_KEY:ZONE`), `serpapi`, `jsearch`; platform scope `themuse`.
 
+### 6.9 Phase 4a status — Apply Center part A (branch `dev`)
+
+Plan: `docs/plans/P4-apply-center.md` (all ten owner decisions approved 2026-10-19 with the recommended defaults; P4 split into P4a and P4b).
+
+| Item | State |
+|------|-------|
+| Apply options | ✅ `services/apply_options.py`: per job, which of **Manual / Fast / Auto / Email** apply works and why not (`apply_options` in the feed, `GET /jobs`, `GET /apply/options/{job_id}`). Adapter from `jobs.apply_url` first, then `url`: greenhouse / lever / linkedin. Fast = LinkedIn Easy Apply, off in production (needs the P8 local agent). Auto is off everywhere until P4b. `auto_apply_capable` kept for now. |
+| Company apply link | ✅ JobSpy's `job_url_direct` kept as `jobs.apply_url` (filled from whichever copy has it; a better copy never clears it). |
+| Fact check | ✅ `services/grounding.py`: numbers and name-like terms in AI text must appear in the resume (plus the job title/company for cover letters); otherwise the line or sentence is dropped. |
+| Prep pack | ✅ `POST /apply/prep` (entitlement `resume_tailoring`, `RATE_LIMIT_APPLY_PREP`) → `build_apply_pack` task on the default queue → `GET /apply/prep/{id}`. Tailored resume (router task `resume_tailor`): the AI may only re-order skills and rewrite headline, summary and bullets; employers/titles/dates/education are copied; saved as a child `Resume` (`parent_id`) with an ATS-friendly DOCX. Cover letter (`cover_letter`): body from the AI, greeting/sign-off added. Email draft + `mailto` from an address in the job post. One pack per (user, job), reused until the master's parsed content changes; `dropped` lists what the fact check removed. Tailored copies don't count toward `RESUME_MAX_PER_USER` and are deleted with their master. |
+| Answer bank | ✅ `/answer-bank` CRUD + approve; user answers approved, AI drafts not. `answer_bank.answer_fields` answers form fields in trust order: profile → EEO (encrypted, never to AI) → answer bank (≥ 0.75 word overlap) → AI `form_answer` (UNKNOWN / ungrounded → `needs_input`, new answers saved as unapproved drafts). Used by the P4b engine; no route of its own yet. |
+| Email apply status | ✅ `POST /applications/manual` takes `via: "email"` → status `emailed`. |
+| Tests | ✅ 220 total (15 for P4a). |
+| Not in P4a (→ P4b) | `apply_runs`, the level-2 engine, Greenhouse/Lever adapters, review queue, caps/dedupe/working hours, risk notice, proof screenshots, LinkedIn Fast apply rework, deprecating `POST /apply`. Gmail drafts for Email apply wait for P5. ATS resume checker is P4.1. |
+
+**Operational changes introduced in P4a**
+- Migration `0008` (run `alembic upgrade head`).
+- The worker must run for prep packs (default queue).
+- New env (optional): `RATE_LIMIT_APPLY_PREP` (30/hour), `ANSWER_BANK_MAX_PER_USER` (500).
+- Admins can pick models for the `resume_tailor`, `cover_letter` and `form_answer` tasks; otherwise the normal chain is used.
+
 ---
 
 ## 7. Modules in detail
@@ -776,7 +797,8 @@ All tables have `id`, `created_at`, `updated_at`. User-owned tables have `user_i
 | `applications` | user_id, job_id, job_key, job_url, title, company, source, status, status_source, resume_id, applied_at |
 | `application_events` | application_id, status, status_source, note, payload, occurred_at |
 | `apply_runs` | application_id, level, adapter, state, needs_input (JSON), screenshot_key, error, started/finished |
-| `answer_bank` | user_id, question_hash, question, answer, approved |
+| `answer_bank` | user_id, question_hash, question, answer, field_type, approved, origin (user/ai), uses |
+| `apply_packs` | user_id, job_id, master_resume_id + master_hash, status, tailored_resume_id, cover_letter, email draft, dropped (P4a) |
 | `email_accounts` | user_id, gmail_address, encrypted_token, last_history_id, enabled |
 | `email_events` | account_id, message_id (unique), application_id?, classification, confidence, snippet, ai_note, needs_review |
 | `ats_companies` | platform, slug, name, careers_url, active, last_crawled_at |
@@ -810,7 +832,7 @@ All routes are already served under `/api/v1` (`settings.API_V1_PREFIX`); new ro
 | Jobs | `POST /pipeline/run/stream`, `GET /pipeline/{run_id}`, `GET /pipeline/{run_id}/jobs`, `POST /pipeline/{run_id}/cancel` (F3), `GET /jobs?state=`, `POST /jobs/{id}/save|hide|seen` |
 | Alerts | `GET/POST /alerts`, `PUT/DELETE /alerts/{id}`, `POST /alerts/{id}/run-now`, `GET /alerts/{id}/runs`, `GET /alerts/runs/{run_id}/jobs` |
 | ATS | `POST /ats/discover` (job title), `GET /ats/companies`, `POST /company-ats/fetch` (existing) |
-| Apply | `POST /apply` (existing), `GET /apply/runs`, `POST /apply/runs/{id}/answer`, `POST /apply/runs/{id}/approve`, `POST /apply/runs/{id}/cancel`, `POST /applications/manual` (built for F3: `{job_id}` → `submitted`/`manual` + job state `applied`) |
+| Apply | `POST /apply` (existing), `GET /apply/options/{job_id}`, `POST /apply/prep`, `GET /apply/prep/{id}` (P4a), `GET/POST/PUT/DELETE /answer-bank`, `POST /answer-bank/{id}/approve` (P4a), `GET /apply/runs`, `POST /apply/runs/{id}/answer`, `POST /apply/runs/{id}/approve`, `POST /apply/runs/{id}/cancel`, `POST /applications/manual` (built for F3: `{job_id, via}` → `submitted` (or `emailed` with `via: "email"`, P4a) / `manual` + job state `applied`) |
 | Tracker | `GET /applications`, `GET/PATCH /applications/{id}`, `GET /applications/{id}/events`, `GET /applications/stats` |
 | Gmail | `GET /gmail/connect`, `GET /gmail/callback`, `GET /gmail/accounts`, `DELETE /gmail/accounts/{id}`, `GET /gmail/review`, `POST /gmail/review/{id}/resolve` |
 | Voice | `POST /voice/sessions`, `WS /voice/sessions/{id}/stream` (mock), `WS /voice/copilot/{id}/stream` (live), `POST /voice/copilot/{id}/expand`, `GET /voice/sessions/{id}/feedback`, `GET /voice/history`, `DELETE /voice/sessions/{id}`, `GET/POST /story-bank` |

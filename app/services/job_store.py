@@ -55,10 +55,11 @@ def upsert_copy(db: Session, job: dict, key: str) -> Job:
     """Stores this copy of a job and returns the canonical row, which
     holds the best copy seen so far (possibly this one)."""
     fields = _fields(job)
+    apply_url = str(job.get("apply_url") or "") or None
     row = db.query(Job).filter(Job.job_key == key).first()
     if row is None:
         try:
-            row = Job(job_key=key, **fields)
+            row = Job(job_key=key, apply_url=apply_url, **fields)
             db.add(row)
             db.commit()
         except IntegrityError:  # another worker inserted it first
@@ -73,6 +74,8 @@ def upsert_copy(db: Session, job: dict, key: str) -> Job:
     cond = or_(Job.best_source_rank > rank, (Job.best_source_rank == rank) & longer)
     if not db.execute(update(Job).where(Job.id == row.id, cond).values(**fields, last_seen_at=_now())).rowcount:
         db.execute(update(Job).where(Job.id == row.id).values(last_seen_at=_now()))
+    if apply_url:  # kept from whichever copy had it — the best copy may not carry one
+        db.execute(update(Job).where(Job.id == row.id, Job.apply_url.is_(None)).values(apply_url=apply_url))
     db.commit()
     db.refresh(row)
     _touch_source(db, row.id, fields["best_source"], fields["url"])
@@ -104,7 +107,8 @@ def reload(db: Session, row: Job) -> Job:
 def as_job(row: Job) -> dict:
     """The canonical copy in the plain-dict shape scrapers produce."""
     return {"id": row.id, "source": row.best_source, "title": row.title, "company": row.company,
-            "location": row.location, "url": row.url, "description": row.description, "posted": row.posted}
+            "location": row.location, "url": row.url, "description": row.description, "posted": row.posted,
+            "apply_url": row.apply_url}
 
 
 def _aware(dt: datetime | None) -> datetime | None:

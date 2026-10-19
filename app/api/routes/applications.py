@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -136,6 +136,9 @@ async def update_application_status(
 
 class ManualApplyIn(BaseModel):
     job_id: str = Field(..., min_length=1, max_length=36, description="Canonical job id (a feed entry's `id`)")
+    via: Literal["manual", "email"] = Field(
+        "manual", description="manual: applied on the job's page (status `submitted`); "
+                              "email: sent the Email apply draft (status `emailed`)")
 
 
 @router.post("/manual", response_model=ApplicationLogEntry, status_code=201)
@@ -147,9 +150,9 @@ async def mark_applied_manually(
     db: Session = Depends(get_db),
 ):
     """"Apply manually → Mark as applied" (CLAUDE.md 7.7): the user applied
-    on the job's own page. Records a `submitted` application with
-    status_source `manual` and moves the job to the user's Applied list so
-    later searches skip it."""
+    on the job's own page (`submitted`) or sent the Email apply draft
+    (`emailed`, P4a). Recorded with status_source `manual`; the job moves
+    to the user's Applied list so later searches skip it."""
     job = db.get(Job, body.job_id)
     if job is None:
         raise HTTPException(404, detail={"code": "job_not_found", "message": "No job with this id."})
@@ -157,9 +160,9 @@ async def mark_applied_manually(
         user_id=user.id,
         job={"url": job.url, "title": job.title, "company": job.company, "source": job.best_source,
              "location": job.location},
-        status="submitted",
+        status="emailed" if body.via == "email" else "submitted",
         status_source="manual",
-        note="marked as applied by the user",
+        note="sent the application email" if body.via == "email" else "marked as applied by the user",
     )
     job_store.set_state(db, user_id=user.id, job_id=job.id, state="applied")
     db.commit()

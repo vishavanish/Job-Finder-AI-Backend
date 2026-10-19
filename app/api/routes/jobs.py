@@ -23,7 +23,7 @@ from app.core.auth import get_current_user
 from app.core.db import get_db
 from app.models.jobs import Job, UserJob
 from app.models.profile_schemas import UserJobList, UserJobOut
-from app.services import job_store
+from app.services import apply_options, job_store
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -36,7 +36,8 @@ def _out(job: Job, uj: UserJob, sources: list[str]) -> UserJobOut:
                       source=job.best_source, posted=job.posted, state=uj.state, keyword_score=uj.keyword_score,
                       llm_score=uj.llm_score, reason=uj.reason, sources=sources, match=uj.breakdown,
                       posted_at=fresh["posted_at"], posted_hours_ago=fresh["posted_hours_ago"], early=fresh["early"],
-                      applicants=job.applicants, updated_at=uj.updated_at)
+                      applicants=job.applicants, apply_url=job.apply_url,
+                      apply_options=apply_options.options(job_store.as_job(job)), updated_at=uj.updated_at)
 
 
 @router.get("", response_model=UserJobList)
