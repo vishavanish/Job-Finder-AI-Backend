@@ -94,6 +94,11 @@ def availability(db: Session, user: User, row: ProviderCatalog, *, choices: dict
                    for s in scopes):
             owner = "your own " if not shared_ok else "a "
             return False, f"needs {owner}{' or '.join(scopes)} API key"
+    if registry.kind(row.key) == "inbox":
+        from app.models.email import EmailAccount
+        if not db.query(EmailAccount.id).filter(EmailAccount.user_id == user.id,
+                                                EmailAccount.status == "active").first():
+            return False, "connect Gmail to read your job-alert emails"
     until = paused_until(row)
     if until:
         return False, f"paused after repeated errors — retrying after {until:%H:%M} UTC"

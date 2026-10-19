@@ -130,7 +130,7 @@ def main() -> None:
         "api": start("api", [PYTHON, "-m", "uvicorn", "app.main:app", "--reload",
                              "--host", "127.0.0.1", "--port", "8000"], BACKEND, env),
         "worker": start("worker", [PYTHON, "-m", "celery", "-A", "app.core.celery_app:celery_app", "worker",
-                                   "--pool=solo", "--loglevel=info", "-Q", "default_dev,apply_dev,maintenance_dev"],
+                                   "--pool=solo", "--loglevel=info", "-Q", "default_dev,apply_dev,maintenance_dev,email_dev"],
                         BACKEND, env),
         # One beat process: starts due job alerts (P3.2).
         "beat": start("beat", [PYTHON, "-m", "celery", "-A", "app.core.celery_app:celery_app", "beat",

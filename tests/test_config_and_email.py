@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from app.core.celery_app import celery_app
 from app.core.config import get_settings
-from app.services.email_tracker import message_received_at
+from app.providers.gmail import received_at as message_received_at
 
 
 def test_worker_consumes_every_queue_the_api_publishes_to():
@@ -14,7 +14,7 @@ def test_worker_consumes_every_queue_the_api_publishes_to():
 
 
 def test_dev_queues_are_suffixed():
-    assert get_settings().worker_queues == "default_dev,apply_dev,maintenance_dev"
+    assert get_settings().worker_queues == "default_dev,apply_dev,maintenance_dev,email_dev"
 
 
 def test_email_uses_gmail_internal_date():

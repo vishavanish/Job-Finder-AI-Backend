@@ -297,6 +297,7 @@ def scrape_all(
     linkedin_retry_delay_sec: float = 30,
     enable_naukri_auto: bool = False,
     manual_naukri_jobs: list[dict] | None = None,
+    inbox_jobs: list[dict] | None = None,
     enable_naukri_apify: bool = False,
     apify_naukri_actor_id: str = "",
     apify_api_token: str = "",
@@ -362,6 +363,15 @@ def scrape_all(
 
     if "naukri" in sources and manual_naukri_jobs:
         all_jobs.extend(manual_naukri_jobs)
+
+    if "email_alerts" in sources and inbox_jobs:
+        # P5: jobs from the user's job-alert emails, matched per keyword like the feeds. They keep their real
+        # source (Naukri, LinkedIn...) so dedupe ranks and the apply buttons work as usual.
+        from app.providers.job_sources.base import matches_keyword
+        picked = [j for j in inbox_jobs if any(matches_keyword(j, kw) for kw in keywords)]
+        progress(f"Job alert emails: {len(picked)} matching jobs (of {len(inbox_jobs)} from your inbox)")
+        all_jobs.extend(picked[: results_per_keyword * max(1, len(keywords))])
+        outcomes.success("email_alerts")
 
     if enable_naukri_apify:
         from app.services.naukri_apify_source import fetch_naukri_all_keywords

@@ -180,7 +180,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Company ATS | `routes/company_ats.py`, `services/company_ats_sources.py` | Greenhouse, Lever, SmartRecruiters, Workday, Oracle Fusion, SuccessFactors, Ashby, Recruitee, Workable, Personio, Breezy (P3.1), custom (JSON probe → Playwright DOM fallback). SSRF guard `_reject_private_targets` (custom + workday URLs); subdomain slugs limited to DNS-label characters. |
 | Apply | `routes/apply.py`, `services/browser_apply.py` | Playwright, LinkedIn Easy Apply prefill (`_FILL_DISPATCH`, `AUTO_APPLY_CAPABLE_SOURCES = {"LinkedIn"}`), never auto-submits, capability filter; client-supplied `browser_profile_dir` is ignored (`task_params.build_apply_params`). The frontend calls `POST /apply/{id}/close`, which the backend does **not** implement. |
 | Tracking | `routes/applications.py`, `services/applications_store.py` | `record_status()` single write path (upsert + history event) |
-| Gmail | `services/email_tracker.py`, `scripts/gmail_authorize.py` | Multi-account polling via `token_<label>.json` files, keyword prefilter. Classifier, matching and status update are **not built**; no Celery beat schedule exists yet. |
+| Gmail | `providers/gmail.py`, `services/gmail_accounts.py`, `services/email_sync.py`, `services/job_alert_emails.py`, `routes/gmail.py` | P5: per-user OAuth (`gmail.readonly`), tokens sealed in `email_accounts`, scheduled sync, AI classification, matching, status updates with notes, needs-review inbox, job-alert emails to jobs (Section 6.11). The old file-token tracker is gone. |
 | Auth | `routes/auth.py`, `core/auth.py`, `services/sessions.py`, `services/otp.py`, `services/accounts.py`, `providers/google_identity.py`, `providers/email.py` | Email OTP, Google ID-token sign-in, legacy password login. 15-min access JWT + rotating httpOnly refresh cookie (reuse ⇒ all sessions revoked). Revocation = bump `users.session_version` (stamped into every token). Disabled accounts get `403 {code: "account_disabled"}` on every path. `GET /auth/me` includes per-feature entitlements with `quota_remaining`. |
 | RBAC & admin | `core/auth.require_role`, `routes/admin.py`, `services/user_admin.py` | Roles user/manager/admin. Admin: users CRUD, roles, teams, flags, audit. Managers: only their team (list, enable/disable, reset sessions, entitlements within their own limits). Disabling revokes sessions and cancels the user's tasks and streaming runs. |
 | Entitlements & flags | `services/entitlements.py`, `services/feature_flags.py`, `models/admin.py` | `require_feature("x")` on every feature route (403 off / 429 over daily quota / 503 kill switch). Flags: `invite_only`, `auto_apply_enabled`. |
@@ -224,7 +224,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | 6.2 #3 Groq forwarded | ✅ done (`groq_model` / `groq_api_key` on both score request models) |
 | 6.2 #4 signup | ✅ P1: OTP-verified signup + admin `invite_only` flag (default = inverse of `ALLOW_SELF_REGISTRATION`). |
 | 6.2 #5 `record_status` by `job_key` | ✅ done (+ migration `0002`) |
-| 6.2 #6 email date | ✅ `internalDate` used. Token files → encrypted DB is P5. |
+| 6.2 #6 email date | ✅ `internalDate` used; tokens moved from files to the encrypted DB in P5. |
 | 6.2 #7 dedupe before scoring | ✅ done (`pipeline_progress.claim_job_key`). The first-claimer limitation is gone since P3: the canonical `jobs` row holds the best copy and a later LinkedIn copy replaces the shown one (Section 6.6). |
 | 6.2 #9 leaked keys | ⚠️ legacy `.env.example` now has placeholders; **owner must rotate the keys**. |
 | 6.2 #10, #11, #12 | ✅ done |
@@ -398,6 +398,31 @@ Plan: `docs/plans/P4-apply-center.md` §3.1, §3.3, §3.6, §3.7.
 - Beat now also runs `purge_apply_proofs` daily.
 - To let a user auto apply: raise their `auto_apply` entitlement to `max_level: 2` (admin), then the user accepts the risk notice and picks level 2 in Apply settings.
 - New env (optional): `APPLY_DAILY_CAP`, `APPLY_PLATFORM_DAILY_CAP`, `FAST_APPLY_DAILY_CAP`, `APPLY_COMPANY_COOLDOWN_DAYS`, `APPLY_MIN_GAP_SECONDS` / `APPLY_MAX_GAP_SECONDS` (30/90), `APPLY_PROOF_RETENTION_DAYS`, `APPLY_HEADLESS` (true), `APPLY_PAGE_TIMEOUT_SECONDS` (45), `RATE_LIMIT_APPLY_RUNS` (30/hour).
+
+---
+
+### 6.11 Phase 5 status — Tracker & Gmail (branch `dev`)
+
+Plan: `docs/plans/P5-tracker-gmail.md` (the owner asked on 2026-10-19 to build the best option: all nine recommended defaults taken).
+
+| Item | State |
+|------|-------|
+| Connect | ✅ `GET /gmail/connect` → Google consent (`gmail.readonly openid email`, offline, PKCE) → `GET /gmail/callback` (single-use Redis state; requires the readonly scope; address from `users.getProfile`) → refresh token sealed in `email_accounts` → redirect to `APP_PUBLIC_URL/tracker?gmail=connected` (or `gmail=error&reason=`). Up to 3 accounts. Disconnect revokes at Google and deletes the account's events and alert jobs; applications keep their history. |
+| Sync | ✅ Beat `gmail_tick` (every `GMAIL_TICK_SECONDS`) claims due accounts (conditional UPDATE) → `sync_gmail_account` on the new **email** queue. First run searches 30 days; later runs use `history.list`, falling back to `after:` when the history expired. Metadata + snippet first, body only for prefilter survivors (or replies in a thread already tracked). Revoked grant → `needs_reconnect`; other errors back off (1 h after 5). |
+| Classify | ✅ Router task `email_classify` (acknowledgement / assessment / interview_invite / offer / rejection / job_alert / other + confidence, company, role, summary). Company/role must appear in the email; the summary is fact-checked. No model → `pending`, retried next sync. Job-alert emails skip the AI. |
+| Match & update | ✅ Score per application (thread +60, company in sender domain +35, company in text +30, AI company +25, role words +20, ATS sender +5). Applied only when score ≥ 60 with a 15-point margin and confidence ≥ 0.7; otherwise the needs-review inbox with up to 3 suggestions. Statuses never move backwards (rejection/offer always apply; closed ones never change); a lower one is noted on the timeline. Rejection note from a template ("On 12 Oct 2026, Acme Corp told you it will not move forward…"), never the email's words. Each change links its email (`application_status_events.email_event_id`). |
+| Job-alert emails | ✅ (experimental) Naukri / LinkedIn / Indeed / Foundit / Instahyre alert emails parsed without AI into `email_jobs` (link → title, next lines → company, location; tracking redirects unwrapped). New search source **`email_alerts` ("Job alert emails", kind `inbox`)**, on by default but available only once Gmail is connected; jobs keep their real source. Check the parser against one real Naukri alert. |
+| Tracker API | ✅ `GET /applications/stats` (funnel by stage reached, this week, by status/source, needs-review count), `GET /applications/{id}/events` (timeline with source, note and the email), `PATCH /applications/{id}` takes the full status model, `GET /gmail/events`, `GET /gmail/review`, `POST /gmail/review/{id}/resolve` (confirm / change / ignore). |
+| Privacy | ✅ Stored: sender, subject, date, ≤ 300-char snippet, extracted fields. Bodies go to the AI once and are dropped. Events purged after 180 days, alert jobs after 30 (`purge_email_data`, daily). |
+| Tests | ✅ 253 total (14 for P5), fake Gmail client + fake AI. |
+| Not in P5 | Sending mail (Email apply as a Gmail draft, follow-ups, Find HR — needs `gmail.compose`), calendar events, Outlook/IMAP, the screens (F5). **Launch note:** `gmail.readonly` is a Google *restricted* scope — fine for the owner and up to 100 test users in OAuth "testing" mode; a public launch needs Google verification + a security assessment. |
+
+**Operational changes introduced in P5**
+- Migration `0010` (run `alembic upgrade head`).
+- **Workers must consume the new `email` queue** (`worker_queues` now ends with `email`; `start.sh` reads it; `worker.cmd` / `run_dev.py` updated).
+- Beat runs `gmail_tick` and `purge_email_data`.
+- Create a Google Cloud OAuth client of type **Web application** with the Gmail API enabled, add the redirect URI `…/api/v1/gmail/callback`, add yourself as a test user, and set `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REDIRECT_URI`, `APP_PUBLIC_URL`.
+- Removed env: `GMAIL_ACCOUNT_LABELS`, `GMAIL_CREDENTIALS_PATH`, `GMAIL_POLL_LOOKBACK_MINUTES`. New (optional): `GMAIL_TICK_SECONDS` (300), `GMAIL_SYNC_INTERVAL_SECONDS` (900), `GMAIL_INITIAL_LOOKBACK_DAYS` (30), `GMAIL_MAX_MESSAGES_PER_SYNC` (100), `GMAIL_ACCOUNTS_MAX_PER_USER` (3), `EMAIL_MATCH_MIN_SCORE` (60), `EMAIL_MATCH_MIN_MARGIN` (15), `EMAIL_CLASSIFY_MIN_CONFIDENCE` (0.7), `EMAIL_EVENT_RETENTION_DAYS` (180), `EMAIL_JOBS_RETENTION_DAYS` (30), `RATE_LIMIT_GMAIL_SYNC` (6/hour).
 
 ---
 
@@ -826,8 +851,9 @@ All tables have `id`, `created_at`, `updated_at`. User-owned tables have `user_i
 | `apply_settings` | user_id, level, risk_accepted_at, hours_start/end, timezone, paused (P4b) |
 | `answer_bank` | user_id, question_hash, question, answer, field_type, approved, origin (user/ai), uses |
 | `apply_packs` | user_id, job_id, master_resume_id + master_hash, status, tailored_resume_id, cover_letter, email draft, dropped (P4a) |
-| `email_accounts` | user_id, gmail_address, encrypted_token, last_history_id, enabled |
-| `email_events` | account_id, message_id (unique), application_id?, classification, confidence, snippet, ai_note, needs_review |
+| `email_accounts` | user_id, gmail_address, token_sealed, scopes, status (active/needs_reconnect), last_history_id, next_sync_at, failures (P5) |
+| `email_events` | account_id + message_id (unique), thread_id, sender, subject, snippet (≤ 300, never the body), category, confidence, company, role, summary, state, application_id, applied_status, match_score, suggestions (P5) |
+| `email_jobs` | user_id, source, title, company, location, url (unique per user), received_at — from job-alert emails (P5) |
 | `ats_companies` | platform, slug, name, careers_url, active, last_crawled_at |
 | `ats_jobs` | company_id, external_id, title, location, url, posted_at, content_hash, tsv, embedding |
 | `provider_catalog` | key, name, tier, requires_key, tos_risk, rate_limit, enabled_global, health |
@@ -861,7 +887,7 @@ All routes are already served under `/api/v1` (`settings.API_V1_PREFIX`); new ro
 | ATS | `POST /ats/discover` (job title), `GET /ats/companies`, `POST /company-ats/fetch` (existing) |
 | Apply | `POST /apply` (existing), `GET /apply/options/{job_id}`, `POST /apply/prep`, `GET /apply/prep/{id}` (P4a), `GET/POST/PUT/DELETE /answer-bank`, `POST /answer-bank/{id}/approve` (P4a), `GET/PUT /apply/settings`, `POST /apply/runs`, `GET /apply/runs?state=waiting|&job_id=`, `GET /apply/runs/{id}`, `POST /apply/runs/{id}/answer`, `POST /apply/runs/{id}/approve`, `POST /apply/runs/{id}/cancel`, `POST /apply/runs/{id}/done`, `GET /apply/runs/{id}/proofs[/{proof_id}]` (P4b), `POST /applications/manual` (built for F3: `{job_id, via}` → `submitted` (or `emailed` with `via: "email"`, P4a) / `manual` + job state `applied`) |
 | Tracker | `GET /applications`, `GET/PATCH /applications/{id}`, `GET /applications/{id}/events`, `GET /applications/stats` |
-| Gmail | `GET /gmail/connect`, `GET /gmail/callback`, `GET /gmail/accounts`, `DELETE /gmail/accounts/{id}`, `GET /gmail/review`, `POST /gmail/review/{id}/resolve` |
+| Gmail | `GET /gmail/connect`, `GET /gmail/callback`, `GET /gmail/accounts`, `DELETE /gmail/accounts/{id}`, `POST /gmail/accounts/{id}/sync`, `GET /gmail/events?state=`, `GET /gmail/review`, `POST /gmail/review/{id}/resolve` (all built in P5) |
 | Voice | `POST /voice/sessions`, `WS /voice/sessions/{id}/stream` (mock), `WS /voice/copilot/{id}/stream` (live), `POST /voice/copilot/{id}/expand`, `GET /voice/sessions/{id}/feedback`, `GET /voice/history`, `DELETE /voice/sessions/{id}`, `GET/POST /story-bank` |
 | Tasks | `GET /tasks/{id}`, `POST /tasks/{id}/cancel` (both ownership-checked) |
 | Admin | `/admin/users`, `/admin/users/{id}/entitlements`, `/admin/models`, `/admin/providers`, `/admin/flags`, `/admin/audit`, `/admin/health` |
@@ -876,7 +902,7 @@ Conventions: Pydantic request/response models for every route, consistent error 
 |-------|-------|-------|
 | `default` | search, score, ats fetch, pipeline fan-out, resume parse | Multiple workers fine |
 | `apply` | Playwright apply runs: `apply_prepare`, `apply_submit` (P4b) | Low concurrency; one browser per run; memory-limited; needs Chromium installed |
-| `email` | Gmail polling per account | Celery beat schedule; idempotent |
+| `email` | `sync_gmail_account` per account (P5); the `gmail_tick` beat task runs on `maintenance` | Idempotent (unique account + message id); in `worker_queues` |
 | `maintenance` | Job-alerts tick (P3.2); apply-proof retention cleanup (P4b); later ATS crawler/refresh, other retention cleanup, provider health checks, usage rollups | Beat schedule (one beat process) |
 
 Rules: tasks are idempotent; every task receives `user_id`; secrets are resolved by `key_ref` inside the worker; progress is reported with `update_state(state="PROGRESS")`; worker `-Q` lists **must** match `settings.*_queue` names; set `acks_late` and sensible `time_limit`/`soft_time_limit` per queue.

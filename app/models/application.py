@@ -75,6 +75,7 @@ class ApplicationStatusEvent(Base):
     status = Column(String(64), nullable=False)
     status_source = Column(String(32), default="browser_apply", nullable=False)
     note = Column(Text, nullable=True)
+    email_event_id = Column(String(36), nullable=True)  # the email that caused this change (P5)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
 
     application = relationship("Application", back_populates="events")

@@ -14,7 +14,8 @@ clicked submit inside the browser, unless status_source is 'manual' or
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -27,6 +28,7 @@ from app.core.config import get_settings
 from app.core.db import get_db
 from app.models.application import Application
 from app.models.jobs import Job
+from app.models.email_schemas import ApplicationTimeline, TimelineEvent, TrackerStats
 from app.models.schemas import ApplicationLogEntry, ApplicationLogResult, ApplicationStatusUpdate
 from app.services import job_store
 from app.services.applications_store import record_status
@@ -86,6 +88,75 @@ async def list_applications(
         limit=limit,
         offset=offset,
     )
+
+
+# Statuses that mean the application went out (anything past "opened"/prefill).
+_SENT = {"submitted", "emailed", "done", "acknowledged", "assessment", "interview", "offer", "accepted", "declined",
+         "rejected", "withdrawn", "ghosted"}
+_FUNNEL = ["acknowledged", "assessment", "interview", "offer"]
+
+
+@router.get("/stats", response_model=TrackerStats)
+def tracker_stats(days: int = Query(0, ge=0, le=3650, description="0 = all time"),
+                  user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """Dashboard numbers (CLAUDE.md 7.8): funnel (reached at least each stage, so an interview also counts as
+    acknowledged), this week, by status and source, and emails waiting for review."""
+    from app.models.email import EmailEvent
+    from app.services.email_sync import STATUS_RANK
+
+    q = db.query(Application).filter(Application.user_id == user.id)
+    if days:
+        q = q.filter(Application.applied_at >= datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days))
+    rows = q.all()
+    by_status = Counter(r.status for r in rows)
+    sent = [r for r in rows if r.status in _SENT]
+    week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+
+    def reached(stage: str) -> int:
+        rank = STATUS_RANK[stage]
+        n = 0
+        for r in sent:
+            if r.status in ("accepted", "declined"):
+                n += 1  # had an offer
+            elif r.status == "rejected":
+                # how far it got before the rejection: the best status in its history
+                best = max((STATUS_RANK.get(e.status, 0) for e in r.events if e.status != "rejected"), default=1)
+                n += best >= rank
+            else:
+                n += STATUS_RANK.get(r.status, 1) >= rank
+        return n
+
+    applied_at = lambda r: r.applied_at if r.applied_at.tzinfo else r.applied_at.replace(tzinfo=timezone.utc)  # noqa: E731
+    return TrackerStats(
+        total=len(sent), this_week=sum(1 for r in sent if applied_at(r) >= week_ago),
+        funnel={"applied": len(sent), **{s: reached(s) for s in _FUNNEL}},
+        rejected=by_status.get("rejected", 0), by_status=dict(by_status),
+        by_source=dict(Counter(r.source or "Unknown" for r in sent)),
+        needs_review=db.query(EmailEvent).filter(EmailEvent.user_id == user.id,
+                                                 EmailEvent.state == "needs_review").count(),
+    )
+
+
+@router.get("/{application_id}/events", response_model=ApplicationTimeline)
+def application_events(application_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """The timeline: every status change with where it came from (apply_engine, manual, email_parser) and, for
+    email changes, which email caused it."""
+    from app.models.email import EmailEvent
+
+    row = db.query(Application).filter(Application.id == application_id, Application.user_id == user.id).first()
+    if not row:
+        raise HTTPException(404, "no application found with this id")
+    email_ids = [e.email_event_id for e in row.events if e.email_event_id]
+    emails = {m.id: m for m in db.query(EmailEvent).filter(EmailEvent.id.in_(email_ids),
+                                                           EmailEvent.user_id == user.id).all()} if email_ids else {}
+    events = []
+    for e in row.events:
+        m = emails.get(e.email_event_id or "")
+        events.append(TimelineEvent(
+            status=e.status, status_source=e.status_source, note=e.note, created_at=e.created_at,
+            email={"sender": m.sender, "subject": m.subject, "received_at": m.received_at.isoformat()} if m else None,
+        ))
+    return ApplicationTimeline(application_id=row.id, events=events)
 
 
 @router.get("/{application_id}", response_model=ApplicationLogEntry)

@@ -84,14 +84,21 @@ class Settings(BaseSettings):
 
     # ---- auth ----
     API_KEYS: str = ""  # comma-separated, e.g. "key1,key2"
-    # ---- email tracking (Gmail) ----
-    GMAIL_ACCOUNT_LABELS: str = "primary,secondary"  # comma-separated, matches token_<label>.json files
-    GMAIL_CREDENTIALS_PATH: Path = BASE_DIR / "credentials.json"
-    GMAIL_POLL_LOOKBACK_MINUTES: int = 30  # slightly > beat interval, to survive one missed run
-
-    @property
-    def gmail_account_labels_list(self) -> list[str]:
-        return [x.strip() for x in self.GMAIL_ACCOUNT_LABELS.split(",") if x.strip()]
+    # ---- email tracking (Gmail, P5) ----
+    GMAIL_CLIENT_ID: str = ""          # Google OAuth *web* client for Gmail (separate consent from sign-in)
+    GMAIL_CLIENT_SECRET: str = ""
+    GMAIL_REDIRECT_URI: str = "http://127.0.0.1:8000/api/v1/gmail/callback"
+    GMAIL_TICK_SECONDS: int = 300               # beat tick: claim accounts that are due
+    GMAIL_SYNC_INTERVAL_SECONDS: int = 900      # how often one account is synced
+    GMAIL_INITIAL_LOOKBACK_DAYS: int = 30
+    GMAIL_MAX_MESSAGES_PER_SYNC: int = 100
+    GMAIL_ACCOUNTS_MAX_PER_USER: int = 3
+    EMAIL_MATCH_MIN_SCORE: int = 60
+    EMAIL_MATCH_MIN_MARGIN: int = 15
+    EMAIL_CLASSIFY_MIN_CONFIDENCE: float = 0.7
+    EMAIL_EVENT_RETENTION_DAYS: int = 180
+    EMAIL_JOBS_RETENTION_DAYS: int = 30
+    RATE_LIMIT_GMAIL_SYNC: str = "6/hour"
 
     @property
     def api_keys_list(self) -> list[str]:
@@ -119,11 +126,15 @@ class Settings(BaseSettings):
         return f"maintenance{self.queue_suffix}"
 
     @property
+    def email_queue(self) -> str:
+        return f"email{self.queue_suffix}"
+
+    @property
     def worker_queues(self) -> str:
         """Comma-separated -Q list for a worker that serves every queue
         the API publishes to. start.sh reads this so the worker can never
         drift from the names routes dispatch to (the stuck-`pending` bug)."""
-        return f"{self.default_queue},{self.apply_queue},{self.maintenance_queue}"
+        return f"{self.default_queue},{self.apply_queue},{self.maintenance_queue},{self.email_queue}"
 
     # ---- signup ----
     # Interim switch until OTP-verified signup (CLAUDE.md 7.1) lands.
