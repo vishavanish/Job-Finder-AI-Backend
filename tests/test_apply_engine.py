@@ -621,3 +621,14 @@ def test_lever_human_checkbox_is_handed_over(client, make_user, real_browser_eng
     url = (FIXTURES / "lever_form.html").as_uri() + "?hcaptcha=1"
     run = _step("prepare", _local_run(user_id, "lever", url, "Lever Human"))
     assert run.state == "needs_user" and "I am human" in run.message
+
+
+def test_runs_can_be_listed_for_one_job(client, make_user, engine):
+    _, headers = _ready_user(client, make_user)
+    a, b = _job("List A"), _job("List B")
+    run_a = client.post(f"{API}/apply/runs", json={"job_id": a}, headers=headers).json()["id"]
+    client.post(f"{API}/apply/runs", json={"job_id": b}, headers=headers)
+    got = client.get(f"{API}/apply/runs", params={"job_id": a}, headers=headers).json()
+    assert got["total"] == 1 and got["runs"][0]["id"] == run_a and got["runs"][0]["title"] == "Backend Engineer"
+    _, other = make_user()
+    assert client.get(f"{API}/apply/runs", params={"job_id": a}, headers=other).json()["total"] == 0

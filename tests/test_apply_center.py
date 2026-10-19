@@ -85,7 +85,7 @@ def test_apply_options_by_job_kind(monkeypatch):
     gh = apply_options.options({"url": "https://www.linkedin.com/jobs/view/2",
                                 "apply_url": "https://job-boards.greenhouse.io/orbit/jobs/123", "description": ""})
     assert gh["adapter"] == "greenhouse" and not gh["fast"]["available"]
-    assert "Greenhouse" in gh["auto"]["reason"]
+    assert gh["auto"]["available"] and gh["auto"]["reason"] is None
     assert apply_options.adapter_for({"url": "https://jobs.lever.co/acme/abc"}) == "lever"
     assert apply_options.adapter_for({"url": "https://acme.com/careers?gh_jid=5"}) == "greenhouse"
     # A LinkedIn posting that applies on an unknown site is not Easy Apply.
