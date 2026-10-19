@@ -3,6 +3,7 @@ tasks), seen jobs not re-shown, filters, search profiles, preferences,
 resume upload/versions/parse."""
 from __future__ import annotations
 
+import functools
 import io
 
 import pytest
@@ -319,7 +320,10 @@ def test_pipeline_rejects_someone_elses_profile(client, make_user):
 
 # ---------------------------------------------------------------- resumes
 
+@functools.lru_cache(maxsize=None)
 def _docx(text: str) -> bytes:
+    """Same text -> same bytes (python-docx stamps the save time into the file,
+    which made the duplicate-upload check flaky across a second boundary)."""
     from docx import Document
     doc = Document()
     doc.add_paragraph(text)

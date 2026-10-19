@@ -50,6 +50,7 @@ class Job(Base):
     best_source = Column(String(100), nullable=False, default="")
     best_source_rank = Column(Integer, nullable=False, default=2)  # source_info.source_rank; lower is better
     posted_at = Column(DateTime, nullable=True)                 # parsed from `posted` when possible
+    apply_url = Column(Text, nullable=True)                     # the company's own apply link (P4a), if known
     applicants = Column(String(32), nullable=True)              # as LinkedIn shows it: "143", "Over 200"
     applicants_checked_at = Column(DateTime, nullable=True)
     first_seen_at = Column(DateTime, default=_now, nullable=False)

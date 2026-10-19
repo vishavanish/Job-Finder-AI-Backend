@@ -494,6 +494,33 @@ def pipeline_task(self, search_params: dict, score_params: dict, apply_params: d
         "apply_result": apply_result,
     }
 
+@celery_app.task(name="job_finder.build_apply_pack")
+def build_apply_pack_task(pack_id: str, user_id: str) -> dict:
+    """Builds one prep pack (P4a): tailored resume + cover letter + email
+    draft. Resume and job text are read from the DB here, never enqueued."""
+    from app.models.apply import ApplyPack
+    from app.services import apply_prep
+
+    db = SessionLocal()
+    try:
+        pack = db.query(ApplyPack).filter(ApplyPack.id == pack_id, ApplyPack.user_id == user_id).first()
+        if pack is None:
+            return {"pack_id": pack_id, "status": "missing"}
+        try:
+            apply_prep.build_pack(db, pack)
+        except Exception:  # noqa: BLE001 — a crash must not leave the pack "pending" forever
+            db.rollback()
+            logger.exception("prep pack crashed for pack=%s", pack_id)
+            pack = db.get(ApplyPack, pack_id)
+            if pack is None:
+                return {"pack_id": pack_id, "status": "missing"}
+            pack.status, pack.error = "failed", "Preparing the application failed. Try again."
+        db.commit()
+        return {"pack_id": pack_id, "status": pack.status}
+    finally:
+        db.close()
+
+
 @celery_app.task(name="job_finder.parse_resume")
 def parse_resume_task(resume_id: str, user_id: str) -> dict:
     """AI-parses one resume (CLAUDE.md 7.2). The text is read from the DB

@@ -160,7 +160,8 @@ def create_resume(db: Session, *, user_id: str, file_name: str, data: bytes, lab
     if content_type is None:
         raise api_error(415, "resume_type", "Upload a PDF or Word (.docx) file.")
 
-    count = db.query(func.count(Resume.id)).filter(Resume.user_id == user_id).scalar() or 0
+    # Tailored copies (P4a, parent_id set) are made by the app and don't use up the upload limit.
+    count = db.query(func.count(Resume.id)).filter(Resume.user_id == user_id, Resume.parent_id.is_(None)).scalar() or 0
     if count >= settings.RESUME_MAX_PER_USER:
         raise api_error(409, "resume_limit",
                      f"You can keep up to {settings.RESUME_MAX_PER_USER} resumes. Delete an old one first.")
@@ -201,13 +202,21 @@ def set_master(db: Session, user_id: str, resume_id: str) -> Resume:
 
 
 def delete_resume(db: Session, user_id: str, resume_id: str) -> None:
+    from app.models.apply import ApplyPack
+
     row = get_owned(db, user_id, resume_id)
     was_master = row.is_master
-    db.query(Resume).filter(Resume.parent_id == row.id).update({"parent_id": None})
+    # Tailored copies and prep packs are derived from this resume: they go with it.
+    db.query(ApplyPack).filter(ApplyPack.user_id == user_id, ApplyPack.master_resume_id == row.id).delete()
+    db.query(ApplyPack).filter(ApplyPack.user_id == user_id, ApplyPack.tailored_resume_id == row.id).update(
+        {"tailored_resume_id": None})
+    for child in db.query(Resume).filter(Resume.parent_id == row.id).all():
+        db.delete(child)
     db.delete(row)
     db.flush()
     if was_master:
-        newest = db.query(Resume).filter(Resume.user_id == user_id).order_by(Resume.version.desc()).first()
+        newest = (db.query(Resume).filter(Resume.user_id == user_id, Resume.parent_id.is_(None))
+                  .order_by(Resume.version.desc()).first())
         if newest is not None:
             newest.is_master = True
 

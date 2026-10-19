@@ -149,6 +149,10 @@ class Settings(BaseSettings):
     RESUME_MAX_PER_USER: int = 20
     RESUME_PARSE_MAX_CHARS: int = 20000      # resume text sent to the parser model
     SEARCH_PROFILES_MAX_PER_USER: int = 20
+
+    # ---- apply center (P4a) ----
+    RATE_LIMIT_APPLY_PREP: str = "30/hour"   # prep packs (tailored resume + cover letter)
+    ANSWER_BANK_MAX_PER_USER: int = 500
     # ---- app / infra ----
     APP_NAME: str = "Job Finder API"
     APP_PUBLIC_URL: str = ""  # frontend URL, used in emails (e.g. alert digests)

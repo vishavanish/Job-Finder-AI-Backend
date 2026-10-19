@@ -136,6 +136,9 @@ def record_scored_job(*, run_id: str, job: dict) -> dict:
         "llm_score": job.get("llm_score"),
         "llm_reason": job.get("llm_reason", ""),
         "auto_apply_capable": bool(job.get("auto_apply_capable")),
+        # P4a: the company's own apply page and which apply buttons work
+        "apply_url": job.get("apply_url"),
+        "apply_options": _apply_options(job),
         # P3.2: match breakdown and freshness (None when unknown)
         "match": job.get("match"),
         "posted_at": job.get("posted_at"),
@@ -147,6 +150,11 @@ def record_scored_job(*, run_id: str, job: dict) -> dict:
     }
     _push(run_id, payload)
     return payload
+
+
+def _apply_options(job: dict) -> dict:
+    from app.services import apply_options
+    return apply_options.options(job)
 
 
 def _push(run_id: str, payload: dict) -> None:
@@ -177,6 +185,7 @@ def replace_recorded(*, run_id: str, job_key: str, best: dict) -> bool:
     updated = {**shown, **{k: best.get(k, shown.get(k)) for k in
                            ("source", "title", "company", "location", "url", "description", "posted")},
                "auto_apply_capable": bool(best.get("auto_apply_capable")), "replaces": True,
+               "apply_url": best.get("apply_url"), "apply_options": _apply_options(best),
                "created_at": datetime.now(timezone.utc).isoformat()}
     _push(run_id, updated)
     remember_recorded(run_id=run_id, job_key=job_key, payload=updated)

@@ -11,6 +11,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.models.apply_schemas import ApplyOptions
+
 
 def _clean_terms(values: list[str], *, limit: int, max_len: int = 100) -> list[str]:
     """Trims, drops blanks and case-insensitive duplicates, keeps order."""
@@ -307,6 +309,8 @@ class UserJobOut(BaseModel):
     posted_hours_ago: Optional[int] = None
     early: bool = False
     applicants: Optional[str] = Field(None, description="LinkedIn applicant count as shown, e.g. 143 or Over 200")
+    apply_url: Optional[str] = Field(None, description="The company's own apply page, when the posting links to one")
+    apply_options: Optional[ApplyOptions] = None
     updated_at: datetime
 
 

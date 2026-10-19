@@ -139,6 +139,9 @@ def _normalize(df: pd.DataFrame) -> list[dict]:
         url = _pick(record, "job_url", "job_url_direct", "url", "JOB_URL")
         if url and not url.startswith(("http://", "https://")):
             url = "https://" + url.lstrip("/")
+        # The company's own apply page behind a board posting (often Greenhouse/Lever) — P4a adapters need it.
+        direct = _pick(record, "job_url_direct")
+        apply_url = direct if direct.startswith(("http://", "https://")) and direct != url else ""
 
         jobs.append({
             "source": source,
@@ -148,6 +151,7 @@ def _normalize(df: pd.DataFrame) -> list[dict]:
             "url": url,
             "description": _pick(record, "description", "DESCRIPTION"),
             "posted": _pick(record, "date_posted", "DATE_POSTED", "posted"),
+            "apply_url": apply_url,
         })
     return jobs
 
