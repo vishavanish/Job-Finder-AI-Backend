@@ -72,3 +72,67 @@ class ApplyPack(Base):
     error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=_now, nullable=False)
     updated_at = Column(DateTime, default=_now, onupdate=_now, nullable=False)
+
+
+# ---------------------------------------------------------------- P4b: apply engine
+
+# queued -> preparing -> awaiting_input <-> awaiting_review -> submitting -> submitted
+# any active state -> cancelled | failed | needs_user (a hard stop: the user finishes on the real page)
+RUN_ACTIVE_STATES = ("queued", "preparing", "awaiting_input", "awaiting_review", "submitting")
+RUN_END_STATES = ("submitted", "failed", "cancelled", "needs_user", "done")
+
+
+class ApplyRun(Base):
+    __tablename__ = "apply_runs"
+    __table_args__ = (UniqueConstraint("active_key", name="uq_apply_runs_active_key"),)
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    job_id = Column(String(36), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    job_key = Column(String(700), nullable=False)
+    company_title = Column(String(800), nullable=False)  # normalised "company|title" for the cooldown check
+    mode = Column(String(8), nullable=False)              # auto | fast
+    level = Column(Integer, nullable=False)
+    adapter = Column(String(16), nullable=False)          # greenhouse | lever | linkedin
+    apply_url = Column(Text, nullable=False)
+    state = Column(String(16), nullable=False, default="queued")
+    active_key = Column(String(800), nullable=True)       # "user|job_key" while active, else NULL
+    plan = Column(JSON, nullable=False, default=dict)     # {fields: [...], files: {...}}
+    resume_id = Column(String(36), ForeignKey("resumes.id", ondelete="SET NULL"), nullable=True)
+    pack_id = Column(String(36), ForeignKey("apply_packs.id", ondelete="SET NULL"), nullable=True)
+    application_id = Column(String(36), ForeignKey("applications.id", ondelete="SET NULL"), nullable=True)
+    message = Column(Text, nullable=True)                 # what the user should know / do next
+    error = Column(Text, nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    submitted_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_now, nullable=False)
+    updated_at = Column(DateTime, default=_now, onupdate=_now, nullable=False)
+
+
+class ApplyProof(Base):
+    """Screenshot of the page after submitting (or where the run stopped),
+    encrypted like resume files. Deleted after APPLY_PROOF_RETENTION_DAYS."""
+    __tablename__ = "apply_proofs"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    run_id = Column(String(36), ForeignKey("apply_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    kind = Column(String(16), nullable=False)             # confirmation | stopped
+    confirmation_text = Column(Text, nullable=True)
+    page_url = Column(Text, nullable=True)
+    wrapped_key = Column(Text, nullable=False)
+    ciphertext = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=_now, nullable=False, index=True)
+
+
+class ApplySettings(Base):
+    __tablename__ = "apply_settings"
+
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    level = Column(Integer, nullable=False, default=1)    # 1 assist (no auto submit) | 2 review & submit
+    risk_accepted_at = Column(DateTime, nullable=True)
+    hours_start = Column(Integer, nullable=False, default=8)
+    hours_end = Column(Integer, nullable=False, default=22)
+    timezone = Column(String(64), nullable=False, default="Asia/Kolkata")
+    paused = Column(Boolean, nullable=False, default=False)  # the user's own kill switch
+    updated_at = Column(DateTime, default=_now, onupdate=_now, nullable=False)

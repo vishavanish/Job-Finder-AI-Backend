@@ -24,6 +24,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
+      # The apply-engine tests drive Chromium against local form pages (tests/fixtures/apply).
+      - name: Install Chromium for Playwright
+        run: python -m playwright install --with-deps chromium
+
       # No secrets needed: tests/conftest.py points the app at a throwaway
       # SQLite DB (built by the Alembic migrations) and fakeredis.
       - name: Run tests

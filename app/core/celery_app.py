@@ -60,6 +60,11 @@ celery_app.conf.beat_schedule = {
         "schedule": float(settings.JOB_ALERT_TICK_SECONDS),
         "options": {"queue": settings.maintenance_queue, "expires": settings.JOB_ALERT_TICK_SECONDS},
     },
+    "purge-apply-proofs": {
+        "task": "job_finder.purge_apply_proofs",
+        "schedule": 24 * 3600.0,
+        "options": {"queue": settings.maintenance_queue, "expires": 3600},
+    },
 }
 
 import app.core.celery_tasks  # noqa: E402, F401

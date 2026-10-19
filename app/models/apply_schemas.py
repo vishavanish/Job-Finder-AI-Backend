@@ -88,3 +88,97 @@ class AnswerOut(BaseModel):
 class AnswerList(BaseModel):
     answers: list[AnswerOut]
     total: int
+
+
+# ---------------------------------------------------------------- P4b: apply runs and settings
+
+RunState = Literal["queued", "preparing", "awaiting_input", "awaiting_review", "submitting", "submitted", "failed",
+                   "cancelled", "needs_user", "done"]
+
+RISK_NOTICE = ("Auto apply fills and submits applications on company career sites (Greenhouse, Lever) for you, "
+               "only after you review and approve each one. Some sites limit automated applications, answers can "
+               "still be wrong, and a submitted application can't be taken back. You stay responsible for every "
+               "application sent in your name. LinkedIn applications are never submitted by the app.")
+
+
+class ApplySettingsIn(BaseModel):
+    level: Optional[int] = Field(None, ge=1, le=2, description="1 = Assist (nothing submitted), 2 = review & submit")
+    accept_risk_notice: Optional[bool] = None
+    hours_start: Optional[int] = Field(None, ge=0, le=23)
+    hours_end: Optional[int] = Field(None, ge=1, le=24)
+    timezone: Optional[str] = Field(None, max_length=64)
+    paused: Optional[bool] = Field(None, description="Your own off switch; pausing cancels active runs")
+
+
+class ApplySettingsOut(BaseModel):
+    level: int
+    max_level: int = Field(..., description="Highest level your account allows (set by an admin)")
+    risk_notice: str = RISK_NOTICE
+    risk_accepted_at: Optional[datetime] = None
+    hours_start: int
+    hours_end: int
+    timezone: str
+    paused: bool
+    usage_today: dict
+    caps: dict
+
+
+class RunIn(BaseModel):
+    job_id: str = Field(..., min_length=1, max_length=36)
+    mode: Literal["auto", "fast"] = "auto"
+
+
+class RunField(BaseModel):
+    key: str
+    label: str
+    type: str
+    options: list[str] = Field(default_factory=list)
+    required: bool
+    value: Optional[str] = None
+    source: str = Field(..., description="profile | eeo | answer_bank | ai | user | none")
+    approved: bool
+    needs_input: bool
+
+
+class RunOut(BaseModel):
+    id: str
+    job_id: str
+    title: str
+    company: str
+    mode: Literal["auto", "fast"]
+    level: int
+    adapter: str
+    apply_url: str
+    state: RunState
+    message: Optional[str] = None
+    fields: list[RunField] = Field(default_factory=list)
+    files: dict = Field(default_factory=dict, description="{field key: resume | cover_letter}")
+    resume_id: Optional[str] = None
+    pack_id: Optional[str] = None
+    application_id: Optional[str] = None
+    proofs: int = 0
+    approved_at: Optional[datetime] = None
+    submitted_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RunList(BaseModel):
+    runs: list[RunOut]
+    total: int
+
+
+class RunAnswers(BaseModel):
+    answers: dict[str, str] = Field(..., description="{field key: answer}", max_length=100)
+
+
+class RunDone(BaseModel):
+    submitted: bool = Field(True, description="false = you decided not to apply")
+
+
+class ProofOut(BaseModel):
+    id: str
+    kind: Literal["confirmation", "stopped"]
+    confirmation_text: Optional[str] = None
+    page_url: Optional[str] = None
+    created_at: datetime

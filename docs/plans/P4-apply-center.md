@@ -1,7 +1,8 @@
 # P4 — Apply Center: Manual, Fast, Auto and Email apply (draft for approval)
 
-Status: **approved 2026-10-19 (all ten recommended defaults). P4a built on `dev` — see CLAUDE.md 6.9. P4b not started.**
+Status: **approved 2026-10-19 (all ten recommended defaults). P4a built on `dev` — see CLAUDE.md 6.9. P4b built on `dev` — see CLAUDE.md 6.10.**
 P4a deviations: migration `0008` holds only what P4a needs (`jobs.apply_url`, `answer_bank`, `apply_packs`); `apply_runs`, `apply_proofs` and `apply_settings` come with P4b. The field mapper has no route of its own yet (the P4b engine calls it). Answer-bank matching needs 0.75 word overlap, not exact wording.
+P4b deviations: the `auto_apply` entitlement default stays max_level 1 (an admin raises it to 2 per user — safest default); forms with an "I am human" captcha checkbox are prepared but handed to the user; the plan's per-step tracker statuses use the run state names (queued, preparing, awaiting_input, awaiting_review, submitting, submitted, needs_user, cancelled).
 Inputs:
 - CLAUDE.md §7.7 (Apply Center), §7.2 (answer bank), §12 (automation ethics).
 - `../research/job-tools-research.md` §3 and §5 items 5–10.
