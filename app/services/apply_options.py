@@ -10,7 +10,8 @@ the feed, GET /jobs and the apply routes all give the same answer.
           link): fill the form, the user submits. Needs a browser on the
           user's own PC, so it is off in production until the local agent
           (P8) exists.
-  auto    Greenhouse / Lever pages — the level-2 engine arrives in P4b.
+  auto    Greenhouse / Lever pages: the level-2 engine (P4b). The engine's
+          own checks (level, risk notice, caps, duplicates) run on click.
   email   the job post itself gives an address to apply to.
 
 The adapter is detected from `apply_url` (the company's own page behind a
@@ -95,7 +96,8 @@ def options(job: dict) -> dict:
         fast = _opt(False, "Fast apply works on LinkedIn Easy Apply jobs.")
 
     if adapter in ("greenhouse", "lever"):
-        auto = _opt(False, f"Auto apply for {ADAPTER_NAMES[adapter]} jobs is coming with the apply engine.")
+        # Level, risk notice, caps and duplicates are checked when the run starts (apply_engine.create_run).
+        auto = _opt(True)
     elif adapter == "linkedin":
         auto = _opt(False, "LinkedIn jobs are never submitted automatically — use Fast apply.")
     else:

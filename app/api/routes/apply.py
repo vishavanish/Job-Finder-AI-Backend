@@ -190,9 +190,12 @@ def start_run(request: Request, body: RunIn, user=Depends(require_feature("auto_
 
 
 @router.get("/runs", response_model=RunList)
-def list_runs(state: str | None = None, limit: int = 50, offset: int = 0, user=Depends(get_current_user),
-              db: Session = Depends(get_db)):
+def list_runs(state: str | None = None, job_id: str | None = None, limit: int = 50, offset: int = 0,
+              user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """state: a run state, or `waiting` (needs you). job_id: the runs for one job (newest first)."""
     q = db.query(ApplyRun).filter(ApplyRun.user_id == user.id)
+    if job_id:
+        q = q.filter(ApplyRun.job_id == job_id)
     if state == "waiting":
         q = q.filter(ApplyRun.state.in_(WAITING))
     elif state:
