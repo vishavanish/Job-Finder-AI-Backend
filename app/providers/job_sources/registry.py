@@ -14,6 +14,7 @@ Kinds:
   feed     whole job feed, cached and filtered per keyword (feeds.py)
   manual   jobs the user pasted in (Naukri)
   apify    paid Apify actor (naukri_apify; driven by enable_naukri_apify)
+  inbox    jobs parsed from the user's own job-alert emails (P5; needs Gmail connected)
 
 `user_key_only`: never run on a shared platform/.env key in production —
 each user spends their own free quota (owner decision 2026-10-16).
@@ -58,6 +59,7 @@ SOURCES: dict[str, SourceSpec] = {s.key: s for s in [
     SourceSpec("wwr", "We Work Remotely", "feed"),
     SourceSpec("hn_hiring", "HN Who is hiring", "feed"),
     SourceSpec("naukri", "Naukri", "manual"),
+    SourceSpec("email_alerts", "Job alert emails", "inbox"),
     SourceSpec("naukri_apify", "Naukri", "apify", key_scopes=("apify",)),
 ]}
 

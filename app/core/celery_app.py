@@ -52,13 +52,23 @@ if settings.REDIS_URL.startswith("rediss://"):
     celery_app.conf.broker_use_ssl = _ssl_opts
     celery_app.conf.redis_backend_use_ssl = _ssl_opts
 
-# Celery beat (run ONE beat process): job alerts tick (P3.2). Later phases add
-# Gmail polling (P5) and the ATS crawler (P6) here.
+# Celery beat (run ONE beat process): job alerts tick (P3.2), Gmail sync tick and
+# email retention (P5), apply-proof retention (P4b). The ATS crawler (P6) comes later.
 celery_app.conf.beat_schedule = {
     "job-alerts-tick": {
         "task": "job_finder.alerts_tick",
         "schedule": float(settings.JOB_ALERT_TICK_SECONDS),
         "options": {"queue": settings.maintenance_queue, "expires": settings.JOB_ALERT_TICK_SECONDS},
+    },
+    "gmail-tick": {
+        "task": "job_finder.gmail_tick",
+        "schedule": float(settings.GMAIL_TICK_SECONDS),
+        "options": {"queue": settings.maintenance_queue, "expires": settings.GMAIL_TICK_SECONDS},
+    },
+    "purge-email-data": {
+        "task": "job_finder.purge_email_data",
+        "schedule": 24 * 3600.0,
+        "options": {"queue": settings.maintenance_queue, "expires": 3600},
     },
     "purge-apply-proofs": {
         "task": "job_finder.purge_apply_proofs",

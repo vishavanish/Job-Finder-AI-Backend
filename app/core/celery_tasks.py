@@ -88,6 +88,14 @@ def _score_one_job_llm(job: dict, *, db, score_params: dict, request_keys: dict[
     )
 
 
+def _inbox_jobs(db, user_id: str | None, sources: list[str], search_params: dict) -> list[dict]:
+    """The user's job-alert email jobs (P5), only when that source runs."""
+    if not user_id or "email_alerts" not in sources:
+        return []
+    from app.services import email_sync
+    return email_sync.recent_alert_jobs(db, user_id, search_params.get("max_age_hours", 24))
+
+
 def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str], sources: list[str],
             manual_naukri_jobs: list, progress) -> list[dict]:
     """job_sources.scrape_all with the params a route built, plus source
@@ -121,6 +129,7 @@ def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str
         linkedin_retry_delay_sec=search_params.get("linkedin_retry_delay_sec", 30),
         enable_naukri_auto=search_params.get("enable_naukri_auto", False),
         manual_naukri_jobs=manual_naukri_jobs,
+        inbox_jobs=_inbox_jobs(db, user_id, sources, search_params),
         enable_naukri_apify=naukri_apify,
         apify_naukri_actor_id=search_params.get("apify_naukri_actor_id", ""),
         apify_api_token=_apify_token(db, search_params) if naukri_apify else "",
@@ -530,6 +539,45 @@ def purge_apply_proofs_task() -> dict:
     db = SessionLocal()
     try:
         return {"deleted": apply_engine.purge_old_proofs(db)}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="job_finder.gmail_tick")
+def gmail_tick_task() -> dict:
+    """Beat (P5): claims Gmail accounts that are due and queues one sync each on the email queue."""
+    from app.services import email_sync
+
+    db = SessionLocal()
+    try:
+        claimed = email_sync.claim_due(db)
+    finally:
+        db.close()
+    for account_id in claimed:
+        sync_gmail_account_task.apply_async(args=[account_id], queue=get_settings().email_queue)
+    return {"queued": len(claimed)}
+
+
+@celery_app.task(name="job_finder.sync_gmail_account")
+def sync_gmail_account_task(account_id: str) -> dict:
+    """Reads new mail for one Gmail account: replies update applications, job alerts become jobs (P5)."""
+    from app.services import email_sync
+
+    db = SessionLocal()
+    try:
+        return email_sync.sync_account(db, account_id)
+    finally:
+        db.close()
+
+
+@celery_app.task(name="job_finder.purge_email_data")
+def purge_email_data_task() -> dict:
+    """Deletes email events older than EMAIL_EVENT_RETENTION_DAYS and alert jobs older than EMAIL_JOBS_RETENTION_DAYS."""
+    from app.services import email_sync
+
+    db = SessionLocal()
+    try:
+        return email_sync.purge_old(db)
     finally:
         db.close()
 

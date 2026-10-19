@@ -28,6 +28,8 @@ def record_status(
     status: str,
     status_source: str = "browser_apply",
     note: str | None = None,
+    email_event_id: str | None = None,
+    email_snippet: str | None = None,
 ) -> Application:
     """Upserts the current-state row for this user's job and appends an
     immutable history event in the same transaction. The row is found by
@@ -75,6 +77,8 @@ def record_status(
             )
             db.add(row)
 
+        if email_snippet is not None:
+            row.last_email_snippet = email_snippet[:300]
         db.flush()  # ensures row.id exists before the event references it
 
         db.add(ApplicationStatusEvent(
@@ -82,6 +86,7 @@ def record_status(
             status=status,
             status_source=status_source,
             note=note,
+            email_event_id=email_event_id,
         ))
         db.commit()
         db.refresh(row)

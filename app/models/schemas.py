@@ -319,7 +319,9 @@ class ApplicationLogResult(BaseModel):
 
 
 class ApplicationStatusUpdate(BaseModel):
-    status: Literal["opened", "submitted", "interview", "rejected", "offer", "ghosted"]
+    """The status model of CLAUDE.md 7.8 (P5: the full list)."""
+    status: Literal["opened", "submitted", "emailed", "acknowledged", "assessment", "interview", "offer", "accepted",
+                    "declined", "rejected", "withdrawn", "ghosted"]
     
     
  # ============================================================
