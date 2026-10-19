@@ -1,0 +1,37 @@
+<!doctype html>
+<!-- Local stand-in for a Lever /apply page (layout modelled on jobs.lever.co:
+     li.application-question with div.application-label, cards[...] custom
+     questions, eeo[...] selects, #btn-submit). Submitting only changes this page.
+     ?hcaptcha=1 adds an "I am human" checkbox widget like the live Lever forms. -->
+<html>
+<head><meta charset="utf-8"><title>Orbit Labs - Platform Engineer</title></head>
+<body>
+<form id="application-form">
+  <ul>
+    <li class="application-question"><div class="application-label">Resume/CV ✱</div><input type="file" name="resume" id="resume-upload-input" required></li>
+    <li class="application-question"><div class="application-label">Full name ✱</div><input type="text" name="name" required></li>
+    <li class="application-question"><div class="application-label">Email ✱</div><input type="email" name="email" required></li>
+    <li class="application-question"><div class="application-label">Phone</div><input type="text" name="phone"></li>
+    <li class="application-question"><div class="application-label">Current company</div><input type="text" name="org"></li>
+    <li class="application-question"><div class="application-label">LinkedIn URL</div><input type="text" name="urls[LinkedIn]"></li>
+    <li class="application-question"><div class="application-label">What is your notice period? ✱</div><input type="text" name="cards[abc][field0]" required></li>
+    <li class="application-question"><div class="application-label">Additional information</div><textarea name="comments"></textarea></li>
+    <li class="application-question"><div class="application-label">Pronouns</div>
+      <select name="eeo[pronouns]"><option value="">Select ...</option><option>She/her</option><option>He/him</option><option>Prefer not to say</option></select></li>
+  </ul>
+  <button type="submit" id="btn-submit">Submit application</button>
+</form>
+<script>
+  if (new URLSearchParams(location.search).get('hcaptcha')) {  // the "I am human" checkbox many Lever forms show
+    const f = document.createElement('iframe');
+    f.title = 'Widget containing checkbox for hCaptcha security challenge'; f.width = 300; f.height = 78;
+    document.getElementById('application-form').appendChild(f);
+  }
+  document.getElementById('application-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    window.__submitted = Object.fromEntries([...new FormData(e.target)].map(([k, v]) => [k, v instanceof File ? v.name : v]));
+    document.body.innerHTML = '<div class="thanks"><h3>Application submitted!</h3><p>Thanks for applying to Orbit Labs.</p></div>';
+  });
+</script>
+</body>
+</html>

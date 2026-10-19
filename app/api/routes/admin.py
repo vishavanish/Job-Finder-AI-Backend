@@ -181,6 +181,11 @@ def set_flag(key: str, req: FlagUpdate, request: Request, actor=Depends(admin_on
     audit.record(db, actor_id=actor.id, action="flag.set", target_type="flag", target_id=key,
                  before={"value": before}, after={"value": after}, request=request)
     db.commit()
+    if key == "auto_apply_enabled" and after is False:  # global kill switch: stop every active apply run
+        from app.models.apply import RUN_ACTIVE_STATES, ApplyRun
+        from app.services import apply_engine
+        for (user_id,) in db.query(ApplyRun.user_id).filter(ApplyRun.state.in_(RUN_ACTIVE_STATES)).distinct():
+            apply_engine.cancel_active_runs(db, user_id, reason="Auto apply was turned off by the admin.")
     return feature_flags.all_flags(db)
 
 

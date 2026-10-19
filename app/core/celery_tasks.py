@@ -494,6 +494,46 @@ def pipeline_task(self, search_params: dict, score_params: dict, apply_params: d
         "apply_result": apply_result,
     }
 
+def _engine_step(step: str, run_id: str) -> dict:
+    """Runs apply_engine.prepare/submit in a fresh thread with its own DB
+    session (Playwright's sync API can't run inside an event loop)."""
+    from app.services import apply_engine
+
+    def work() -> dict:
+        db = SessionLocal()
+        try:
+            run = getattr(apply_engine, step)(db, run_id)
+            return {"run_id": run_id, "state": run.state if run is not None else "missing"}
+        finally:
+            db.close()
+
+    return apply_engine.run_isolated(work)
+
+
+@celery_app.task(name="job_finder.apply_prepare")
+def apply_prepare_task(run_id: str) -> dict:
+    """Apply engine step 1 (P4b): open the form, answer it, stop for the user."""
+    return _engine_step("prepare", run_id)
+
+
+@celery_app.task(name="job_finder.apply_submit")
+def apply_submit_task(run_id: str) -> dict:
+    """Apply engine step 2 (P4b): fill the approved answers and submit."""
+    return _engine_step("submit", run_id)
+
+
+@celery_app.task(name="job_finder.purge_apply_proofs")
+def purge_apply_proofs_task() -> dict:
+    """Deletes proof screenshots older than APPLY_PROOF_RETENTION_DAYS."""
+    from app.services import apply_engine
+
+    db = SessionLocal()
+    try:
+        return {"deleted": apply_engine.purge_old_proofs(db)}
+    finally:
+        db.close()
+
+
 @celery_app.task(name="job_finder.build_apply_pack")
 def build_apply_pack_task(pack_id: str, user_id: str) -> dict:
     """Builds one prep pack (P4a): tailored resume + cover letter + email

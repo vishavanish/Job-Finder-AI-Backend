@@ -153,6 +153,17 @@ class Settings(BaseSettings):
     # ---- apply center (P4a) ----
     RATE_LIMIT_APPLY_PREP: str = "30/hour"   # prep packs (tailored resume + cover letter)
     ANSWER_BANK_MAX_PER_USER: int = 500
+    # ---- apply engine (P4b) ----
+    APPLY_DAILY_CAP: int = 20                # auto submits per user per day
+    APPLY_PLATFORM_DAILY_CAP: int = 15       # per adapter (greenhouse / lever) per user per day
+    FAST_APPLY_DAILY_CAP: int = 25           # LinkedIn Fast apply prefills per user per day
+    APPLY_COMPANY_COOLDOWN_DAYS: int = 30    # one application per company + title in this window
+    APPLY_MIN_GAP_SECONDS: int = 30          # random gap between two submits on the same platform
+    APPLY_MAX_GAP_SECONDS: int = 90
+    APPLY_PROOF_RETENTION_DAYS: int = 90
+    APPLY_HEADLESS: bool = True              # auto runs; Fast apply always opens a visible browser
+    APPLY_PAGE_TIMEOUT_SECONDS: int = 45
+    RATE_LIMIT_APPLY_RUNS: str = "30/hour"
     # ---- app / infra ----
     APP_NAME: str = "Job Finder API"
     APP_PUBLIC_URL: str = ""  # frontend URL, used in emails (e.g. alert digests)

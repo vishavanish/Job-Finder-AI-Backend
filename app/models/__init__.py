@@ -15,4 +15,4 @@ from app.models.ai import (  # noqa: F401
 from app.models.profile import JobPreference, Profile, Resume, ResumeFile, SearchProfile  # noqa: F401
 from app.models.jobs import Job, JobSourceSeen, UserJob  # noqa: F401
 from app.models.alerts import JobAlert, JobAlertRun  # noqa: F401
-from app.models.apply import AnswerBankEntry, ApplyPack  # noqa: F401
+from app.models.apply import AnswerBankEntry, ApplyPack, ApplyProof, ApplyRun, ApplySettings  # noqa: F401

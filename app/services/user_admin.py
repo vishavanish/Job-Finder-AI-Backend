@@ -151,6 +151,9 @@ def set_active(db: Session, actor: User, target: User, active: bool, request: Re
     if not active:
         sessions.revoke_all_sessions(target)
         after["cancelled"] = _cancel_running_work(target.id)
+        from app.services import apply_engine
+        after["cancelled"]["apply_runs_cancelled"] = apply_engine.cancel_active_runs(
+            db, target.id, reason="Your account was disabled.")
 
     audit.record(db, actor_id=actor.id, action="user.enable" if active else "user.disable",
                  target_type="user", target_id=target.id, before=before, after=after, request=request)

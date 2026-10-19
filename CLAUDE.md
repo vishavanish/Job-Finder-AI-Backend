@@ -374,6 +374,30 @@ Plan: `docs/plans/P4-apply-center.md` (all ten owner decisions approved 2026-10-
 - New env (optional): `RATE_LIMIT_APPLY_PREP` (30/hour), `ANSWER_BANK_MAX_PER_USER` (500).
 - Admins can pick models for the `resume_tailor`, `cover_letter` and `form_answer` tasks; otherwise the normal chain is used.
 
+### 6.10 Phase 4b status — apply engine (branch `dev`)
+
+Plan: `docs/plans/P4-apply-center.md` §3.1, §3.3, §3.6, §3.7.
+
+| Item | State |
+|------|-------|
+| Runs | ✅ `apply_runs` + `services/apply_engine.py`: `queued → preparing → awaiting_input ⇄ awaiting_review → submitting → submitted`, or `needs_user` / `failed` / `cancelled` / `done`. One active run per job (`active_key` unique). Every step goes to the tracker via `record_status(status_source="apply_engine")`. Celery tasks `apply_prepare` / `apply_submit` on the **apply** queue, each in a fresh thread (Playwright sync API). The browser is not kept between steps: the form is read again and matched by field id/name. |
+| Level 2 (auto) | ✅ Greenhouse + Lever only, headless (`APPLY_HEADLESS`). Prepare answers every field through `answer_bank.answer_fields`; the resume (tailored from the prep pack when it has one) and cover letter are uploaded to the matching file fields. Nothing is submitted until `POST /apply/runs/{id}/approve`; approving also approves the AI drafts the run used. Needs entitlement `auto_apply` **max_level 2** (default stays 1, so an admin must raise it), the user's level 2 and the accepted risk notice (`/apply/settings`). |
+| Fast apply | ✅ `mode: "fast"`: LinkedIn Easy Apply first step filled in a visible browser with the user's own profile dir (`BROWSER_PROFILE_DIR/<user_id>`), never submitted, ends `needs_user`; refused in production. |
+| Adapters & forms | ✅ `app/apply/adapters.py` (Greenhouse incl. company pages with the embed iframe, Lever `/apply`, LinkedIn fill-only) + `app/apply/forms.py` (reads text/select/radio/checkbox/combobox/file controls with their question labels; fills by key). Live-checked read-only 2026-10-19 on a GitLab (Greenhouse) and a Palantir (Lever) form: fields, options, required flags and EEO questions read correctly. |
+| Hard stops | ✅ login wall, a visible captcha challenge, an "I am human" checkbox (answers still prepared to copy), a required file we can't provide, a form that changed since review, fill errors, an unclear result → `needs_user` with a screenshot. Never worked around or retried. `POST /apply/runs/{id}/done` records what the user did. |
+| Caps & safety | ✅ `APPLY_DAILY_CAP` 20, `APPLY_PLATFORM_DAILY_CAP` 15, `FAST_APPLY_DAILY_CAP` 25, one application per company + title per `APPLY_COMPANY_COOLDOWN_DAYS` 30, never the same job twice, the user's apply hours (default 08–22 Asia/Kolkata), 30–90 s between submits per platform (Redis slot). Checked at start, approve and submit. Global `auto_apply_enabled` off, the user's pause and disabling a user cancel active runs. EEO answers are sealed in the run plan and stay out of the answer bank. |
+| Proof | ✅ `apply_proofs`: PNG screenshot (confirmation, or where the run stopped), envelope-encrypted; `GET /apply/runs/{id}/proofs[/{id}]`; deleted after `APPLY_PROOF_RETENTION_DAYS` 90 by the daily `purge_apply_proofs` beat task (maintenance queue). |
+| Deprecated | `POST /apply` (kept one release; use `/apply/runs`). |
+| Tests | ✅ 238 total (18 for P4b): engine with a fake adapter, plus real Chromium on local Greenhouse/Lever pages (`tests/fixtures/apply/`). CI installs Chromium. |
+| Not in P4b | Workday / Ashby / SmartRecruiters adapters, level 3 full auto, the local apply agent for LinkedIn (P8); the Apply Center screens (frontend F4); Gmail drafts for Email apply (P5). |
+
+**Operational changes introduced in P4b**
+- Migration `0009` (run `alembic upgrade head`).
+- Workers on the **apply** queue need Chromium: `python -m playwright install --with-deps chromium` on the Oracle VM.
+- Beat now also runs `purge_apply_proofs` daily.
+- To let a user auto apply: raise their `auto_apply` entitlement to `max_level: 2` (admin), then the user accepts the risk notice and picks level 2 in Apply settings.
+- New env (optional): `APPLY_DAILY_CAP`, `APPLY_PLATFORM_DAILY_CAP`, `FAST_APPLY_DAILY_CAP`, `APPLY_COMPANY_COOLDOWN_DAYS`, `APPLY_MIN_GAP_SECONDS` / `APPLY_MAX_GAP_SECONDS` (30/90), `APPLY_PROOF_RETENTION_DAYS`, `APPLY_HEADLESS` (true), `APPLY_PAGE_TIMEOUT_SECONDS` (45), `RATE_LIMIT_APPLY_RUNS` (30/hour).
+
 ---
 
 ## 7. Modules in detail
@@ -796,7 +820,9 @@ All tables have `id`, `created_at`, `updated_at`. User-owned tables have `user_i
 | `user_jobs` | user_id, job_id, keyword_score, llm_score, reason, state (`new/seen/saved/hidden/applied`) |
 | `applications` | user_id, job_id, job_key, job_url, title, company, source, status, status_source, resume_id, applied_at |
 | `application_events` | application_id, status, status_source, note, payload, occurred_at |
-| `apply_runs` | application_id, level, adapter, state, needs_input (JSON), screenshot_key, error, started/finished |
+| `apply_runs` | user_id, job_id, job_key, company_title, mode (auto/fast), level, adapter, apply_url, state, active_key (unique while active), plan (fields + answers, EEO sealed), resume/pack/application ids, message, approved/submitted_at (P4b) |
+| `apply_proofs` | run_id, kind (confirmation/stopped), confirmation_text, page_url, encrypted PNG; 90-day retention (P4b) |
+| `apply_settings` | user_id, level, risk_accepted_at, hours_start/end, timezone, paused (P4b) |
 | `answer_bank` | user_id, question_hash, question, answer, field_type, approved, origin (user/ai), uses |
 | `apply_packs` | user_id, job_id, master_resume_id + master_hash, status, tailored_resume_id, cover_letter, email draft, dropped (P4a) |
 | `email_accounts` | user_id, gmail_address, encrypted_token, last_history_id, enabled |
@@ -832,7 +858,7 @@ All routes are already served under `/api/v1` (`settings.API_V1_PREFIX`); new ro
 | Jobs | `POST /pipeline/run/stream`, `GET /pipeline/{run_id}`, `GET /pipeline/{run_id}/jobs`, `POST /pipeline/{run_id}/cancel` (F3), `GET /jobs?state=`, `POST /jobs/{id}/save|hide|seen` |
 | Alerts | `GET/POST /alerts`, `PUT/DELETE /alerts/{id}`, `POST /alerts/{id}/run-now`, `GET /alerts/{id}/runs`, `GET /alerts/runs/{run_id}/jobs` |
 | ATS | `POST /ats/discover` (job title), `GET /ats/companies`, `POST /company-ats/fetch` (existing) |
-| Apply | `POST /apply` (existing), `GET /apply/options/{job_id}`, `POST /apply/prep`, `GET /apply/prep/{id}` (P4a), `GET/POST/PUT/DELETE /answer-bank`, `POST /answer-bank/{id}/approve` (P4a), `GET /apply/runs`, `POST /apply/runs/{id}/answer`, `POST /apply/runs/{id}/approve`, `POST /apply/runs/{id}/cancel`, `POST /applications/manual` (built for F3: `{job_id, via}` → `submitted` (or `emailed` with `via: "email"`, P4a) / `manual` + job state `applied`) |
+| Apply | `POST /apply` (existing), `GET /apply/options/{job_id}`, `POST /apply/prep`, `GET /apply/prep/{id}` (P4a), `GET/POST/PUT/DELETE /answer-bank`, `POST /answer-bank/{id}/approve` (P4a), `GET/PUT /apply/settings`, `POST /apply/runs`, `GET /apply/runs?state=waiting`, `GET /apply/runs/{id}`, `POST /apply/runs/{id}/answer`, `POST /apply/runs/{id}/approve`, `POST /apply/runs/{id}/cancel`, `POST /apply/runs/{id}/done`, `GET /apply/runs/{id}/proofs[/{proof_id}]` (P4b), `POST /applications/manual` (built for F3: `{job_id, via}` → `submitted` (or `emailed` with `via: "email"`, P4a) / `manual` + job state `applied`) |
 | Tracker | `GET /applications`, `GET/PATCH /applications/{id}`, `GET /applications/{id}/events`, `GET /applications/stats` |
 | Gmail | `GET /gmail/connect`, `GET /gmail/callback`, `GET /gmail/accounts`, `DELETE /gmail/accounts/{id}`, `GET /gmail/review`, `POST /gmail/review/{id}/resolve` |
 | Voice | `POST /voice/sessions`, `WS /voice/sessions/{id}/stream` (mock), `WS /voice/copilot/{id}/stream` (live), `POST /voice/copilot/{id}/expand`, `GET /voice/sessions/{id}/feedback`, `GET /voice/history`, `DELETE /voice/sessions/{id}`, `GET/POST /story-bank` |
@@ -848,9 +874,9 @@ Conventions: Pydantic request/response models for every route, consistent error 
 | Queue | Tasks | Notes |
 |-------|-------|-------|
 | `default` | search, score, ats fetch, pipeline fan-out, resume parse | Multiple workers fine |
-| `apply` | Playwright apply runs | Low concurrency; one browser per run; memory-limited |
+| `apply` | Playwright apply runs: `apply_prepare`, `apply_submit` (P4b) | Low concurrency; one browser per run; memory-limited; needs Chromium installed |
 | `email` | Gmail polling per account | Celery beat schedule; idempotent |
-| `maintenance` | Job-alerts tick (P3.2); later ATS crawler/refresh, retention cleanup, provider health checks, usage rollups | Beat schedule (one beat process) |
+| `maintenance` | Job-alerts tick (P3.2); apply-proof retention cleanup (P4b); later ATS crawler/refresh, other retention cleanup, provider health checks, usage rollups | Beat schedule (one beat process) |
 
 Rules: tasks are idempotent; every task receives `user_id`; secrets are resolved by `key_ref` inside the worker; progress is reported with `update_state(state="PROGRESS")`; worker `-Q` lists **must** match `settings.*_queue` names; set `acks_late` and sensible `time_limit`/`soft_time_limit` per queue.
 
