@@ -1,14 +1,12 @@
 """
 app/services/scorer.py
 ------------------------
-Ported from scorer.py. Candidate profile (resume/skills/career targets),
-thresholds, model names, and even API keys can all be overridden per
-request; if a request doesn't supply an API key, it falls back to the
-server's env-configured key (app.core.config.Settings).
-
-LLM RANKING FALLBACK CHAIN: Gemini -> Groq (openai/gpt-oss-120b) -> HF/Qwen3-8B.
-Each stage only runs if its API key is present AND the previous stage
-didn't already return a successfully parsed set of scores.
+Keyword prefilter, then LLM job-fit scoring. Which model scores is decided
+by the AI router (app/services/ai_router.py, CLAUDE.md 7.9): the user's
+choice for the "score" task, the admin default, then the registry's
+priority order (seeded as Gemini -> Groq -> Hugging Face, the old fixed
+chain). A reply that can't be parsed counts as a failed call, so the
+router moves on to the next model.
 """
 from __future__ import annotations
 
@@ -16,10 +14,17 @@ import json
 import re
 from typing import Callable
 import logging
-from huggingface_hub import InferenceClient
-from groq import Groq
+
+from sqlalchemy.orm import Session
+
+from app.services import ai_router
+from app.services.source_info import has_partial_description
+
 logger = logging.getLogger("job_finder_api.scorer")
 NoOpProgress: Callable[[str], None] = lambda msg: None
+
+SENIORITY_VALUES = ("match", "stretch", "overqualified")
+SINGLE_JOB_MAX_TOKENS = 3000
 
 LLM_SYSTEM_PROMPT_TEMPLATE = """You are an expert technical recruiter evaluating job fit.
 
@@ -46,10 +51,15 @@ LLM_SYSTEM_PROMPT_TEMPLATE = """You are an expert technical recruiter evaluating
         - Be realistic about seniority.
         - Do not invent candidate experience.
         - Keep the reason to ONE sentence.
+        - "seniority": "match", "stretch" (the role is more senior than the candidate) or
+          "overqualified" (the role is clearly junior for the candidate).
+        - "missing_required": up to 3 skills the job clearly REQUIRES that the résumé does not show
+          (an empty list if none). Never list optional or nice-to-have skills.
 
     Return ONLY valid JSON, no markdown, no explanation outside the JSON.
     Required format:
-    [{{"index": 0, "score": 87, "reason": "Strong FastAPI and LangGraph overlap with relevant backend responsibilities."}}]
+    [{{"index": 0, "score": 87, "reason": "Strong FastAPI and LangGraph overlap with relevant backend responsibilities.",
+       "seniority": "match", "missing_required": ["Kubernetes"]}}]
 """
 
 
@@ -83,25 +93,50 @@ def _build_user_prompt(jobs: list[dict], resume_summary: str) -> str:
     batch_desc = []
     for i, job in enumerate(jobs):
         snippet = (job.get("description", "") or "")[:1200]
+        label = ("Description (short snippet from a job aggregator; judge mainly on the title and the details "
+                 "given, and do not penalise details that are missing)"
+                 if has_partial_description(job.get("source")) else "Description")
         batch_desc.append(
             f"Index: {i}\nTitle: {job.get('title', '')}\n"
             f"Company: {job.get('company', '')}\nSource: {job.get('source', '')}\n"
-            f"Description:\n{snippet}\n"
+            f"{label}:\n{snippet}\n"
         )
     return f"CANDIDATE RESUME SUMMARY:\n{resume_summary}\n\nJOB POSTINGS:\n" + "\n".join(batch_desc)
 
 
+def _score_entries(parsed) -> list | None:
+    """The list of {index, score, reason} entries, or None. Accepts a bare
+    list or an object wrapping one (some models add a top-level key)."""
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        for value in parsed.values():
+            if isinstance(value, list):
+                return value
+        if "index" in parsed:
+            return [parsed]
+    return None
+
+
 def _parse_and_apply_scores(raw_text: str, jobs: list[dict], progress: Callable[[str], None]) -> bool:
+    """Applies the model's scores to `jobs`. True only if at least one job
+    got a score, so a reply the router can't use counts as a failed call
+    and the next model is tried."""
     cleaned = re.sub(r"^```(?:json)?\s*", "", raw_text.strip(), flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*```$", "", cleaned).strip()
 
     try:
-        scores = json.loads(cleaned)
+        entries = _score_entries(json.loads(cleaned))
     except json.JSONDecodeError:
+        entries = None
+    if entries is None:
         progress("could not parse LLM response as JSON")
         return False
 
-    for entry in scores:
+    applied = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
         idx = entry.get("index")
         if idx is None or not isinstance(idx, int) or idx < 0 or idx >= len(jobs):
             continue
@@ -110,166 +145,63 @@ def _parse_and_apply_scores(raw_text: str, jobs: list[dict], progress: Callable[
         except (TypeError, ValueError):
             score = 0
         jobs[idx]["llm_score"] = max(0, min(100, score))
-        jobs[idx]["llm_reason"] = entry.get("reason", "")
-    return True
+        jobs[idx]["llm_reason"] = str(entry.get("reason", ""))[:500]
+        # Optional extras (P3.2): a model that leaves them out still produces a valid score.
+        if entry.get("seniority") in SENIORITY_VALUES:
+            jobs[idx]["llm_seniority"] = entry["seniority"]
+        missing = entry.get("missing_required")
+        if isinstance(missing, list):
+            jobs[idx]["llm_missing"] = [str(m).strip()[:60] for m in missing if str(m).strip()][:3]
+        applied += 1
+    return applied > 0
 
 
-def _rank_with_gemini(
-    jobs: list[dict], *, resume_summary: str, career_targets: list[str],
-    gemini_model: str, gemini_api_key: str, progress: Callable[[str], None],
-) -> bool:
-    if not gemini_api_key:
-        return False
+def _system_prompt(career_targets: list[str]) -> str:
+    return LLM_SYSTEM_PROMPT_TEMPLATE.format(career_targets="\n        ".join(f"- {t}" for t in career_targets))
+
+
+def _rank_via_router(
+    db: Session, jobs: list[dict], *, user_id: str | None, resume_summary: str, career_targets: list[str],
+    request_keys: dict[str, str] | None, ref: str | None, max_tokens: int, progress: Callable[[str], None],
+) -> str | None:
+    """Scores `jobs` in place with the first model that answers usefully.
+    Returns the engine used ("provider:model"), or None if none could."""
     try:
-        from google import genai
-    except ImportError:
-        progress("google-genai not installed — skipping Gemini, using Groq/HF only")
-        return False
-
-    client = genai.Client(api_key=gemini_api_key)
-    system_prompt = LLM_SYSTEM_PROMPT_TEMPLATE.format(
-        career_targets="\n        ".join(f"- {t}" for t in career_targets)
-    )
-
-    progress(f"trying Gemini ({gemini_model}) for {len(jobs)} jobs")
-    try:
-        response = client.models.generate_content(
-            model=gemini_model,
-            contents=_build_user_prompt(jobs, resume_summary),
-            config={
-                "system_instruction": system_prompt,
-                "temperature": 0.1,
-                "response_mime_type": "application/json",
-            },
+        result = ai_router.complete(
+            db, user_id=user_id, task="score", system=_system_prompt(career_targets),
+            user_prompt=_build_user_prompt(jobs, resume_summary), json_mode=True, max_tokens=max_tokens,
+            ref=ref, request_keys=request_keys,
+            validate=lambda text: _parse_and_apply_scores(text, jobs, progress),
+            progress=progress,
         )
-        raw_text = response.text or ""
-    except Exception as e:  # noqa: BLE001
-        progress(f"Gemini call failed ({e}) — falling back to Groq/HF")
-        return False
-
-    if not raw_text.strip():
-        progress("Gemini returned an empty response — falling back to Groq/HF")
-        return False
-
-    ok = _parse_and_apply_scores(raw_text, jobs, progress)
-    if ok:
-        progress("Gemini ranking succeeded")
-    return ok
-
-
-def _rank_with_groq(
-    jobs: list[dict], *, resume_summary: str, career_targets: list[str],
-    groq_model: str, groq_api_key: str, progress: Callable[[str], None],
-) -> bool:
-    if not groq_api_key:
-        return False
-
-    client = Groq(api_key=groq_api_key)
-    system_prompt = LLM_SYSTEM_PROMPT_TEMPLATE.format(
-        career_targets="\n        ".join(f"- {t}" for t in career_targets)
-    )
-
-    progress(f"trying Groq ({groq_model}) for {len(jobs)} jobs")
-    try:
-        response = client.chat.completions.create(
-            model=groq_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": _build_user_prompt(jobs, resume_summary)},
-            ],
-            temperature=0.1,
-        )
-        raw_text = response.choices[0].message.content or ""
-    except Exception as e:  # noqa: BLE001
-        progress(f"Groq call failed ({e}) — falling back to HF")
-        return False
-
-    if not raw_text.strip():
-        progress("Groq returned an empty response — falling back to HF")
-        return False
-
-    ok = _parse_and_apply_scores(raw_text, jobs, progress)
-    if ok:
-        progress("Groq ranking succeeded")
-    return ok
-
-
-def _rank_with_hf(
-    jobs: list[dict], *, resume_summary: str, career_targets: list[str],
-    hf_model: str, hf_api_key: str, progress: Callable[[str], None],
-) -> bool:
-    if not hf_api_key:
-        progress("no HF_API_KEY available — cannot use Qwen/HF fallback")
-        return False
-
-    hf_client = InferenceClient(api_key=hf_api_key)
-    system_prompt = LLM_SYSTEM_PROMPT_TEMPLATE.format(
-        career_targets="\n        ".join(f"- {t}" for t in career_targets)
-    )
-
-    progress(f"sending {len(jobs)} jobs to {hf_model} (Hugging Face) for ranking")
-    try:
-        response = hf_client.chat_completion(
-            model=hf_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": _build_user_prompt(jobs, resume_summary)},
-            ],
-            max_tokens=2000,
-            temperature=0.1,
-        )
-        raw_text = response.choices[0].message.content.strip()
-    except Exception as e:  # noqa: BLE001
-        progress(f"Hugging Face inference error: {e}")
-        return False
-
-    ok = _parse_and_apply_scores(raw_text, jobs, progress)
-    if ok:
-        progress("Qwen/HF ranking succeeded")
-    return ok
+    except ai_router.NoModelAvailable as e:
+        progress(str(e))
+        return None
+    progress(f"{result.model.display_name} ranking succeeded")
+    return result.engine
 
 
 def llm_rank(
+    db: Session,
     jobs: list[dict],
     *,
+    user_id: str | None,
     resume_summary: str,
     career_targets: list[str],
     llm_min_score_to_keep: float,
-    gemini_model: str,
-    groq_model: str,
-    hf_model: str,
-    gemini_api_key: str,
-    groq_api_key: str,
-    hf_api_key: str,
+    request_keys: dict[str, str] | None = None,
+    ref: str | None = None,
     progress: Callable[[str], None] = NoOpProgress,
 ) -> tuple[list[dict], str | None]:
     if not jobs:
         return [], None
 
-    engine_used = None
-    succeeded = _rank_with_gemini(
-        jobs, resume_summary=resume_summary, career_targets=career_targets,
-        gemini_model=gemini_model, gemini_api_key=gemini_api_key, progress=progress,
+    engine_used = _rank_via_router(
+        db, jobs, user_id=user_id, resume_summary=resume_summary, career_targets=career_targets,
+        request_keys=request_keys, ref=ref, max_tokens=4000, progress=progress,
     )
-    if succeeded:
-        engine_used = f"gemini:{gemini_model}"
-    else:
-        succeeded = _rank_with_groq(
-            jobs, resume_summary=resume_summary, career_targets=career_targets,
-            groq_model=groq_model, groq_api_key=groq_api_key, progress=progress,
-        )
-        if succeeded:
-            engine_used = f"groq:{groq_model}"
-        else:
-            succeeded = _rank_with_hf(
-                jobs, resume_summary=resume_summary, career_targets=career_targets,
-                hf_model=hf_model, hf_api_key=hf_api_key, progress=progress,
-            )
-            if succeeded:
-                engine_used = f"hf:{hf_model}"
-
-    if not succeeded:
-        progress("Gemini, Groq, and Qwen/HF ranking all failed — returning jobs unranked")
+    if engine_used is None:
+        progress("every AI model failed or was unavailable — returning jobs unranked")
         for j in jobs:
             j.setdefault("llm_score", 0)
             j.setdefault("llm_reason", "LLM ranking unavailable this run.")
@@ -281,6 +213,28 @@ def llm_rank(
     return ranked, engine_used
 
 
+def score_one_job(
+    db: Session, job: dict, *, user_id: str | None, resume_summary: str, career_targets: list[str],
+    request_keys: dict[str, str] | None = None, ref: str | None = None,
+) -> dict:
+    """Scores exactly ONE job (the streaming pipeline scores per job so
+    results appear live). Same prompt and parser as the batch path.
+    `llm_failed` is set when no model answered, so callers don't mistake
+    a failed call for a low score."""
+    wrapper = [job]
+    engine = _rank_via_router(
+        db, wrapper, user_id=user_id, resume_summary=resume_summary, career_targets=career_targets,
+        # Reasoning models (Gemini 2.5, GPT-OSS) spend output tokens on thinking
+        # first; 500 left them with a truncated or empty answer.
+        request_keys=request_keys, ref=ref, max_tokens=SINGLE_JOB_MAX_TOKENS, progress=NoOpProgress,
+    )
+    if engine is None:
+        job["llm_failed"] = True
+        job.setdefault("llm_score", 0)
+        job.setdefault("llm_reason", "LLM scoring unavailable for this job.")
+    return job
+
+
 def _tag_auto_apply_capability(jobs: list[dict]) -> None:
     from app.services.browser_apply import AUTO_APPLY_CAPABLE_SOURCES
     for job in jobs:
@@ -288,20 +242,18 @@ def _tag_auto_apply_capability(jobs: list[dict]) -> None:
 
 
 def score_jobs(
+    db: Session,
     jobs: list[dict],
     *,
+    user_id: str | None,
     resume_summary: str,
     skills: list[str],
     career_targets: list[str],
     keyword_prefilter_min_pct: float = 30,
     llm_top_n_to_rank: int = 40,
     llm_min_score_to_keep: float = 70,
-    gemini_model: str = "gemini-2.5-flash",
-    groq_model: str = "openai/gpt-oss-120b",
-    hf_model: str = "Qwen/Qwen3-8B",
-    gemini_api_key: str = "",
-    groq_api_key: str = "",
-    hf_api_key: str = "",
+    request_keys: dict[str, str] | None = None,
+    ref: str | None = None,
     progress: Callable[[str], None] = NoOpProgress,
 ) -> dict:
     pre, total_prefiltered = prefilter(
@@ -309,19 +261,10 @@ def score_jobs(
         llm_top_n_to_rank=llm_top_n_to_rank, progress=progress,
     )
     ranked, engine_used = llm_rank(
-        pre,
-        resume_summary=resume_summary,
-        career_targets=career_targets,
-        llm_min_score_to_keep=llm_min_score_to_keep,
-        gemini_model=gemini_model,
-        groq_model=groq_model,
-        hf_model=hf_model,
-        gemini_api_key=gemini_api_key,
-        groq_api_key=groq_api_key,
-        hf_api_key=hf_api_key,
-        progress=progress,
+        db, pre, user_id=user_id, resume_summary=resume_summary, career_targets=career_targets,
+        llm_min_score_to_keep=llm_min_score_to_keep, request_keys=request_keys, ref=ref, progress=progress,
     )
-    _tag_auto_apply_capability(ranked)  # NEW — lets the frontend show 1 vs 2 buttons per job
+    _tag_auto_apply_capability(ranked)  # lets the frontend show 1 vs 2 buttons per job
     return {
         "ranked_jobs": ranked,
         "total_input": len(jobs),

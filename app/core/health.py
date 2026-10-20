@@ -17,8 +17,11 @@ def check_redis() -> tuple[bool, str]:
     try:
         client = redis.from_url(settings.REDIS_URL, socket_timeout=5)
         client.ping()
-        queue_len = client.llen("celery")
-        return True, f"reachable, {queue_len} task(s) queued on 'celery'"
+        depths = ", ".join(
+            f"{client.llen(q)} queued on '{q}'"
+            for q in (settings.default_queue, settings.apply_queue)
+        )
+        return True, f"reachable, {depths}"
     except Exception as e:  # noqa: BLE001
         return False, f"unreachable: {e}"
     
@@ -49,10 +52,13 @@ def run_health_check() -> dict:
     redis_ok, redis_detail = check_redis()
     llm_ok, llm_detail = check_llm_config()
  
+    from app.services.job_alerts import last_tick
     checks = {
         "database": {"ok": db_ok, "detail": db_detail},
         "redis": {"ok": redis_ok, "detail": redis_detail},
         "llm_config": {"ok": llm_ok, "detail": llm_detail},
+        # Informational: when Celery beat last ran the job-alerts tick (None = beat not running).
+        "alerts_scheduler": {"ok": True, "last_tick": last_tick() if redis_ok else None},
     }
  
     if not db_ok or not redis_ok:

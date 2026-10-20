@@ -1,0 +1,51 @@
+{
+ "exhaustive": {
+  "nbHits": false,
+  "typo": false
+ },
+ "exhaustiveNbHits": false,
+ "exhaustiveTypo": false,
+ "hits": [
+  {
+   "objectID": "49922569",
+   "title": "Ask HN: Who is hiring? (October 2026)",
+   "created_at": "2026-10-01T15:02:07Z",
+   "num_comments": 393,
+   "author": "whoishiring"
+  },
+  {
+   "objectID": "49922568",
+   "title": "Ask HN: Who wants to be hired? (October 2026)",
+   "created_at": "2026-10-01T15:02:07Z",
+   "num_comments": 709,
+   "author": "whoishiring"
+  },
+  {
+   "objectID": "49522897",
+   "title": "Ask HN: Who is hiring? (September 2026)",
+   "created_at": "2026-09-01T15:01:17Z",
+   "num_comments": 392,
+   "author": "whoishiring"
+  }
+ ],
+ "hitsPerPage": 3,
+ "nbHits": 512,
+ "nbPages": 171,
+ "page": 0,
+ "params": "query=who+is+hiring&tags=story%2Cauthor_whoishiring&hitsPerPage=3&advancedSyntax=true&analyticsTags=backend",
+ "processingTimeMS": 34,
+ "processingTimingsMS": {
+  "_request": {
+   "queue": 2,
+   "roundTrip": 24
+  },
+  "fetch": {
+   "query": 10,
+   "scanning": 22,
+   "total": 33
+  },
+  "total": 34
+ },
+ "query": "who is hiring",
+ "serverTimeMS": 41
+}

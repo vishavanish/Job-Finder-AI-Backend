@@ -1,0 +1,50 @@
+{
+ "absolute_url": "https://careers.airbnb.com/positions/7789554?gh_jid=7789554",
+ "internal_job_id": 3407102,
+ "location": {
+  "name": "Tokyo, Japan"
+ },
+ "metadata": [
+  {
+   "id": 9245691,
+   "name": "Is this job part of ACC?",
+   "value": false,
+   "value_type": "yes_no"
+  },
+  {
+   "id": 10216612,
+   "name": "Workplace Type",
+   "value": "Hybrid",
+   "value_type": "single_select"
+  }
+ ],
+ "id": 7789554,
+ "updated_at": "2026-09-29T20:00:54-04:00",
+ "requisition_id": "ONE",
+ "title": "Associate Legal Counsel, Japan",
+ "company_name": "Airbnb",
+ "first_published": "2026-04-13T04:49:05-04:00",
+ "language": "en",
+ "application_deadline": null,
+ "content": "&lt;div class=&quot;content-intro&quot;&gt;&lt;p&gt;&lt;span style=&quot;font-family: helvetica, arial, sans-serif; font-size: 12pt;&quot;&gt;Airbnb was born in 2007 when two hosts welcomed three guests to their San Francisco home, and has since grown to over 5 million hosts who have welcomed over 2 billion guest arrivals in almost every country across the globe. Every day, hosts offer unique stay",
+ "departments": [
+  {
+   "id": 253,
+   "name": "Legal",
+   "child_ids": [],
+   "parent_id": 73696
+  }
+ ],
+ "offices": [
+  {
+   "id": 625,
+   "name": "Tokyo, Japan",
+   "location": "Tokyo, Japan",
+   "child_ids": [],
+   "parent_id": 64274
+  }
+ ],
+ "ai_disclaimer": null,
+ "include_ai_disclaimer": null,
+ "ai_opt_out_request_url": null
+}

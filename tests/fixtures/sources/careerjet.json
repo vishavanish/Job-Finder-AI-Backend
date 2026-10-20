@@ -1,0 +1,16 @@
+{
+ "type": "JOBS",
+ "hits": 1,
+ "pages": 1,
+ "jobs": [
+  {
+   "title": "Backend Developer (Python)",
+   "company": "Delta Systems",
+   "locations": "Mumbai",
+   "url": "https://jobviewtrack.com/en-in/job-1",
+   "description": "...Python, AWS...",
+   "date": "Fri, 16 Oct 2026 05:00:00 GMT",
+   "salary": ""
+  }
+ ]
+}

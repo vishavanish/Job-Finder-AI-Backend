@@ -1,0 +1,33 @@
+{
+ "count": 2,
+ "results": [
+  {
+   "id": "1",
+   "title": "Python Developer",
+   "company": {
+    "display_name": "Acme Pvt Ltd"
+   },
+   "location": {
+    "display_name": "Bengaluru, Karnataka"
+   },
+   "redirect_url": "https://www.adzuna.in/land/ad/1",
+   "description": "Build <strong>FastAPI</strong> services with Python and Postgres...",
+   "created": "2026-10-16T08:00:00Z",
+   "salary_min": 1200000,
+   "salary_max": 1800000
+  },
+  {
+   "id": "2",
+   "title": "Data Engineer",
+   "company": {
+    "display_name": "Beta Labs"
+   },
+   "location": {
+    "display_name": "Pune, Maharashtra"
+   },
+   "redirect_url": "https://www.adzuna.in/land/ad/2",
+   "description": "Spark, Airflow...",
+   "created": "2026-10-15T08:00:00Z"
+  }
+ ]
+}

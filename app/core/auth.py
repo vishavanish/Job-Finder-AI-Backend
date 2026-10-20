@@ -1,30 +1,18 @@
 """
 app/core/auth.py
 ------------------
-All authentication logic in one place: password hashing, JWT
-issuing/verification, and the two FastAPI dependencies that use them.
+Password hashing, access-token issuing/verification, and the FastAPI
+dependencies that authenticate and authorize every request.
 
-Two auth mechanisms live here side by side during the migration to real
-user accounts:
+Access tokens are short-lived HS256 JWTs (ACCESS_TOKEN_EXPIRE_MINUTES,
+default 15) carrying only the user id and issue time. Everything that
+decides access — is_active, role, session_version — is read from the
+database on every request, so disabling a user, changing a role or
+resetting sessions takes effect on the very next call (CLAUDE.md 7.1).
+Long-lived refresh tokens live in app/services/sessions.py.
 
-1. require_api_key — the original minimal API-key check ("is the caller
-   allowed to use this deployment at all"). Kept for any route not yet
-   migrated to per-user accounts, and as a fallback for machine-to-machine
-   callers that don't have a user login.
-
-2. get_current_user — JWT-based, backed by the users table (SQLite via
-   app/core/db.py). Use this on routes that need to know WHICH user is
-   calling (e.g. so /applications can scope results per-user later).
-
-If API_KEYS is empty, require_api_key auth is OPEN — every request
-passes. This matches local-dev behaviour by default, but get_settings()
-already logs a loud startup warning when this is the case (see
-config.py), and this module logs on every unauthenticated request too,
-so it's hard to miss in production logs if you forgot to set keys.
-
-get_current_user has NO equivalent open mode — a missing/invalid/expired
-JWT is always a 401 regardless of server config. If a route should be
-public, don't attach this dependency at all.
+require_api_key is the original pre-accounts mechanism; no route uses it
+any more, it is kept only for machine-to-machine callers.
 """
 from __future__ import annotations
 
@@ -53,33 +41,50 @@ def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
 
-def verify_password(plain: str, hashed: str) -> bool:
+def verify_password(plain: str, hashed: str | None) -> bool:
+    if not hashed:
+        return False  # OTP/Google-only account: no password to match
     return pwd_context.verify(plain, hashed)
 
 
 # ============================================================
-# JWT issuing / verification
+# Time helpers (DB columns are naive UTC on both SQLite and Postgres)
 # ============================================================
 
-def create_access_token(subject: str, expires_minutes: int | None = None) -> str:
+def as_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+# ============================================================
+# Access tokens
+# ============================================================
+
+def create_access_token(subject: str, expires_minutes: int | None = None, *, session_version: int = 0) -> str:
     settings = get_settings()
-    expire = datetime.now(timezone.utc) + timedelta(
-        minutes=expires_minutes or settings.ACCESS_TOKEN_EXPIRE_MINUTES
-    )
-    payload = {"sub": subject, "exp": expire}
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(minutes=expires_minutes or settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {
+        "sub": subject,
+        "exp": expire,
+        "iat": int(now.timestamp()),
+        "sv": session_version,  # must equal users.session_version (see app/models/user.py)
+        "typ": "access",
+    }
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
 
-def decode_access_token(token: str) -> str | None:
-    """Returns the user id (the token's `sub` claim) if the token is
-    valid and unexpired, else None. Never raises — callers check for
-    None and respond 401."""
+def decode_access_token(token: str) -> dict | None:
+    """The token's claims if valid and unexpired, else None. Never raises."""
     settings = get_settings()
     try:
-        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
-        return payload.get("sub")
+        claims = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
     except JWTError:
         return None
+    if claims.get("typ", "access") != "access" or not claims.get("sub"):
+        return None
+    return claims
 
 
 # ============================================================
@@ -87,19 +92,9 @@ def decode_access_token(token: str) -> str | None:
 # ============================================================
 
 async def require_api_key(x_api_key: str | None = Header(default=None)) -> str:
-    """FastAPI dependency — add to routes/routers that need protecting:
-
-        router = APIRouter(prefix="/pipeline", dependencies=[Depends(require_api_key)])
-
-    or per-route:
-
-        @router.post("/run", dependencies=[Depends(require_api_key)])
-    """
     settings = get_settings()
 
     if not settings.api_keys_list:
-        # No keys configured server-side -> auth is open. Logged (not just
-        # silently allowed) so it shows up if this ever happens live.
         logger.warning("request allowed with NO auth check — API_KEYS is empty in settings")
         return "unauthenticated"
 
@@ -113,44 +108,64 @@ async def require_api_key(x_api_key: str | None = Header(default=None)) -> str:
     return x_api_key
 
 
+def account_disabled() -> HTTPException:
+    """403 with a machine-readable code so the frontend can sign the user
+    out with a clear message (frontend spec 5.2)."""
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"code": "account_disabled", "message": "This account has been disabled. Contact your admin."},
+    )
+
+
+def _unauthorized(detail: str) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
+
+
 async def get_current_user(
     authorization: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    """FastAPI dependency for routes that need to know WHICH user is
-    calling, not just "is this caller allowed." Expects a JWT issued by
-    POST /auth/login or /auth/register, sent as:
-
-        Authorization: Bearer <token>
-    """
-    # Imported here rather than at module top to avoid a circular import:
-    # app.models.user imports Base from app.core.db, and this module also
-    # imports from app.core.db — deferring the User import to call-time
-    # sidesteps any load-order ambiguity at negligible per-request cost.
+    """Authenticates `Authorization: Bearer <access token>` and loads the
+    user. 401 if the token is missing/invalid/expired, the user is gone
+    or disabled, or the token's session version was revoked."""
+    # Imported at call time to avoid a circular import (models -> db -> ...).
     from app.models.user import User
 
     if not authorization or not authorization.startswith("Bearer "):
         logger.warning("rejected request: missing or malformed Authorization header")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid Authorization header. Send 'Bearer <token>'.",
-        )
+        raise _unauthorized("Missing or invalid Authorization header. Send 'Bearer <token>'.")
 
-    token = authorization.removeprefix("Bearer ").strip()
-    user_id = decode_access_token(token)
-    if not user_id:
+    claims = decode_access_token(authorization.removeprefix("Bearer ").strip())
+    if not claims:
         logger.warning("rejected request: invalid or expired JWT")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token. Please log in again.",
-        )
+        raise _unauthorized("Invalid or expired token. Please log in again.")
 
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user or not user.is_active:
-        logger.warning("rejected request: token valid but user %s not found or inactive", user_id)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found or inactive.",
-        )
+    user = db.query(User).filter(User.id == claims["sub"]).first()
+    if not user:
+        logger.warning("rejected request: token valid but user %s not found", claims["sub"])
+        raise _unauthorized("User not found.")
+    from app.services.accounts import ensure_always_admin
+
+    if ensure_always_admin(db, user):
+        db.commit()
+    if not user.is_active:
+        logger.warning("rejected request: user %s is disabled", user.id)
+        raise account_disabled()
+
+    if claims.get("sv", 0) != (user.session_version or 0):
+        logger.warning("rejected request: token for user %s issued before session revocation", user.id)
+        raise _unauthorized("Session has been revoked. Please log in again.")
 
     return user
+
+
+def require_role(*roles: str):
+    """Dependency factory: `Depends(require_role("admin"))` or
+    `Depends(require_role("manager", "admin"))`. Enforced server-side on
+    every admin route, never only in the UI."""
+    async def _check(user=Depends(get_current_user)):
+        if user.role not in roles:
+            logger.warning("forbidden: user=%s role=%s needs one of %s", user.id, user.role, roles)
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "You do not have permission to do this.")
+        return user
+    return _check

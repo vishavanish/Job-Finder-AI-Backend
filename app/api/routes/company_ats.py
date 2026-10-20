@@ -8,10 +8,10 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from app.core.auth import get_current_user
+from app.services.entitlements import require_feature
 from app.core.config import get_settings
 from app.core.rate_limit import limiter
-from app.core.task_dispatch import pending_response
+from app.core.task_dispatch import dispatch
 from app.models.schemas import CompanyAtsRequest, TaskResponse
 from app.core.celery_tasks import company_ats_task
 
@@ -36,7 +36,8 @@ def _reject_private_targets(req: CompanyAtsRequest) -> None:
     (e.g. cloud metadata endpoints) before the task is even dispatched,
     regardless of which fetch strategy ends up being used."""
     for target in req.targets:
-        if target.platform != "custom" or not target.custom_endpoint_url:
+        # workday targets also fetch the caller's custom_endpoint_url host.
+        if target.platform not in ("custom", "workday") or not target.custom_endpoint_url:
             continue
         host = urlparse(target.custom_endpoint_url).hostname
         if not host:
@@ -58,10 +59,9 @@ def _reject_private_targets(req: CompanyAtsRequest) -> None:
     "/fetch",
     response_model=TaskResponse,
     status_code=202,
-    dependencies=[Depends(get_current_user)],
 )
 @limiter.limit(settings.RATE_LIMIT_SEARCH)
-async def fetch_company_ats(request: Request, req: CompanyAtsRequest):
+async def fetch_company_ats(request: Request, req: CompanyAtsRequest, user=Depends(require_feature("ats_discovery"))):
     """Fetches jobs from Greenhouse/Lever/SmartRecruiters/Workday, or a
     custom company career page.
 
@@ -78,8 +78,9 @@ async def fetch_company_ats(request: Request, req: CompanyAtsRequest):
     _reject_private_targets(req)
     targets = [t.model_dump() for t in req.targets]
 
-    async_result = company_ats_task.apply_async(
-        args=[targets, req.request_delay_sec], queue=settings.default_queue
+    response = dispatch(
+        company_ats_task, args=[targets, req.request_delay_sec],
+        queue=settings.default_queue, user_id=user.id,
     )
-    logger.info("[task=%s] dispatched to 'default' queue", async_result.id)
-    return pending_response(async_result)
+    logger.info("[task=%s] dispatched to '%s' for user=%s", response.task_id, settings.default_queue, user.id)
+    return response

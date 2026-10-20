@@ -1,0 +1,44 @@
+<!doctype html>
+<!-- Local stand-in for a Greenhouse hosted application form (layout modelled on
+     job-boards.greenhouse.io: labelled inputs, file uploads, selects, a radio
+     group, EEO select). Submitting only changes this page — nothing is sent.
+     ?captcha=1 shows a captcha challenge instead of the confirmation. -->
+<html>
+<head><meta charset="utf-8"><title>Backend Engineer at Orbit Labs</title></head>
+<body>
+<h1>Backend Engineer</h1>
+<form id="application-form">
+  <div class="field-wrapper"><label for="first_name">First Name *</label><input id="first_name" name="first_name" required></div>
+  <div class="field-wrapper"><label for="last_name">Last Name *</label><input id="last_name" name="last_name" required></div>
+  <div class="field-wrapper"><label for="email">Email *</label><input id="email" name="email" type="email" required></div>
+  <div class="field-wrapper"><label for="phone">Phone</label><input id="phone" name="phone" type="tel"></div>
+  <div class="field-wrapper"><label for="resume">Resume/CV *</label><input id="resume" name="resume" type="file" required></div>
+  <div class="field-wrapper"><label for="cover_letter">Cover Letter</label><input id="cover_letter" name="cover_letter" type="file"></div>
+  <div class="field-wrapper"><label for="question_1">LinkedIn Profile</label><input id="question_1" name="question_1"></div>
+  <div class="field-wrapper"><label for="question_2">Are you legally authorized to work in India? *</label>
+    <select id="question_2" name="question_2" required><option value="">Select...</option><option value="1">Yes</option><option value="0">No</option></select></div>
+  <fieldset><legend>Will you now or in the future require visa sponsorship? *</legend>
+    <label><input type="radio" name="question_3" value="yes" required> Yes</label>
+    <label><input type="radio" name="question_3" value="no"> No</label></fieldset>
+  <div class="field-wrapper"><label for="question_4">Why do you want to join Orbit Labs? *</label><textarea id="question_4" name="question_4" required></textarea></div>
+  <div class="field-wrapper"><label for="gender">Gender</label>
+    <select id="gender" name="gender"><option value="">Select...</option><option>Male</option><option>Female</option><option>Decline To Self Identify</option></select></div>
+  <button type="submit">Submit application</button>
+</form>
+<script>
+  document.getElementById('application-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const missing = [...e.target.querySelectorAll('[required]')].filter(el =>
+      el.type === 'radio' ? !e.target.querySelector(`input[name="${el.name}"]:checked`) : el.type === 'file' ? el.files.length === 0 : !el.value);
+    if (missing.length) { missing[0].setAttribute('aria-invalid', 'true'); return; }
+    if (new URLSearchParams(location.search).get('captcha')) {
+      const f = document.createElement('iframe');
+      f.src = 'about:blank#recaptcha/api2/bframe'; f.width = 400; f.height = 400; document.body.appendChild(f);
+      return;
+    }
+    window.__submitted = Object.fromEntries([...new FormData(e.target)].map(([k, v]) => [k, v instanceof File ? v.name : v]));
+    document.body.innerHTML = '<h1>Thank you for applying.</h1><p>Your application has been submitted to Orbit Labs.</p>';
+  });
+</script>
+</body>
+</html>

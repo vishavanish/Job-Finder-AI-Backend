@@ -13,7 +13,7 @@ can drive different searches per call without redeployment.
 
 - **FastAPI** — REST API layer, JWT auth, per-user scoping
 - **Celery + Redis (Upstash)** — background task queue for search/score/apply/pipeline
-- **SQLite** — application tracking + user accounts
+- **Postgres (Supabase)** — application tracking + user accounts; schema managed by **Alembic** (`alembic upgrade head`)
 - **Playwright** — browser automation for opening/pre-filling job applications
 - **Gemini / Hugging Face (Qwen)** — LLM-based job-fit scoring, with automatic fallback
 - **Gmail API** — polls one or more inboxes to auto-detect application status changes
@@ -65,3 +65,48 @@ recent mail, pre-filters candidates that look like ATS/recruiter replies, and
 (pending) classifies them via LLM into rejection/interview/other before updating
 the matching `Application` row. Handles the case where you apply from one
 address but replies land in a different inbox.
+## Run locally in VS Code (backend + frontend)
+
+Both repos on branch `dev`, side by side, with a Python 3.11 virtualenv next to them:
+
+```
+<parent>/job_finder_api        # this repo
+<parent>/job-finder-frontend   # Job-Finder-AI-Frontend
+<parent>/venv                  # python -m venv venv
+```
+
+**Three terminals, one short command each** (PowerShell or cmd):
+
+| Terminal | Folder | Command |
+|----------|--------|---------|
+| API (`:8000`, runs migrations first) | `job_finder_api` | `.pi` |
+| Celery worker | `job_finder_api` | `.\worker` |
+| Frontend (`http://localhost:5173`) | `job-finder-frontend` | `npm run dev` |
+
+Backend only (API + worker in one terminal, from `job_finder_api`): `.ackend`.
+
+Make an account admin in the local dev database: `.dmin you@example.com` (never touches Supabase).
+
+**Or all three in one terminal** (from `job_finder_api`):
+
+```
+.\dev
+```
+
+That runs migrations, then the API, the Celery worker and the frontend in one terminal
+(open http://localhost:5173). Ctrl+C stops all three. It installs the frontend's npm
+packages on the first run. Same thing without the wrapper: `..env\Scripts\python.exe run_dev.py`.
+
+**Or from VS Code's task runner:**
+
+1. Open `job-finder.code-workspace` (File > Open Workspace from File).
+2. First time only: Terminal > Run Task > **setup: install dependencies**, and make sure
+   `job_finder_api/.env` has `JWT_SECRET_KEY` and `REDIS_URL` (Upstash is fine — local runs
+   only use the `*_dev` queues).
+3. Terminal > Run Task > **Run full stack** — runs migrations, then the API (`:8000`),
+   the Celery worker and the frontend (`http://localhost:5173`). Or Run and Debug >
+   **Full stack (debug)** for breakpoints.
+4. Optional: Run Task > **backend: make me admin** to give your local account the admin role.
+
+Local runs use `output/dev.db` (SQLite), never the Supabase `DATABASE_URL` in `.env`.
+Email sign-in codes are printed in the API terminal (`EMAIL_BACKEND=console`).

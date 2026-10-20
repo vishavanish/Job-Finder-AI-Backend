@@ -12,7 +12,7 @@ from enum import Enum
 from typing import Any, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field, HttpUrl, SecretStr, field_validator
+from pydantic import BaseModel, EmailStr, Field, HttpUrl, SecretStr, field_validator, model_validator
 
 # ============================================================
 # SHARED / CORE
@@ -73,8 +73,10 @@ class SearchRequest(BaseModel):
         min_length=1,
     )
     locations: list[str] = Field(default_factory=lambda: ["Mumbai, India", "Pune, India"])
-    sources: list[Literal["linkedin", "indeed", "naukri"]] = Field(
-        default_factory=lambda: ["linkedin", "indeed", "naukri"]
+    sources: Optional[list[str]] = Field(
+        None,
+        description="Source keys from GET /providers (e.g. linkedin, indeed, adzuna, remoteok). "
+                    "Leave out to use every source that can run for you.",
     )
     results_per_keyword: int = Field(25, ge=1, le=200)
     max_age_hours: int = Field(24, ge=1, le=720)
@@ -85,7 +87,8 @@ class SearchRequest(BaseModel):
     linkedin_max_retries: int = Field(2, ge=0, le=10)
     linkedin_retry_delay_sec: float = Field(30, ge=0)
 
-    enable_naukri_auto: bool = False
+    enable_naukri_auto: bool = Field(
+        False, description="Deprecated and ignored: Naukri blocks automated search (captcha).")
     manual_naukri_jobs: list[Job] = Field(
         default_factory=list,
         description="Jobs you pasted in manually (Naukri blocks automated scraping).",
@@ -96,6 +99,21 @@ class SearchRequest(BaseModel):
     apify_api_token: Optional[SecretStr] = Field(
         None, description="Overrides server APIFY_API_TOKEN for this call only."
     )
+
+
+    @field_validator("sources")
+    @classmethod
+    def _known_sources(cls, value: Optional[list[str]]) -> Optional[list[str]]:
+        if value is None:
+            return None
+        from app.providers.job_sources.registry import SEARCHABLE_KEYS
+        cleaned = list(dict.fromkeys(v.strip().lower() for v in value if v and v.strip()))
+        unknown = [v for v in cleaned if v not in SEARCHABLE_KEYS]
+        if unknown:
+            raise ValueError(f"unknown source(s): {', '.join(unknown)}; known: {', '.join(SEARCHABLE_KEYS)}")
+        if not cleaned:
+            raise ValueError("list at least one source, or leave `sources` out to use all available")
+        return cleaned
 
 
 class SearchResult(BaseModel):
@@ -109,7 +127,8 @@ class SearchResult(BaseModel):
 # ============================================================
 
 class CompanyAtsTarget(BaseModel):
-    platform: Literal["greenhouse", "lever", "smartrecruiters", "workday", "custom"]
+    platform: Literal["greenhouse", "lever", "smartrecruiters", "workday", "ashby", "recruitee", "workable",
+                      "personio", "breezy", "custom"]
     slug: str
     custom_endpoint_url: Optional[str] = None
     custom_method: Literal["GET", "POST"] = "GET"
@@ -154,13 +173,15 @@ class ScoreRequest(BaseModel):
     llm_top_n_to_rank: int = Field(40, ge=1, le=200)
     llm_min_score_to_keep: float = Field(70, ge=0, le=100)
 
-    # model selection / overrides
-    gemini_model: str = "gemini-2.5-flash"
-    groq_model: str = "openai/gpt-oss-120b"
-    hf_model: str = "Qwen/Qwen3-8B"
-    gemini_api_key: Optional[SecretStr] = Field(None, description="Overrides server GEMINI_API_KEY for this call only.")
-    groq_api_key: Optional[SecretStr] = Field(None, description="Overrides server GROQ_API_KEY for this call only.")
-    hf_api_key: Optional[SecretStr] = Field(None, description="Overrides server HF_API_KEY for this call only.")
+    # Deprecated (P2): the AI router picks the model from the registry
+    # (GET /models, PUT /models/preferences); these names are ignored.
+    # Keys still work as one-run keys — prefer saving one with POST /keys.
+    gemini_model: str = Field("gemini-2.5-flash", deprecated=True)
+    groq_model: str = Field("openai/gpt-oss-120b", deprecated=True)
+    hf_model: str = Field("Qwen/Qwen3-8B", deprecated=True)
+    gemini_api_key: Optional[SecretStr] = Field(None, description="One-run key for Gemini models. Prefer POST /keys.")
+    groq_api_key: Optional[SecretStr] = Field(None, description="One-run key for Groq models. Prefer POST /keys.")
+    hf_api_key: Optional[SecretStr] = Field(None, description="One-run key for Hugging Face models. Prefer POST /keys.")
 
 class ScoreResult(BaseModel):
     ranked_jobs: list[Job]
@@ -214,26 +235,60 @@ class ApplyResult(BaseModel):
     )
 
 
+class ScoreThresholds(BaseModel):
+    keyword_prefilter_min_pct: float = Field(30, ge=0, le=100)
+    llm_top_n_to_rank: int = Field(40, ge=1, le=200)
+    llm_min_score_to_keep: float = Field(70, ge=0, le=100)
+
+
 class PipelineRequest(BaseModel):
-    search: SearchRequest
-    score: "ScoreRequestPartial"
+    """Two ways to describe what to look for (CLAUDE.md 7.3):
+
+    - **search_profile_id** (preferred): keywords, skills, must/nice/exclude
+      terms come from the saved Keywords & Skills profile; the resume context
+      from the master resume (or `score.resume_summary`); locations and
+      posted-within from the user's preferences unless `search` sets them.
+    - **legacy**: `search.keywords` + `score` (resume_summary, skills, …) sent
+      every time. Still works; deprecated once the frontend uses profiles.
+
+    Either way, jobs the user has already seen, hidden or applied to are
+    skipped (`include_seen: true` shows seen/saved ones again), avoided
+    companies are dropped, and each job is scored once per run."""
+    search: SearchRequest = Field(default_factory=SearchRequest)
+    score: Optional["ScoreRequestPartial"] = None
+    search_profile_id: Optional[str] = Field(None, max_length=36)
+    thresholds: Optional[ScoreThresholds] = Field(
+        None, description="Profile mode: score thresholds (default 30 / 40 / 70). Ignored when `score` is sent."
+    )
+    include_seen: bool = Field(False, description="Show jobs already seen or saved in earlier runs again")
     apply: Optional[ApplyRequest] = None
+
+    @model_validator(mode="after")
+    def _profile_or_score(self):
+        if not self.search_profile_id and (self.score is None or not self.score.skills):
+            raise ValueError("send search_profile_id, or score with resume_summary and at least one skill")
+        return self
 
 
 class ScoreRequestPartial(BaseModel):
     """Same as ScoreRequest but without `jobs` — the pipeline supplies jobs
-    from the search step automatically."""
+    from the search step automatically. With a search profile, `skills` and
+    `career_targets` come from the profile and only `resume_summary`, the
+    thresholds and one-run keys here are used."""
     resume_summary: str
-    skills: list[str] = Field(..., min_length=1)
+    skills: list[str] = Field(default_factory=list)
     career_targets: list[str] = Field(
         default_factory=lambda: ["AI Engineer", "LLM Application Developer", "Senior Backend Developer"]
     )
     keyword_prefilter_min_pct: float = Field(30, ge=0, le=100)
     llm_top_n_to_rank: int = Field(40, ge=1, le=200)
     llm_min_score_to_keep: float = Field(70, ge=0, le=100)
-    gemini_model: str = "gemini-2.5-flash"
-    hf_model: str = "Qwen/Qwen3-8B"
+    # Deprecated (P2): ignored — the AI router picks the model. Keys = one-run keys.
+    gemini_model: str = Field("gemini-2.5-flash", deprecated=True)
+    groq_model: str = Field("openai/gpt-oss-120b", deprecated=True)
+    hf_model: str = Field("Qwen/Qwen3-8B", deprecated=True)
     gemini_api_key: Optional[SecretStr] = None
+    groq_api_key: Optional[SecretStr] = None
     hf_api_key: Optional[SecretStr] = None
 
 
@@ -264,7 +319,9 @@ class ApplicationLogResult(BaseModel):
 
 
 class ApplicationStatusUpdate(BaseModel):
-    status: Literal["opened", "submitted", "interview", "rejected", "offer", "ghosted"]
+    """The status model of CLAUDE.md 7.8 (P5: the full list)."""
+    status: Literal["opened", "submitted", "emailed", "acknowledged", "assessment", "interview", "offer", "accepted",
+                    "declined", "rejected", "withdrawn", "ghosted"]
     
     
  # ============================================================
@@ -286,8 +343,48 @@ class UserOut(BaseModel):
     id: str
     email: str
     name: Optional[str] = None
+    role: str = "user"
+    is_active: bool = True
+    manager_id: Optional[str] = None
+    auth_provider: Optional[str] = None
+    email_verified_at: Optional[datetime] = None
+    last_login_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+
+
+class EntitlementSummary(BaseModel):
+    enabled: bool
+    max_level: Optional[int] = None
+    quota_per_day: Optional[int] = None
+    quota_remaining: Optional[int] = Field(None, description="None = unlimited")
+
+
+class MeOut(UserOut):
+    """GET /auth/me — the user plus what they may use, so the UI can
+    disable controls with a reason (frontend spec 5.1)."""
+    entitlements: dict[str, EntitlementSummary] = Field(default_factory=dict)
+
+
+class OtpRequest(BaseModel):
+    email: EmailStr
+
+
+class OtpVerify(BaseModel):
+    email: EmailStr
+    code: str = Field(..., pattern=r"^\s*\d{6}\s*$")
+
+
+class GoogleSignIn(BaseModel):
+    id_token: str = Field(..., min_length=20)
+
+
+class SetPasswordRequest(BaseModel):
+    password: str = Field(..., min_length=8)
+
+
+class MessageResponse(BaseModel):
+    detail: str
 
 
 class TokenResponse(BaseModel):
@@ -296,3 +393,71 @@ class TokenResponse(BaseModel):
     user: UserOut
 
 PipelineRequest.model_rebuild()
+
+
+# ============================================================
+# ADMIN CONSOLE (CLAUDE.md 7.11)
+# ============================================================
+
+class AdminUserCreate(BaseModel):
+    email: EmailStr
+    name: Optional[str] = None
+    role: Literal["user", "manager", "admin"] = "user"
+    manager_id: Optional[str] = None
+
+
+class AdminUserUpdate(BaseModel):
+    """Only the fields you send are changed; send manager_id: null to
+    remove a user from their manager's team."""
+    name: Optional[str] = None
+    role: Optional[Literal["user", "manager", "admin"]] = None
+    manager_id: Optional[str] = None
+
+
+class AdminUserList(BaseModel):
+    users: list[UserOut]
+    total: int
+    limit: int
+    offset: int
+
+
+class EntitlementOut(BaseModel):
+    feature: str
+    enabled: bool
+    quota_per_day: Optional[int] = None
+    max_level: Optional[int] = None
+    expires_at: Optional[datetime] = None
+    source: str = Field(..., description="'default' (no override) or 'override'")
+    used_today: Optional[int] = None
+
+
+class EntitlementUpdate(BaseModel):
+    enabled: bool
+    quota_per_day: Optional[int] = Field(None, ge=0, description="None = unlimited")
+    max_level: Optional[int] = Field(None, ge=1, le=3, description="auto_apply autopilot cap")
+    expires_at: Optional[datetime] = None
+
+
+class FlagUpdate(BaseModel):
+    value: Any
+
+
+class AuditEntryOut(BaseModel):
+    id: str
+    actor_id: Optional[str] = None
+    action: str
+    target_type: Optional[str] = None
+    target_id: Optional[str] = None
+    before: Optional[dict[str, Any]] = None
+    after: Optional[dict[str, Any]] = None
+    ip: Optional[str] = None
+    at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AuditList(BaseModel):
+    entries: list[AuditEntryOut]
+    total: int
+    limit: int
+    offset: int

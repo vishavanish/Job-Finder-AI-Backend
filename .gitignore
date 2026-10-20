@@ -1,5 +1,9 @@
 # ---- secrets & credentials ----
 .env
+.env.*
+!.env.example
+*.pem
+*.key
 credentials.json
 token_primary.json
 token_secondary.json
@@ -42,3 +46,5 @@ Thumbs.db
 *.log
 .env.local
 .env.*.local
+# celery beat state
+celerybeat-schedule*

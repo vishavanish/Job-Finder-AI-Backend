@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:tt="https://teamtailor.com/locations">
+  <channel>
+    <title>Teamtailor</title>
+    <description>Current job openings</description>
+    <link>https://career.teamtailor.com/jobs</link>
+    <item>
+      <title>UK Account Executive - SMB</title>
+      <description>&lt;h4&gt;Let's build the future together!&lt;/h4&gt;&lt;p&gt;&lt;a target="_blank" href="https://www.teamtailor.com/en/"&gt;Teamtailor&lt;/a&gt; is an Employer Branding and an ATS SaaS platform used by over 13,000 companies, 250.000 users in 90 countries around the world.&lt;/p&gt;&lt;p&gt;Working </description>
+      <pubDate>Fri, 24 Jul 2026 09:05:16 +0200</pubDate>
+      <link>https://career.teamtailor.com/jobs/8118064-uk-account-executive-smb</link>
+      <remoteStatus>hybrid</remoteStatus>
+      <guid>4ff07fd5-3ac0-4333-8f4c-955380396321</guid>
+      <tt:locations>
+        <tt:location>
+          <tt:name>London</tt:name>
+          <tt:address>16 Laystall Court</tt:address>
+          <tt:zip>EC1R 4</tt:zip>
+          <tt:city>London</tt:city>
+          <tt:country>United Kingdom</tt:country>
+        </tt:location>
+      </tt:locations>
+      <tt:department>Sales</tt:department>
+      <tt:role>Account Executive</tt:role>
+      <tt:division/>
+    </item>
+<item>
+      <title>Revenue Systems Engineer</title>
+      <description>&lt;h4&gt;&lt;strong&gt;Join us to shape the future!&lt;/strong&gt;&lt;/h4&gt;&lt;p&gt;Teamtailor is a global Employer Branding and ATS SaaS platform used by over 13,000 companies, 250,000 users, and available in 90 countries worldwide. 🌍&lt;/p&gt;&lt;p&gt;Working at &lt;a target="_blank" href="http</description>
+      <pubDate>Wed, 14 Oct 2026 14:33:33 +0200</pubDate>
+      <link>https://career.teamtailor.com/jobs/8546033-revenue-systems-engineer</link>
+      <remoteStatus>none</remoteStatus>
+      <guid>5f14f689-77ee-4b85-a1f1-05df74ea2944</guid>
+      <tt:locations>
+        <tt:location>
+          <tt:name>Stockholm</tt:name>
+          <tt:address>Östgötagatan 16</tt:address>
+          <tt:zip>116 21</tt:zip>
+          <tt:city>Stockholm</tt:city>
+          <tt:country>Sweden</tt:country>
+        </tt:location>
+      </tt:locations>
+      <tt:department>CRM</tt:department>
+      <tt:role/>
+      <tt:division/>
+    </item>
+  </channel>
+</rss>

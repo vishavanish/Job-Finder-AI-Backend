@@ -2,7 +2,8 @@
 app/models/application.py
 ----------------------------
 Two tables:
-  - Application: ONE row per (user, job_url) — current state. This is
+  - Application: ONE row per (user, job) — current state, matched by
+    job_url or by the cross-source job_key. This is
     what GET /applications reads.
   - ApplicationStatusEvent: append-only history of every status change
     for that application (opened -> awaiting_review -> submitted ->
@@ -13,7 +14,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, String, DateTime, Text, ForeignKey, UniqueConstraint, Index
+from sqlalchemy import JSON, Column, String, DateTime, Text, ForeignKey, UniqueConstraint, Index
 from sqlalchemy.orm import relationship
 
 from app.core.db import Base
@@ -24,6 +25,7 @@ class Application(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "job_url", name="uq_application_user_job"),
         Index("ix_application_user_status", "user_id", "status"),
+        Index("ix_application_user_job_key", "user_id", "job_key"),
     )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -33,6 +35,12 @@ class Application(Base):
     company = Column(String(255), default="", index=True)
     source = Column(String(100), default="")
     job_url = Column(Text, default="")
+    # Cross-source identity (app/services/job_dedupe.job_key). Nullable
+    # because rows created before migration 0002 have none.
+    job_key = Column(String(600), nullable=True)
+    # Other URLs of the same job seen from other sources (e.g. Indeed copy
+    # of a LinkedIn job) — the row itself keeps the first URL in job_url.
+    alias_urls = Column(JSON, nullable=True)
 
     status = Column(String(64), default="opened", nullable=False, index=True)
     status_source = Column(String(32), default="browser_apply", nullable=False)
@@ -67,6 +75,7 @@ class ApplicationStatusEvent(Base):
     status = Column(String(64), nullable=False)
     status_source = Column(String(32), default="browser_apply", nullable=False)
     note = Column(Text, nullable=True)
+    email_event_id = Column(String(36), nullable=True)  # the email that caused this change (P5)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
 
     application = relationship("Application", back_populates="events")

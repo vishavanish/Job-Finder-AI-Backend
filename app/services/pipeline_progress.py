@@ -38,23 +38,14 @@ from datetime import datetime, timezone
 
 import redis
 
-from app.core.config import get_settings
+from app.core.redis_client import get_redis
 
 logger = logging.getLogger("job_finder_api.pipeline_progress")
 
 RUN_TTL_SECONDS = 60 * 60 * 6  # 6h — matches TASK_RESULT_TTL_SECONDS' spirit
 
-_client: redis.Redis | None = None
-
-
 def _redis() -> redis.Redis:
-    """Lazy singleton — module-level so every call in this process reuses
-    one connection pool instead of opening a new client per call."""
-    global _client
-    if _client is None:
-        settings = get_settings()
-        _client = redis.from_url(settings.REDIS_URL, decode_responses=True, ssl_cert_reqs=None)
-    return _client
+    return get_redis()
 
 
 def _jobs_key(run_id: str) -> str:
@@ -63,6 +54,29 @@ def _jobs_key(run_id: str) -> str:
 
 def _meta_key(run_id: str) -> str:
     return f"pipeline:{run_id}:meta"
+
+
+def _keys_key(run_id: str) -> str:
+    return f"pipeline:{run_id}:job_keys"
+
+
+def _recorded_key(run_id: str) -> str:
+    return f"pipeline:{run_id}:recorded"
+
+
+def claim_job_key(*, run_id: str, job_key: str) -> bool:
+    """SADD — True only for the FIRST caller to claim this job_key in the
+    run. Keyword tasks call this before the LLM step, so a job that
+    several keywords (or sources) surface is scored once, not N times.
+
+    The claimer scores the canonical copy (job_store), and a better copy
+    found later by another keyword task replaces the shown one through
+    replace_recorded — so the first claimer no longer decides the source."""
+    r = _redis()
+    key = _keys_key(run_id)
+    is_new = bool(r.sadd(key, job_key))
+    r.expire(key, RUN_TTL_SECONDS)
+    return is_new
 
 
 def create_run(*, user_id: str, total_keywords: int) -> str:
@@ -77,16 +91,40 @@ def create_run(*, user_id: str, total_keywords: int) -> str:
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
     r.expire(_meta_key(run_id), RUN_TTL_SECONDS)
+    r.sadd(_user_runs_key(user_id), run_id)
+    r.expire(_user_runs_key(user_id), RUN_TTL_SECONDS)
     return run_id
 
 
-def record_scored_job(*, run_id: str, job: dict) -> None:
+def _user_runs_key(user_id: str) -> str:
+    return f"user_runs:{user_id}"
+
+
+def cancel_runs_for_user(user_id: str) -> int:
+    """Marks every live run of this user 'cancelled'; keyword tasks that
+    haven't started yet check is_cancelled() and skip their work."""
+    r = _redis()
+    cancelled = 0
+    for run_id in r.smembers(_user_runs_key(user_id)):
+        if r.exists(_meta_key(run_id)):
+            mark_run_status(run_id=run_id, status="cancelled", error="cancelled: account disabled")
+            cancelled += 1
+    return cancelled
+
+
+def is_cancelled(run_id: str) -> bool:
+    return _redis().hget(_meta_key(run_id), "status") == "cancelled"
+
+
+def record_scored_job(*, run_id: str, job: dict) -> dict:
     """RPUSH — append-only, safe under concurrent callers from multiple
     group() workers with zero coordination needed; Redis serializes
-    concurrent RPUSH calls on the same key natively."""
-    r = _redis()
+    concurrent RPUSH calls on the same key natively.
+
+    `id` is the canonical job id when the job came from job_store, so the
+    feed, save/hide and later replacements all use the same id."""
     payload = {
-        "id": str(uuid.uuid4()),
+        "id": job.get("id") or str(uuid.uuid4()),
         "source": job.get("source", ""),
         "title": job.get("title", ""),
         "company": job.get("company", ""),
@@ -98,11 +136,93 @@ def record_scored_job(*, run_id: str, job: dict) -> None:
         "llm_score": job.get("llm_score"),
         "llm_reason": job.get("llm_reason", ""),
         "auto_apply_capable": bool(job.get("auto_apply_capable")),
+        # P4a: the company's own apply page and which apply buttons work
+        "apply_url": job.get("apply_url"),
+        "apply_options": _apply_options(job),
+        # P3.2: match breakdown and freshness (None when unknown)
+        "match": job.get("match"),
+        "posted_at": job.get("posted_at"),
+        "posted_hours_ago": job.get("posted_hours_ago"),
+        "early": bool(job.get("early")),
+        "new_since_last_search": job.get("new_since_last_search"),
+        "applicants": job.get("applicants"),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    _push(run_id, payload)
+    return payload
+
+
+def _apply_options(job: dict) -> dict:
+    from app.services import apply_options
+    return apply_options.options(job)
+
+
+def _push(run_id: str, payload: dict) -> None:
+    r = _redis()
     key = _jobs_key(run_id)
     r.rpush(key, json.dumps(payload))
     r.expire(key, RUN_TTL_SECONDS)  # refresh TTL — an active run never expires mid-flight
+
+
+def remember_recorded(*, run_id: str, job_key: str, payload: dict) -> None:
+    """Which feed entry a job_key became, so a better copy can replace it."""
+    r = _redis()
+    r.hset(_recorded_key(run_id), job_key, json.dumps(payload))
+    r.expire(_recorded_key(run_id), RUN_TTL_SECONDS)
+
+
+def replace_recorded(*, run_id: str, job_key: str, best: dict) -> bool:
+    """If this job is already in the feed from a different copy than
+    `best` (the canonical copy), appends an updated entry with the SAME id
+    and `replaces: true`. Clients upsert feed entries by `id`. Scores are
+    kept: it is the same job. Returns True if an update was pushed."""
+    raw = _redis().hget(_recorded_key(run_id), job_key)
+    if not raw:
+        return False
+    shown = json.loads(raw)
+    if shown.get("source") == best.get("source") and shown.get("url") == best.get("url"):
+        return False
+    updated = {**shown, **{k: best.get(k, shown.get(k)) for k in
+                           ("source", "title", "company", "location", "url", "description", "posted")},
+               "auto_apply_capable": bool(best.get("auto_apply_capable")), "replaces": True,
+               "apply_url": best.get("apply_url"), "apply_options": _apply_options(best),
+               "created_at": datetime.now(timezone.utc).isoformat()}
+    _push(run_id, updated)
+    remember_recorded(run_id=run_id, job_key=job_key, payload=updated)
+    return True
+
+
+def update_recorded(*, run_id: str, job_key: str, fields: dict) -> bool:
+    """Appends an updated copy of a job already in the feed with some
+    fields changed (e.g. the LinkedIn applicant count found after it was
+    shown) — same `id`, `replaces: true`."""
+    raw = _redis().hget(_recorded_key(run_id), job_key)
+    if not raw:
+        return False
+    shown = json.loads(raw)
+    if all(shown.get(k) == v for k, v in fields.items()):
+        return False
+    updated = {**shown, **fields, "replaces": True, "created_at": datetime.now(timezone.utc).isoformat()}
+    _push(run_id, updated)
+    remember_recorded(run_id=run_id, job_key=job_key, payload=updated)
+    return True
+
+
+LAST_SEARCH_TTL_SECONDS = 90 * 24 * 3600
+
+
+def mark_user_search(user_id: str) -> str | None:
+    """Records that the user started a search now; returns when their
+    previous one started (ISO), for "new since your last search"."""
+    r = _redis()
+    key = f"user_last_search:{user_id}"
+    previous = r.getset(key, datetime.now(timezone.utc).isoformat())
+    r.expire(key, LAST_SEARCH_TTL_SECONDS)
+    return previous
+
+
+def count_jobs(*, run_id: str) -> int:
+    return int(_redis().llen(_jobs_key(run_id)))
 
 
 def get_jobs(*, run_id: str, offset: int = 0) -> list[dict]:

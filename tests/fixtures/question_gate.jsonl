@@ -1,0 +1,127 @@
+{"text": "Tell me about yourself.", "question": true, "type": "intro"}
+{"text": "So, could you walk me through your resume?", "question": true, "type": "intro"}
+{"text": "Okay great. Can you briefly introduce yourself?", "question": true, "type": "intro"}
+{"text": "Let's start with your background", "question": true, "type": "intro"}
+{"text": "Tell me about a time you had a conflict with a teammate.", "question": true, "type": "behavioral"}
+{"text": "Describe a situation where you missed a deadline", "question": true, "type": "behavioral"}
+{"text": "Give me an example of a project you're proud of.", "question": true, "type": "behavioral"}
+{"text": "What's the biggest mistake you've made at work?", "question": true, "type": "behavioral"}
+{"text": "How do you handle feedback from your manager?", "question": true, "type": "behavioral"}
+{"text": "Have you ever led a team through a difficult release?", "question": true, "type": "behavioral"}
+{"text": "Tell me about a challenge you faced in your last role and how you solved it.", "question": true, "type": "behavioral"}
+{"text": "What would you do if two stakeholders wanted opposite things?", "question": true, "type": "situational"}
+{"text": "Imagine production is down at 2 AM. How would you handle it?", "question": true, "type": "situational"}
+{"text": "Suppose your estimate turns out to be wrong by a week", "question": true, "type": "situational"}
+{"text": "Let's say a customer reports data loss, what's your first step?", "question": true, "type": "situational"}
+{"text": "What is the difference between a process and a thread?", "question": true, "type": "technical"}
+{"text": "Explain how indexes work in a relational database.", "question": true, "type": "technical"}
+{"text": "How does garbage collection work in Java?", "question": true, "type": "technical"}
+{"text": "What are the SOLID principles?", "question": true, "type": "technical"}
+{"text": "Can you explain REST versus GraphQL", "question": true, "type": "technical"}
+{"text": "Why would you choose Postgres over MongoDB here?", "question": true, "type": "technical"}
+{"text": "What happens when you type a URL into the browser?", "question": true, "type": "technical"}
+{"text": "How do you secure an API with JWT tokens?", "question": true, "type": "technical"}
+{"text": "Do you have experience with Kubernetes?", "question": true, "type": "technical"}
+{"text": "Which testing frameworks have you used?", "question": true, "type": "technical"}
+{"text": "Explain the event loop in JavaScript.", "question": true, "type": "technical"}
+{"text": "Write a function that reverses a linked list.", "question": true, "type": "coding"}
+{"text": "Can you implement a function to find duplicates in an array?", "question": true, "type": "coding"}
+{"text": "What's the time complexity of your solution?", "question": true, "type": "coding"}
+{"text": "Solve two sum and tell me the space complexity", "question": true, "type": "coding"}
+{"text": "How would you detect a cycle in a linked list?", "question": true, "type": "coding"}
+{"text": "Design a URL shortener.", "question": true, "type": "system_design"}
+{"text": "How would you design a rate limiter for our public API?", "question": true, "type": "system_design"}
+{"text": "Let's design a chat system that scales to a million users.", "question": true, "type": "system_design"}
+{"text": "Walk me through the architecture of your last project.", "question": true, "type": "system_design"}
+{"text": "How would you shard this table?", "question": true, "type": "system_design"}
+{"text": "What are your salary expectations?", "question": true, "type": "hr"}
+{"text": "What is your current CTC?", "question": true, "type": "hr"}
+{"text": "How long is your notice period?", "question": true, "type": "hr"}
+{"text": "Are you open to relocating to Bangalore?", "question": true, "type": "hr"}
+{"text": "Why do you want to join our company?", "question": true, "type": "hr"}
+{"text": "Why should we hire you?", "question": true, "type": "hr"}
+{"text": "Where do you see yourself in five years?", "question": true, "type": "hr"}
+{"text": "What are your strengths and weaknesses?", "question": true, "type": "hr"}
+{"text": "Why are you leaving your current job?", "question": true, "type": "hr"}
+{"text": "Do you have any questions for us?", "question": true, "type": "hr"}
+{"text": "Are you comfortable with working from office three days a week?", "question": true, "type": "hr"}
+{"text": "I'd like to hear about your experience with Kafka.", "question": true, "type": "technical"}
+{"text": "I'm curious how you approached testing on that project", "question": true, "type": "technical"}
+{"text": "Help me understand why you picked microservices.", "question": true, "type": "technical"}
+{"text": "Compare SQL and NoSQL databases for this use case.", "question": true, "type": "technical"}
+{"text": "Talk me through how you debugged that memory leak.", "question": true, "type": "technical"}
+{"text": "Okay, and how did you measure the improvement?", "question": true, "type": "general"}
+{"text": "What was your exact role in that migration?", "question": true, "type": "general"}
+{"text": "Could you share an example of mentoring a junior engineer?", "question": true, "type": "behavioral"}
+{"text": "Have you worked in an agile team before?", "question": true, "type": "general"}
+{"text": "How do you prioritize when everything is urgent?", "question": true, "type": "general"}
+{"text": "What motivates you?", "question": true, "type": "general"}
+{"text": "Two things: what stack did you use, and how big was the team?", "question": true, "type": "general", "multipart": true}
+{"text": "What did you build there? And what was the hardest part?", "question": true, "type": "general", "multipart": true}
+{"text": "Apne baare mein thoda batao.", "question": true, "type": "general"}
+{"text": "Aapka notice period kitna hai?", "question": true, "type": "hr"}
+{"text": "Is project mein aapka role kya tha?", "question": true, "type": "general"}
+{"text": "React mein hooks kaise kaam karte hain?", "question": true, "type": "technical"}
+{"text": "Aap yeh job kyun change karna chahte ho?", "question": true, "type": "general"}
+{"text": "Expected CTC kitna hai aapka?", "question": true, "type": "hr"}
+{"text": "Why?", "question": true, "recent": true, "followup": true}
+{"text": "Why not?", "question": true, "recent": true, "followup": true}
+{"text": "Can you elaborate?", "question": true, "recent": true, "followup": true}
+{"text": "Tell me more.", "question": true, "recent": true, "followup": true}
+{"text": "What about scale?", "question": true, "recent": true, "followup": true}
+{"text": "How about the cost side of it?", "question": true, "recent": true, "followup": true}
+{"text": "And then?", "question": true, "recent": true, "followup": true}
+{"text": "What was the result?", "question": true, "recent": true, "followup": true}
+{"text": "What did you learn from it?", "question": true, "recent": true, "followup": true}
+{"text": "What would you do differently?", "question": true, "recent": true, "followup": true}
+{"text": "How so?", "question": true, "recent": true, "followup": true}
+{"text": "For example?", "question": true, "recent": true, "followup": true}
+{"text": "What if the database goes down?", "question": true, "recent": true, "followup": true}
+{"text": "Can you hear me?", "question": false}
+{"text": "Can you hear me okay?", "question": false}
+{"text": "Am I audible?", "question": false}
+{"text": "Can you see my screen?", "question": false}
+{"text": "I think you're on mute.", "question": false}
+{"text": "Let me share my screen.", "question": false}
+{"text": "Give me one second.", "question": false}
+{"text": "How are you doing today?", "question": false}
+{"text": "Hi, how's it going?", "question": false}
+{"text": "Nice to meet you.", "question": false}
+{"text": "Thanks for joining today.", "question": false}
+{"text": "Thank you for your time.", "question": false}
+{"text": "Shall we get started?", "question": false}
+{"text": "Did I lose you?", "question": false}
+{"text": "Are you still there?", "question": false}
+{"text": "Is this a good time?", "question": false}
+{"text": "Okay.", "question": false}
+{"text": "Great, that makes sense.", "question": false}
+{"text": "Right, right.", "question": false}
+{"text": "Hmm, interesting.", "question": false}
+{"text": "Got it, thanks.", "question": false}
+{"text": "That's a good answer.", "question": false}
+{"text": "Let me take some notes.", "question": false}
+{"text": "I'm the engineering manager for the payments team.", "question": false}
+{"text": "Our team works mostly in Python and Go.", "question": false}
+{"text": "We have about forty engineers across three offices.", "question": false}
+{"text": "The role involves a lot of on-call work.", "question": false}
+{"text": "I'll be your interviewer for the next forty five minutes.", "question": false}
+{"text": "We'll do a coding round after this.", "question": false}
+{"text": "That was the last thing I wanted to cover.", "question": false}
+{"text": "Sounds good.", "question": false}
+{"text": "Perfect.", "question": false}
+{"text": "Uh huh.", "question": false}
+{"text": "Okay, moving on.", "question": false}
+{"text": "Cool, so that's the team structure.", "question": false}
+{"text": "My connection is a bit slow today.", "question": false}
+{"text": "The weather here has been terrible.", "question": false}
+{"text": "I joined this company two years ago.", "question": false}
+{"text": "Haan, theek hai.", "question": false}
+{"text": "Accha, samajh gaya.", "question": false}
+{"text": "Yes.", "question": false}
+{"text": "No worries at all.", "question": false}
+{"text": "We're almost out of time.", "question": false}
+{"text": "Someone from HR will reach out to you.", "question": false}
+{"text": "I see what you mean.", "question": false}
+{"text": "That's fine.", "question": false}
+{"text": "Okay, I'll note that down.", "question": false}
+{"text": "Why?", "question": false, "note": "a lone why with no card to follow"}

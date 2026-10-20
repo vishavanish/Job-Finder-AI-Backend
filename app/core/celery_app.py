@@ -27,7 +27,7 @@ celery_app.conf.update(
     accept_content=["json"],
     result_expires=settings.TASK_RESULT_TTL_SECONDS,
     task_track_started=True,
-    task_default_queue="default",
+    task_default_queue=settings.default_queue,
     broker_transport_options={
         "visibility_timeout": 3600,
         "socket_keepalive": True,
@@ -38,7 +38,7 @@ celery_app.conf.update(
 )
 
 # rediss:// (TLS) connections to Upstash require explicit SSL config on
-# BOTH the broker and result backend connections. redis.from_url(..., ssl_cert_reqs=None)
+# BOTH the broker and result backend connections. redis.from_url(..., )
 # in health.py works because it's a raw redis-py client — that kwarg does NOT
 # propagate to Celery's own connection pool. Without this block, the worker's
 # broker connection can fail cert verification silently and just never receive tasks.
@@ -51,6 +51,46 @@ if settings.REDIS_URL.startswith("rediss://"):
     _ssl_opts = {"ssl_cert_reqs": ssl.CERT_REQUIRED}
     celery_app.conf.broker_use_ssl = _ssl_opts
     celery_app.conf.redis_backend_use_ssl = _ssl_opts
+
+# Celery beat (run ONE beat process): job alerts tick (P3.2), Gmail sync tick and
+# email retention (P5), apply-proof retention (P4b). The ATS crawler (P6) comes later.
+celery_app.conf.beat_schedule = {
+    "job-alerts-tick": {
+        "task": "job_finder.alerts_tick",
+        "schedule": float(settings.JOB_ALERT_TICK_SECONDS),
+        "options": {"queue": settings.maintenance_queue, "expires": settings.JOB_ALERT_TICK_SECONDS},
+    },
+    "gmail-tick": {
+        "task": "job_finder.gmail_tick",
+        "schedule": float(settings.GMAIL_TICK_SECONDS),
+        "options": {"queue": settings.maintenance_queue, "expires": settings.GMAIL_TICK_SECONDS},
+    },
+    "purge-email-data": {
+        "task": "job_finder.purge_email_data",
+        "schedule": 24 * 3600.0,
+        "options": {"queue": settings.maintenance_queue, "expires": 3600},
+    },
+    "ats-tick": {
+        "task": "job_finder.ats_tick",
+        "schedule": float(settings.ATS_CRAWL_TICK_SECONDS),
+        "options": {"queue": settings.maintenance_queue, "expires": settings.ATS_CRAWL_TICK_SECONDS},
+    },
+    "purge-ats-jobs": {
+        "task": "job_finder.purge_ats_jobs",
+        "schedule": 24 * 3600.0,
+        "options": {"queue": settings.maintenance_queue, "expires": 3600},
+    },
+    "purge-voice-data": {
+        "task": "job_finder.purge_voice_data",
+        "schedule": 24 * 3600.0,
+        "options": {"queue": settings.maintenance_queue, "expires": 3600},
+    },
+    "purge-apply-proofs": {
+        "task": "job_finder.purge_apply_proofs",
+        "schedule": 24 * 3600.0,
+        "options": {"queue": settings.maintenance_queue, "expires": 3600},
+    },
+}
 
 import app.core.celery_tasks  # noqa: E402, F401
 
