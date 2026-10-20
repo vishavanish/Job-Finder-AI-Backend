@@ -447,6 +447,30 @@ Plan: `docs/plans/P6-ats-discovery.md` (owner approved all ten decisions 2026-10
 - New env (all optional): `ATS_CRAWL_TICK_SECONDS` (300), `ATS_CRAWL_BATCH` (50), `ATS_HOT_REFRESH_HOURS` (6), `ATS_COLD_REFRESH_HOURS` (24), `ATS_HOST_CONCURRENCY` (2), `ATS_MAX_JOBS_PER_COMPANY` (1000), `ATS_WORKDAY_MAX_JOBS` (400), `ATS_INDEX_COUNTRIES` (`India,Remote`), `ATS_MIN_COMPANIES` (10), `ATS_TOPUP_MAX_COMPANIES` (40), `ATS_TOPUP_SECONDS` (20), `ATS_STALE_DAYS` (3), `ATS_CLOSED_RETENTION_DAYS` (7), `ATS_MAX_INDEXED_JOBS` (300000), `ATS_SEARCH_CACHE_SECONDS` (600), `ATS_GONE_AFTER` (3), `RATE_LIMIT_ATS_SEARCH` (30/minute), `RATE_LIMIT_ATS_ADD_COMPANY` (10/hour).
 - Watch Supabase storage in `GET /admin/ats/health` (`registry.jobs` vs `index_limit`).
 
+### 6.13 Phase 7a status — Voice Practice mode (branch `dev`)
+
+Plan: `docs/plans/P7-voice-prep.md` (owner approved all defaults 2026-10-20, plus OpenRouter as the last LLM fallback and OpenAI (ChatGPT) rows ready behind the registry). P7b (Live Copilot) is not built yet.
+
+| Item | State |
+|------|-------|
+| Router | ✅ New tasks `copilot_answer`, `copilot_expand`, `question_gate`, `stt`, `tts`. Speech tasks are served only by rows that list them (`tasks == []` still means "every text task"); provider `browser` is speech-only. `ai_router.stream()` streams a text task with failover **before the first chunk only**, ledgered (estimated tokens when the provider gives none); `free_only` forces Free tools only for one call (session cost cap). |
+| LLM adapters | ✅ `stream()` on Gemini, Groq, Anthropic and OpenAI-compatible (SSE — covers OpenRouter and OpenAI); Hugging Face streams as one chunk. Adapters stay synchronous (they serve Celery too); `services/voice_llm.py` runs each stream in a worker thread and cancels between chunks. |
+| Registry seeds | ✅ Migration `0012`: Groq **Whisper Large v3 Turbo** (`stt`, on) and **Browser voice** (`tts`, on, no key); **OpenRouter** `openai/gpt-oss-120b:free` as the last fallback for every text task (priority 900, **off** until a platform key with scope `openrouter` is stored and the row switched on); **OpenAI** `gpt-5-mini`, `gpt-4o-mini-transcribe`, `gpt-4o-mini-tts` (**off**, need an `openai` key — check names/prices before switching on). Admin "Test" works for speech rows. |
+| Speech | ✅ `providers/voice/`: VAD (`webrtcvad`, energy fallback) cuts 16 kHz PCM16 into utterances (end after `VOICE_END_OF_TURN_MS`), OpenAI-compatible `/audio/transcriptions` STT (Groq, OpenAI) and `/audio/speech` TTS, browser TTS. `services/voice_speech.py` picks them through the registry with failover; usage ledgered (STT seconds / TTS characters in `tokens_in`). **Not in P7a:** Deepgram streaming STT, Deepgram Aura / ElevenLabs TTS (P7b). |
+| Practice socket | ✅ `POST /voice/sessions` → single-use stream token (60 s, jti in Redis) → `WS /voice/sessions/{id}/stream`, first message `{"type":"auth"}` (close 4401). Gates: `voice_prep`, owner, live session, one live voice session per user (Redis lock; 4409). Binary frames (channel, ms, PCM; > 100 ms → 1009). Interviewer streams sentence by sentence (`interviewer.delta`; `[Q]/[F]/[END]` tags pick question / follow-up / closing; ≤ 1 follow-up per question); typed answers (`{"type":"text"}`); pause/resume/repeat/skip/end; speech before the reply starts cancels it, speech while it speaks is a barge-in (turn `interrupted`); idle 30 s → paused, 60 s → ended; max 45 min; cost cap $0.50 → free models only, then end (4402); reconnect within 60 s resumes (`session.resumed`). Latency per turn (`stt_ms`, `first_token_ms`, `first_word_ms`). |
+| Feedback | ✅ Celery `voice_finalize` (default queue; also ends dropped sessions after the resume window): one `interview_eval` call → per-answer scores 1–5 (accuracy, relevance, structure, clarity) + delivery from pace/fillers, STAR parts, strengths, improvements, model answer **grounded** in resume + approved stories + the user's own answers; session summary, weak questions, latency p50/p95. `GET /voice/sessions/{id}/feedback`, `/voice/history`, `/voice/progress`. |
+| Story bank | ✅ `GET/POST /story-bank`, `PUT/DELETE /story-bank/{id}`, `POST /story-bank/{id}/approve`, `POST /story-bank/draft-from-resume` (Celery `story_bank_draft`, grounded, drafts unapproved). |
+| Privacy | ✅ No audio stored anywhere (utterances dropped after STT); every transcript/model-answer text sealed; `DELETE /voice/sessions/{id}`, `DELETE /voice/history`; daily `purge_voice_data` after `VOICE_TRANSCRIPT_RETENTION_DAYS` (90). `GET/PUT /voice/settings` carries the Live Copilot acknowledgement text + version (enforcement is P7b). Kill switch flag `live_copilot_enabled`; `live_copilot` entitlement stays off by default. |
+| Tests | ✅ 334 total (24 for P7a), fake STT + fake router stream. |
+| Not in P7a | Live Copilot (socket, question gate, speculative start, acknowledgement endpoint), Deepgram, `voice_bench.py`, `GET /admin/voice/health`, screens (F7). |
+
+**Operational changes introduced in P7a**
+- Migration `0012` (run `alembic upgrade head`). New dependency `webrtcvad-wheels` (`pip install -r requirements.txt`).
+- Beat runs `purge_voice_data` (daily, maintenance queue); `voice_finalize` and `story_bank_draft` run on default.
+- Voice sockets live in the API process: nginx must pass WebSocket upgrades on `/api/v1/voice/` (read timeout ≥ 120 s); with more than one uvicorn worker use sticky sessions (or run one worker).
+- To use OpenRouter as fallback: Admin → Platform keys → add scope `openrouter`, then switch on "GPT-OSS 120B (OpenRouter, fallback)" in Admin → AI models. ChatGPT: add scope `openai`, check the model names, switch the OpenAI rows on.
+- New env (all optional): `RATE_LIMIT_VOICE_SESSIONS` (20/day), `VOICE_PRACTICE_MAX_MINUTES` (45), `VOICE_COPILOT_MAX_MINUTES` (90), `VOICE_PRACTICE_COST_CAP_USD` (0.50), `VOICE_COPILOT_COST_CAP_USD` (1.00), `VOICE_TRANSCRIPT_RETENTION_DAYS` (90), `VOICE_RESUME_SECONDS` (60), `VOICE_IDLE_PAUSE_SECONDS` (30), `VOICE_END_OF_TURN_MS` (700), `VOICE_MIN_SPEECH_MS` (300), `VOICE_MAX_UTTERANCE_SECONDS` (60), `VOICE_SPECULATIVE_GRACE_MS` (400), `VOICE_FIRST_TOKEN_TIMEOUT_MS` (2500), `VOICE_STT_TIMEOUT_SECONDS` (15), `VOICE_MAX_FRAME_MS` (100), `VOICE_AUDIO_QUEUE_MS` (2000), `VOICE_STREAM_TOKEN_SECONDS` (60), `VOICE_VAD_AGGRESSIVENESS` (2), `VOICE_GROUNDING_MIN` (0.15), `COPILOT_ACK_VERSION` (2026-10), `STORY_BANK_MAX_PER_USER` (100).
+
 ---
 
 ## 7. Modules in detail
@@ -886,8 +910,11 @@ All tables have `id`, `created_at`, `updated_at`. User-owned tables have `user_i
 | `ai_models` | see Section 7.9 |
 | `user_model_prefs` | user_id, task, model_id |
 | `secrets` | owner (platform/user), provider, encrypted_value, key_ref, last4 |
-| `voice_sessions`, `voice_turns`, `voice_feedback` | `mode` (mock \| copilot), job_id?, per-turn transcript with timestamps, detected questions + shown answers, rubric scores |
-| `story_bank` | user_id, title, STAR text, skills tags, embedding (used by RAG for Practice and Live Copilot) |
+| `voice_sessions` | user_id, mode (mock \| copilot), state, job_id?, resume_id?, role, config, providers, started/ended/last_seen_at, end_reason, cost_usd + cap, latency p50/p95, feedback_state, overall_score, summary (sealed), purge_at (P7) |
+| `voice_turns` | session_id, seq, speaker, kind (question/answer/closing…), text (sealed), question/parent id, state (shown/interrupted/skipped…), start/end ms, metrics (wpm, fillers), latency (P7) |
+| `voice_feedback` | session_id, turn_id? (null = session), scores 1–5, skill_area, star, strengths, improvements, model answer (sealed) (P7) |
+| `voice_settings` | user_id, copilot_ack_version/at, answer style/length, language, tts_voice, default_sources (P7) |
+| `story_bank` | user_id, title, situation/task/action/result, skills, origin (user/ai), approved, uses; no embedding yet — keyword retrieval in P7 |
 | `usage_ledger` | user_id, task, model_id, tokens_in/out, latency_ms, cost |
 | `audit_logs` | actor_id, action, target, before/after, ip, at |
 | `notifications` | user_id, type, payload, read_at |
@@ -913,7 +940,7 @@ All routes are already served under `/api/v1` (`settings.API_V1_PREFIX`); new ro
 | Apply | `POST /apply` (existing), `GET /apply/options/{job_id}`, `POST /apply/prep`, `GET /apply/prep/{id}` (P4a), `GET/POST/PUT/DELETE /answer-bank`, `POST /answer-bank/{id}/approve` (P4a), `GET/PUT /apply/settings`, `POST /apply/runs`, `GET /apply/runs?state=waiting|&job_id=`, `GET /apply/runs/{id}`, `POST /apply/runs/{id}/answer`, `POST /apply/runs/{id}/approve`, `POST /apply/runs/{id}/cancel`, `POST /apply/runs/{id}/done`, `GET /apply/runs/{id}/proofs[/{proof_id}]` (P4b), `POST /applications/manual` (built for F3: `{job_id, via}` → `submitted` (or `emailed` with `via: "email"`, P4a) / `manual` + job state `applied`) |
 | Tracker | `GET /applications`, `GET/PATCH /applications/{id}`, `GET /applications/{id}/events`, `GET /applications/stats` |
 | Gmail | `GET /gmail/connect`, `GET /gmail/callback`, `GET /gmail/accounts`, `DELETE /gmail/accounts/{id}`, `POST /gmail/accounts/{id}/sync`, `GET /gmail/events?state=`, `GET /gmail/review`, `POST /gmail/review/{id}/resolve` (all built in P5) |
-| Voice | `POST /voice/sessions`, `WS /voice/sessions/{id}/stream` (mock), `WS /voice/copilot/{id}/stream` (live), `POST /voice/copilot/{id}/expand`, `GET /voice/sessions/{id}/feedback`, `GET /voice/history`, `DELETE /voice/sessions/{id}`, `GET/POST /story-bank` |
+| Voice | `GET /voice/providers`, `GET/PUT /voice/settings`, `POST /voice/sessions`, `POST /voice/sessions/{id}/token`, `WS /voice/sessions/{id}/stream` (Practice), `GET /voice/sessions/{id}`, `GET /voice/sessions/{id}/feedback`, `GET /voice/history`, `GET /voice/progress`, `DELETE /voice/sessions/{id}`, `DELETE /voice/history`, `GET/POST /story-bank`, `PUT/DELETE /story-bank/{id}`, `POST /story-bank/{id}/approve`, `POST /story-bank/draft-from-resume` (all P7a); P7b: `POST /voice/copilot/acknowledge`, `WS /voice/copilot/{id}/stream` (expand/shorter/regenerate are WS `control` messages, no REST expand), `GET /admin/voice/health` |
 | Tasks | `GET /tasks/{id}`, `POST /tasks/{id}/cancel` (both ownership-checked) |
 | Admin | `/admin/users`, `/admin/users/{id}/entitlements`, `/admin/models`, `/admin/providers`, `/admin/flags`, `/admin/audit`, `/admin/health` |
 
@@ -925,10 +952,10 @@ Conventions: Pydantic request/response models for every route, consistent error 
 
 | Queue | Tasks | Notes |
 |-------|-------|-------|
-| `default` | search, score, ats fetch, pipeline fan-out, resume parse | Multiple workers fine |
+| `default` | search, score, ats fetch, pipeline fan-out, resume parse, `voice_finalize` + `story_bank_draft` (P7) | Multiple workers fine |
 | `apply` | Playwright apply runs: `apply_prepare`, `apply_submit` (P4b) | Low concurrency; one browser per run; memory-limited; needs Chromium installed |
 | `email` | `sync_gmail_account` per account (P5); the `gmail_tick` beat task runs on `maintenance` | Idempotent (unique account + message id); in `worker_queues` |
-| `maintenance` | Job-alerts tick (P3.2); apply-proof retention cleanup (P4b); ATS crawler `ats_tick` → `crawl_ats_company`, `purge_ats_jobs` (P6); later provider health checks, usage rollups | Beat schedule (one beat process) |
+| `maintenance` | Job-alerts tick (P3.2); apply-proof retention cleanup (P4b); ATS crawler `ats_tick` → `crawl_ats_company`, `purge_ats_jobs` (P6); `purge_voice_data` (P7); later provider health checks, usage rollups | Beat schedule (one beat process) |
 
 Rules: tasks are idempotent; every task receives `user_id`; secrets are resolved by `key_ref` inside the worker; progress is reported with `update_state(state="PROGRESS")`; worker `-Q` lists **must** match `settings.*_queue` names; set `acks_late` and sensible `time_limit`/`soft_time_limit` per queue.
 

@@ -18,3 +18,4 @@ from app.models.alerts import JobAlert, JobAlertRun  # noqa: F401
 from app.models.apply import AnswerBankEntry, ApplyPack, ApplyProof, ApplyRun, ApplySettings  # noqa: F401
 from app.models.email import EmailAccount, EmailEvent, EmailJob  # noqa: F401
 from app.models.ats import AtsCompany, AtsJob, AtsPlatformSetting  # noqa: F401
+from app.models.voice import StoryBankEntry, VoiceFeedback, VoiceSession, VoiceSettings, VoiceTurn  # noqa: F401

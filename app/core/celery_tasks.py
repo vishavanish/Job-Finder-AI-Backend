@@ -832,3 +832,52 @@ def run_job_alert(self, alert_id: str, trigger: str = "schedule") -> dict:
         return {"alert_id": alert_id, "error": str(e)[:200]}
     finally:
         db.close()
+
+
+@celery_app.task(name="job_finder.voice_finalize")
+def voice_finalize_task(session_id: str) -> dict:
+    """After a voice session (P7): ends it if its socket dropped and wasn't
+    resumed, then scores the answers. Transcripts are read from the DB here,
+    never sent through the broker."""
+    from app.services import voice_eval
+
+    db = SessionLocal()
+    try:
+        return voice_eval.finalize(db, session_id)
+    except Exception:  # noqa: BLE001 — a crash must not leave feedback "pending" forever
+        db.rollback()
+        logger.exception("voice finalize crashed for session=%s", session_id)
+        from app.models.voice import VoiceSession
+        row = db.get(VoiceSession, session_id)
+        if row is not None and row.feedback_state == "pending":
+            row.feedback_state = "failed"
+            db.commit()
+        return {"status": "failed"}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="job_finder.purge_voice_data")
+def purge_voice_data_task() -> dict:
+    """Deletes voice sessions past VOICE_TRANSCRIPT_RETENTION_DAYS (P7)."""
+    from app.services import voice_store
+
+    db = SessionLocal()
+    try:
+        return {"deleted": voice_store.purge_expired(db)}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="job_finder.story_bank_draft")
+def story_bank_draft_task(user_id: str) -> dict:
+    """Drafts STAR stories from the user's master resume (P7); drafts wait for approval."""
+    from app.services import ai_router, story_bank
+
+    db = SessionLocal()
+    try:
+        return story_bank.draft_from_resume(db, user_id)
+    except ai_router.NoModelAvailable as e:
+        return {"created": 0, "message": f"No AI model could draft stories: {e}"[:300]}
+    finally:
+        db.close()

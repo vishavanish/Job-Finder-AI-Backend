@@ -21,10 +21,11 @@ never logged.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Callable, Iterator
 
 from sqlalchemy.orm import Session
 
@@ -32,15 +33,20 @@ from app.core.config import get_settings
 from app.core.redis_client import get_redis
 from app.models.ai import AiModel, TaskModelDefault, UsageLedger, UserModelPref
 from app.models.user import User
-from app.providers.llm import LLMError, ModelSpec, get_adapter
+from app.providers.llm import LLMError, ModelSpec, get_adapter, stream_text
 from app.providers.llm.base import short_error
 from app.services import entitlements, key_store
 
 logger = logging.getLogger("job_finder_api.ai_router")
 
-# Text tasks the router serves today (CLAUDE.md 7.9; stt/tts/embeddings arrive with P7).
+# Task types the router serves (CLAUDE.md 7.9). stt/tts are speech tasks (P7): a model serves
+# them only when its `tasks` list names them; `tasks == []` means "every text task".
 TASKS = ("score", "resume_parse", "title_suggest", "resume_tailor", "cover_letter", "form_answer",
-         "email_classify", "interview_chat", "interview_eval")
+         "email_classify", "interview_chat", "interview_eval", "copilot_answer", "copilot_expand",
+         "question_gate", "stt", "tts")
+SPEECH_TASKS = frozenset({"stt", "tts"})
+# Providers that only do speech (no text adapter in app/providers/llm).
+SPEECH_ONLY_PROVIDERS = frozenset({"browser"})
 
 # Providers that cannot run without a key (openai_compatible may be a keyless local server).
 KEY_REQUIRED = {"gemini", "groq", "huggingface", "anthropic"}
@@ -80,7 +86,14 @@ def _now() -> datetime:
 
 
 def serves(model: AiModel, task: str) -> bool:
-    return not model.tasks or task in model.tasks
+    if task in SPEECH_TASKS:
+        return task in (model.tasks or [])
+    if model.provider in SPEECH_ONLY_PROVIDERS:
+        return False
+    tasks = [t for t in (model.tasks or []) if t not in SPEECH_TASKS]
+    if model.tasks and not tasks:
+        return False  # a speech-only row (e.g. Whisper) never serves text
+    return not tasks or task in tasks
 
 
 # ---------------------------------------------------------------- breaker
@@ -123,13 +136,16 @@ def may_use_paid(db: Session, user: User | None) -> bool:
 
 
 def access(db: Session, user: User | None, model: AiModel, *, user_scopes: set[str] | None = None,
-           extra_scopes: set[str] | None = None) -> Access:
+           extra_scopes: set[str] | None = None, free_only: bool = False) -> Access:
     """Whether `user` may use `model` now, with the reason when not. Shown
-    to users (GET /models) and applied by the router."""
+    to users (GET /models) and applied by the router. free_only forces the
+    "Free tools only" rule for one call (a voice session past its cost cap)."""
     if not model.enabled_global:
         return Access(False, "Turned off by the admin.")
     own_key = model.key_scope in (user_scopes or set()) or model.key_scope in (extra_scopes or set())
     if model.tier == "paid":
+        if free_only:
+            return Access(False, "Paid model — this session reached its cost cap.")
         if user is not None and user.free_only_mode:
             return Access(False, "Paid model — \"Free tools only\" is on.")
         if not (own_key or may_use_paid(db, user)):
@@ -142,8 +158,8 @@ def access(db: Session, user: User | None, model: AiModel, *, user_scopes: set[s
 
 # ---------------------------------------------------------------- chain
 
-def resolve_chain(db: Session, *, user: User | None, task: str,
-                  extra_scopes: set[str] | None = None) -> tuple[list[AiModel], list[str]]:
+def resolve_chain(db: Session, *, user: User | None, task: str, extra_scopes: set[str] | None = None,
+                  free_only: bool = False) -> tuple[list[AiModel], list[str]]:
     """(models to try in order, reasons for the ones skipped)."""
     models = db.query(AiModel).order_by(AiModel.priority, AiModel.display_name).all()
     by_id = {m.id: m for m in models}
@@ -167,7 +183,7 @@ def resolve_chain(db: Session, *, user: User | None, task: str,
         if m.id in seen or not serves(m, task):
             continue
         seen.add(m.id)
-        verdict = access(db, user, m, user_scopes=user_scopes, extra_scopes=extra_scopes)
+        verdict = access(db, user, m, user_scopes=user_scopes, extra_scopes=extra_scopes, free_only=free_only)
         if not verdict.allowed:
             if m.enabled_global:
                 skipped.append(f"{m.display_name}: {verdict.reason}")
@@ -183,6 +199,25 @@ def resolve_chain(db: Session, *, user: User | None, task: str,
 
 def _cost(model: AiModel, tokens_in: int, tokens_out: int) -> float:
     return round(tokens_in / 1000 * (model.cost_per_1k_in or 0) + tokens_out / 1000 * (model.cost_per_1k_out or 0), 6)
+
+
+def record_usage(db: Session, *, user_id: str | None, task: str, model: AiModel, key_source: str,
+                 tokens_in: int, tokens_out: int, latency_ms: int, success: bool, error: str | None = None,
+                 ref: str | None = None) -> float:
+    """Ledger one call made outside call_model (speech, streams). Returns its cost."""
+    cost = _ledger(db, user_id=user_id, task=task, model=model, key_source=key_source, tokens_in=tokens_in,
+                   tokens_out=tokens_out, latency_ms=latency_ms, success=success, error=error, ref=ref)
+    if success:
+        _record_success(model.id)
+    else:
+        _record_failure(model.id)
+    return cost
+
+
+def resolve_key(db: Session, *, user_id: str | None, model: AiModel) -> tuple[str, str]:
+    """(api key, source) for `model`; ("", "none") when nothing is stored."""
+    resolved = key_store.resolve(db, user_id=user_id, scope=model.key_scope)
+    return (resolved.value, resolved.source) if resolved else ("", "none")
 
 
 def _ledger(db: Session, *, user_id: str | None, task: str, model: AiModel, key_source: str,
@@ -274,3 +309,96 @@ def complete(db: Session, *, user_id: str | None, task: str, system: str, user_p
             if progress:
                 progress(f"{model.display_name} failed ({e}) — trying the next model")
     raise NoModelAvailable(task, attempts)
+
+
+# ---------------------------------------------------------------- streams (P7, voice)
+
+@dataclass
+class StreamOutcome:
+    """Filled by stream(): which model answered, the full text and its cost."""
+    model: AiModel | None = None
+    key_source: str = ""
+    text: str = ""
+    cost_usd: float = 0.0
+    first_token_ms: int | None = None
+    cancelled: bool = False
+    attempts: list[str] | None = None
+
+
+def stream(db: Session, *, user_id: str | None, task: str, system: str, user_prompt: str,
+           outcome: StreamOutcome, max_tokens: int = 800, ref: str | None = None, free_only: bool = False,
+           timeout: float | None = None, cancel: threading.Event | None = None) -> Iterator[str]:
+    """Streams `task` from the first model in the chain that produces a
+    first chunk. A model that fails BEFORE its first chunk is skipped (the
+    next one is tried); a failure after that raises LLMError — the caller
+    has already shown part of the answer. `cancel` stops the stream between
+    chunks (the HTTP stream is closed); a cancelled call is still ledgered.
+    Raises NoModelAvailable when nothing produced a first chunk."""
+    if task not in TASKS or task in SPEECH_TASKS:
+        raise ValueError(f"unknown text task {task!r}")
+    user = db.get(User, user_id) if user_id else None
+    chain, attempts = resolve_chain(db, user=user, task=task, free_only=free_only)
+    outcome.attempts = attempts
+    limit_timeout = timeout or float(get_settings().AI_REQUEST_TIMEOUT_SECONDS)
+
+    for model in chain:
+        api_key, source = resolve_key(db, user_id=user_id, model=model)
+        adapter = get_adapter(model.provider)
+        spec = ModelSpec(model.provider, model.model_id, model.base_url, model.max_output_tokens)
+        limit = min(max_tokens, model.max_output_tokens) if model.max_output_tokens else max_tokens
+        usage: dict = {}
+        started = time.monotonic()
+        chunks: list[str] = []
+        gen = stream_text(adapter, spec, api_key=api_key, system=system, user=user_prompt, max_tokens=limit,
+                          timeout=limit_timeout, usage=usage)
+        try:
+            for chunk in gen:
+                if not chunks:
+                    outcome.first_token_ms = int((time.monotonic() - started) * 1000)
+                    outcome.model, outcome.key_source = model, source
+                chunks.append(chunk)
+                yield chunk
+                if cancel is not None and cancel.is_set():
+                    outcome.cancelled = True
+                    break
+        except LLMError as e:
+            gen.close()
+            latency = int((time.monotonic() - started) * 1000)
+            _ledger(db, user_id=user_id, task=task, model=model, key_source=source, tokens_in=0,
+                    tokens_out=_estimate_tokens("".join(chunks)), latency_ms=latency, success=False, error=str(e),
+                    ref=ref)
+            _record_failure(model.id)
+            if chunks:
+                raise
+            logger.warning("ai_router: stream %s failed for task=%s user=%s: %s", model.model_id, task, user_id, e)
+            attempts.append(f"{model.display_name}: {e}")
+            continue
+        except Exception as e:  # noqa: BLE001 — an adapter bug must not stop the chain
+            gen.close()
+            _record_failure(model.id)
+            if chunks:
+                raise LLMError(short_error(e)) from e
+            attempts.append(f"{model.display_name}: {short_error(e)}")
+            continue
+        finally:
+            gen.close()
+
+        if not chunks:
+            attempts.append(f"{model.display_name}: empty response")
+            _record_failure(model.id)
+            continue
+        text = "".join(chunks)
+        latency = int((time.monotonic() - started) * 1000)
+        tokens_in = int(usage.get("tokens_in") or _estimate_tokens(system + user_prompt))
+        tokens_out = int(usage.get("tokens_out") or _estimate_tokens(text))
+        outcome.text = text
+        outcome.cost_usd = _ledger(db, user_id=user_id, task=task, model=model, key_source=source,
+                                   tokens_in=tokens_in, tokens_out=tokens_out, latency_ms=latency, success=True,
+                                   error=None, ref=ref)
+        _record_success(model.id)
+        return
+    raise NoModelAvailable(task, attempts)
+
+
+def _estimate_tokens(text: str) -> int:
+    return max(0, len(text or "") // 4)

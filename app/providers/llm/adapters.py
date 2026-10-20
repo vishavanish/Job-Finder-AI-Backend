@@ -14,8 +14,15 @@ One adapter per provider type an admin can choose in the model registry:
 Each call gets the model and key from the router; nothing here reads
 settings or env keys. SDK imports are lazy so a missing optional package
 only breaks its own provider.
+
+stream() (P7, voice) yields the answer in chunks and fills `usage` with
+{"tokens_in", "tokens_out"} when the provider reports them. Adapters
+without it are streamed as one chunk by stream_text().
 """
 from __future__ import annotations
+
+import json
+from typing import Iterator
 
 import httpx
 
@@ -48,6 +55,28 @@ class GeminiAdapter:
         )
 
 
+    def stream(self, spec: ModelSpec, *, api_key: str, system: str, user: str, max_tokens: int,
+               timeout: float, usage: dict) -> Iterator[str]:
+        try:
+            from google import genai
+        except ImportError as e:
+            raise LLMError("google-genai is not installed", retryable=False) from e
+        config = {"system_instruction": system, "temperature": TEMPERATURE, "max_output_tokens": max_tokens}
+        try:
+            client = genai.Client(api_key=api_key, http_options={"timeout": int(timeout * 1000)})
+            for chunk in client.models.generate_content_stream(model=spec.model_id, contents=user, config=config):
+                meta = getattr(chunk, "usage_metadata", None)
+                if meta is not None:
+                    usage["tokens_in"] = int(getattr(meta, "prompt_token_count", 0) or 0)
+                    usage["tokens_out"] = int(getattr(meta, "candidates_token_count", 0) or 0)
+                if chunk.text:
+                    yield chunk.text
+        except LLMError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise LLMError(short_error(e)) from e
+
+
 def _openai_style_result(resp) -> LLMResult:
     usage = getattr(resp, "usage", None)
     return LLMResult(
@@ -75,6 +104,34 @@ class GroqAdapter:
         except Exception as e:  # noqa: BLE001
             raise LLMError(short_error(e)) from e
         return _openai_style_result(resp)
+
+    def stream(self, spec: ModelSpec, *, api_key: str, system: str, user: str, max_tokens: int,
+               timeout: float, usage: dict) -> Iterator[str]:
+        try:
+            from groq import Groq
+        except ImportError as e:
+            raise LLMError("groq is not installed", retryable=False) from e
+        try:
+            client = Groq(api_key=api_key, timeout=timeout, max_retries=0)
+            resp = client.chat.completions.create(
+                model=spec.model_id,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                temperature=TEMPERATURE,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+            for chunk in resp:
+                extra = getattr(chunk, "x_groq", None)
+                u = getattr(extra, "usage", None) if extra is not None else None
+                if u is not None:
+                    usage["tokens_in"] = int(getattr(u, "prompt_tokens", 0) or 0)
+                    usage["tokens_out"] = int(getattr(u, "completion_tokens", 0) or 0)
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except LLMError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise LLMError(short_error(e)) from e
 
 
 class HuggingFaceAdapter:
@@ -129,6 +186,29 @@ class AnthropicAdapter:
         text = "".join(block.text for block in resp.content if block.type == "text")
         return LLMResult(text=text, tokens_in=resp.usage.input_tokens, tokens_out=resp.usage.output_tokens)
 
+    def stream(self, spec: ModelSpec, *, api_key: str, system: str, user: str, max_tokens: int,
+               timeout: float, usage: dict) -> Iterator[str]:
+        try:
+            import anthropic
+        except ImportError as e:
+            raise LLMError("anthropic is not installed", retryable=False) from e
+        client = anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=0)
+        try:
+            with client.messages.stream(model=spec.model_id, max_tokens=max_tokens, system=system,
+                                        messages=[{"role": "user", "content": user}]) as s:
+                for text in s.text_stream:
+                    yield text
+                final = s.get_final_message()
+        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError,
+                anthropic.NotFoundError, anthropic.BadRequestError) as e:
+            raise LLMError(short_error(e), retryable=False) from e
+        except (anthropic.RateLimitError, anthropic.APIStatusError, anthropic.APIConnectionError) as e:
+            raise LLMError(short_error(e)) from e
+        usage["tokens_in"] = final.usage.input_tokens
+        usage["tokens_out"] = final.usage.output_tokens
+        if final.stop_reason == "refusal":
+            raise LLMError("model declined the request (refusal)", retryable=False)
+
 
 class OpenAICompatibleAdapter:
     """POST {base_url}/chat/completions. The key is optional (a local Ollama
@@ -164,6 +244,50 @@ class OpenAICompatibleAdapter:
         return LLMResult(text=text, tokens_in=int(usage.get("prompt_tokens") or 0),
                          tokens_out=int(usage.get("completion_tokens") or 0))
 
+    def stream(self, spec: ModelSpec, *, api_key: str, system: str, user: str, max_tokens: int,
+               timeout: float, usage: dict) -> Iterator[str]:
+        """Server-sent events from /chat/completions (OpenAI, OpenRouter, ...)."""
+        if not spec.base_url:
+            raise LLMError("openai_compatible model has no base_url", retryable=False)
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        body = {
+            "model": spec.model_id,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "max_tokens": max_tokens,
+            "temperature": TEMPERATURE,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        try:
+            with httpx.stream("POST", f"{spec.base_url.rstrip('/')}/chat/completions", json=body, headers=headers,
+                              timeout=httpx.Timeout(timeout, connect=min(timeout, 5.0)),
+                              follow_redirects=False) as resp:
+                if resp.status_code >= 400:
+                    retryable = resp.status_code == 429 or resp.status_code >= 500
+                    raise LLMError(f"HTTP {resp.status_code} from model endpoint", retryable=retryable)
+                for line in resp.iter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(payload)
+                    except ValueError:
+                        continue
+                    u = data.get("usage") or {}
+                    if u:
+                        usage["tokens_in"] = int(u.get("prompt_tokens") or 0)
+                        usage["tokens_out"] = int(u.get("completion_tokens") or 0)
+                    choices = data.get("choices") or []
+                    delta = (choices[0].get("delta") or {}).get("content") if choices else None
+                    if delta:
+                        yield delta
+        except httpx.HTTPError as e:
+            raise LLMError(short_error(e)) from e
+
 
 ADAPTERS: dict[str, object] = {
     "gemini": GeminiAdapter(),
@@ -174,6 +298,20 @@ ADAPTERS: dict[str, object] = {
 }
 
 PROVIDERS = tuple(ADAPTERS)
+
+
+def stream_text(adapter, spec: ModelSpec, *, api_key: str, system: str, user: str, max_tokens: int,
+                timeout: float, usage: dict) -> Iterator[str]:
+    """The adapter's stream(), or its complete() as a single chunk."""
+    if hasattr(adapter, "stream"):
+        yield from adapter.stream(spec, api_key=api_key, system=system, user=user, max_tokens=max_tokens,
+                                  timeout=timeout, usage=usage)
+        return
+    result = adapter.complete(spec, api_key=api_key, system=system, user=user, json_mode=False,
+                              max_tokens=max_tokens, timeout=timeout)
+    usage["tokens_in"], usage["tokens_out"] = result.tokens_in, result.tokens_out
+    if result.text:
+        yield result.text
 
 
 def get_adapter(provider: str):

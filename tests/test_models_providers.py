@@ -14,7 +14,11 @@ from app.models.ai import (
 from app.providers.llm import LLMError, LLMResult, adapters
 from app.services import ai_router, key_store
 
-SEED_MODEL_IDS = {"gemini-2.5-flash", "openai/gpt-oss-120b", "Qwen/Qwen3-8B"}
+SEED_MODEL_IDS = {"gemini-2.5-flash", "openai/gpt-oss-120b", "Qwen/Qwen3-8B",
+                  # P7 speech rows (on) and the OpenRouter / OpenAI rows (seeded switched off)
+                  "whisper-large-v3-turbo", "speech-synthesis", "openai/gpt-oss-120b:free", "gpt-5-mini",
+                  "gpt-4o-mini-transcribe", "gpt-4o-mini-tts"}
+SEEDED_OFF = {"openai/gpt-oss-120b:free", "gpt-5-mini", "gpt-4o-mini-transcribe", "gpt-4o-mini-tts"}
 USER_KEY = "sk-user-own-key-1234567890abcd"
 PLATFORM_KEY = "sk-platform-key-0987654321wxyz"
 SCORE_REPLY = json.dumps([{"index": 0, "score": 88, "reason": "Strong Python overlap."}])
@@ -57,7 +61,7 @@ def _clean_registry():
             db.query(table).delete()
         db.query(AiModel).filter(AiModel.model_id.notin_(SEED_MODEL_IDS)).delete(synchronize_session=False)
         for m in db.query(AiModel).all():
-            m.enabled_global, m.consecutive_failures = True, 0
+            m.enabled_global, m.consecutive_failures = m.model_id not in SEEDED_OFF, 0
         for r in db.query(ProviderCatalog).all():
             r.enabled_global = True
         db.commit()
