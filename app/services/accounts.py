@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException, Request, status
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models.user import User
 from app.services import audit, feature_flags
 from app.services.otp import normalize_email
@@ -64,16 +65,19 @@ def sign_in_verified(
         user = db.query(User).filter(User.google_sub == google_sub).first()
     user = user or find_by_email(db, email)
 
+    owner = is_always_admin(email)
     if user is None:
-        if not signup_open(db):
+        if not owner and not signup_open(db):
             logger.info("sign-in refused: unknown email in invite-only mode (provider=%s)", provider)
             raise SignupClosed()
-        user = User(email=email, name=name, auth_provider=provider, role="user")
+        user = User(email=email, name=name, auth_provider=provider, role="admin" if owner else "user")
         db.add(user)
         db.flush()
         audit.record(db, actor_id=user.id, action="user.signup", target_type="user", target_id=user.id,
                      after={"email": email, "provider": provider}, request=request)
 
+    if owner:
+        ensure_always_admin(db, user)
     if not user.is_active:
         raise AccountDisabled()
 
@@ -85,3 +89,23 @@ def sign_in_verified(
     audit.record(db, actor_id=user.id, action="auth.login", target_type="user", target_id=user.id,
                  after={"provider": provider}, request=request)
     return user
+
+
+def is_always_admin(email: str | None) -> bool:
+    """ALWAYS_ADMIN_EMAILS: the owner accounts that are always admin."""
+    return bool(email) and normalize_email(email) in get_settings().always_admin_emails
+
+
+def ensure_always_admin(db: Session, user: User) -> bool:
+    """Makes an owner account an active admin again if anything changed it
+    (a direct DB edit, an old backup). Returns True when it changed the user;
+    does not commit."""
+    if not is_always_admin(user.email) or (user.role == "admin" and user.is_active):
+        return False
+    before = {"role": user.role, "is_active": user.is_active}
+    user.role = "admin"
+    user.is_active = True
+    audit.record(db, actor_id=None, action="user.always_admin", target_type="user", target_id=user.id,
+                 before=before, after={"role": "admin", "is_active": True})
+    logger.info("restored always-admin account %s", user.id)
+    return True
