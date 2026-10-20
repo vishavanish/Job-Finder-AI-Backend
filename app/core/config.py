@@ -99,6 +99,29 @@ class Settings(BaseSettings):
     EMAIL_EVENT_RETENTION_DAYS: int = 180
     EMAIL_JOBS_RETENTION_DAYS: int = 30
     RATE_LIMIT_GMAIL_SYNC: str = "6/hour"
+    # ---- ATS Discovery (P6) ----
+    ATS_CRAWL_TICK_SECONDS: int = 300           # beat tick: claim companies that are due
+    ATS_CRAWL_BATCH: int = 50                   # companies claimed per tick
+    ATS_HOT_REFRESH_HOURS: int = 6              # companies people search / saved jobs
+    ATS_COLD_REFRESH_HOURS: int = 24
+    ATS_HOST_CONCURRENCY: int = 2               # parallel requests per ATS host
+    ATS_MAX_JOBS_PER_COMPANY: int = 1000
+    ATS_WORKDAY_MAX_JOBS: int = 400
+    ATS_INDEX_COUNTRIES: str = "India,Remote"   # markets indexed first for very large tenants
+    ATS_MIN_COMPANIES: int = 10                 # fewer matches -> live top-up
+    ATS_TOPUP_MAX_COMPANIES: int = 40
+    ATS_TOPUP_SECONDS: int = 20
+    ATS_STALE_DAYS: int = 3                     # capped crawls close jobs not seen for this long
+    ATS_CLOSED_RETENTION_DAYS: int = 7
+    ATS_MAX_INDEXED_JOBS: int = 300000
+    ATS_SEARCH_CACHE_SECONDS: int = 600
+    ATS_GONE_AFTER: int = 3                     # 404s in a row before a company is switched off
+    RATE_LIMIT_ATS_SEARCH: str = "30/minute"
+    RATE_LIMIT_ATS_ADD_COMPANY: str = "10/hour"
+
+    @property
+    def ats_markets(self) -> tuple[str, ...]:
+        return tuple(m.strip() for m in self.ATS_INDEX_COUNTRIES.split(",") if m.strip())
 
     @property
     def api_keys_list(self) -> list[str]:

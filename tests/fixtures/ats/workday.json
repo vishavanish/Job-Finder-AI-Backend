@@ -1,0 +1,33 @@
+{
+ "total": 2000,
+ "jobPostings": [
+  {
+   "title": "Senior Systems Software Engineer, CUDA and AI HW Profiler",
+   "externalPath": "/job/US-TX-Austin/Senior-Systems-Software-Engineer--CUDA-and-AI-HW-Profiler_JR2027860",
+   "locationsText": "2 Locations",
+   "postedOn": "Posted Today",
+   "bulletFields": [
+    "JR2027860"
+   ]
+  },
+  {
+   "title": "Senior Systems Software Engineer- EDA Infrastructure",
+   "externalPath": "/job/US-CA-Remote/Senior-Systems-Software-Engineer--EDA-Infrastructure_JR2024972-1",
+   "locationsText": "6 Locations",
+   "postedOn": "Posted Today",
+   "bulletFields": [
+    "JR2024972"
+   ]
+  },
+  {
+   "title": "Senior Manager, Engineering - Data Center Firmware",
+   "externalPath": "/job/US-CA-Santa-Clara/Senior-Manager--Engineering---Data-Center-Firmware_JR2019986",
+   "locationsText": "2 Locations",
+   "postedOn": "Posted Today",
+   "bulletFields": [
+    "JR2019986"
+   ]
+  }
+ ],
+ "userAuthenticated": false
+}

@@ -96,6 +96,32 @@ def _inbox_jobs(db, user_id: str | None, sources: list[str], search_params: dict
     return email_sync.recent_alert_jobs(db, user_id, search_params.get("max_age_hours", 24))
 
 
+def _index_lookup(db, sources: list[str], search_params: dict, locations: list[str]):
+    """The ATS index search for the `company_ats` source (P6), or None when that source doesn't run."""
+    if "company_ats" not in sources:
+        return None
+    from app.services import ats_search
+
+    def lookup(keyword: str) -> list[dict]:
+        return ats_search.index_jobs(db, keyword, locations=locations,
+                                     country=search_params.get("country_indeed", "India"),
+                                     max_age_hours=search_params.get("max_age_hours", 24),
+                                     limit=search_params.get("results_per_keyword", 25))
+    return lookup
+
+
+def _harvest_ats(db, jobs: list[dict]) -> None:
+    """Apply links on a supported ATS grow the ATS Discovery registry (P6). Never fails a search."""
+    from app.services import ats_registry
+    try:
+        added = ats_registry.harvest(db, jobs)
+        if added:
+            logger.info("ats registry: %s companies found in search results", added)
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        logger.exception("ats harvest failed")
+
+
 def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str], sources: list[str],
             manual_naukri_jobs: list, progress) -> list[dict]:
     """job_sources.scrape_all with the params a route built, plus source
@@ -130,6 +156,7 @@ def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str
         enable_naukri_auto=search_params.get("enable_naukri_auto", False),
         manual_naukri_jobs=manual_naukri_jobs,
         inbox_jobs=_inbox_jobs(db, user_id, sources, search_params),
+        index_jobs=_index_lookup(db, sources, search_params, locations),
         enable_naukri_apify=naukri_apify,
         apify_naukri_actor_id=search_params.get("apify_naukri_actor_id", ""),
         apify_api_token=_apify_token(db, search_params) if naukri_apify else "",
@@ -148,6 +175,7 @@ def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str
     except Exception:  # noqa: BLE001 — health bookkeeping must never fail a search
         db.rollback()
         logger.exception("could not record source health")
+    _harvest_ats(db, jobs)
     return jobs
 
 
@@ -566,6 +594,68 @@ def sync_gmail_account_task(account_id: str) -> dict:
     db = SessionLocal()
     try:
         return email_sync.sync_account(db, account_id)
+    finally:
+        db.close()
+
+
+@celery_app.task(name="job_finder.ats_tick")
+def ats_tick_task() -> dict:
+    """Beat (P6): loads the seed once when the registry is empty, then queues a crawl for each due company."""
+    from app.models.ats import AtsCompany
+    from app.services import ats_crawler, ats_registry
+
+    db = SessionLocal()
+    try:
+        if db.query(AtsCompany.id).first() is None:
+            ats_registry.seed(db)
+        claimed = ats_crawler.claim_due(db)
+    finally:
+        db.close()
+    for company_id in claimed:
+        crawl_ats_company_task.apply_async(args=[company_id], queue=get_settings().maintenance_queue)
+    return {"queued": len(claimed)}
+
+
+@celery_app.task(name="job_finder.crawl_ats_company")
+def crawl_ats_company_task(company_id: str) -> dict:
+    """Refreshes one company's open jobs in the ATS index (P6)."""
+    from app.services import ats_crawler
+
+    db = SessionLocal()
+    try:
+        return ats_crawler.crawl_company(db, company_id)
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, name="job_finder.ats_topup")
+def ats_topup_task(self, query: str, user_id: str) -> dict:
+    """Live top-up for a title with few index matches (P6): searches / refreshes stale companies."""
+    from app.services import ats_search
+
+    return ats_search.topup(SessionLocal, query, progress=_make_progress_cb(self, "ats_topup"))
+
+
+@celery_app.task(name="job_finder.ats_expand_title")
+def ats_expand_title_task(query: str, user_id: str) -> dict:
+    """Caches other titles for the same role (AI router), used by the next ATS search (P6)."""
+    from app.services import ats_search
+
+    db = SessionLocal()
+    try:
+        return {"titles": ats_search.expand_with_ai(db, query, user_id)}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="job_finder.purge_ats_jobs")
+def purge_ats_jobs_task() -> dict:
+    """Deletes ATS index jobs closed more than ATS_CLOSED_RETENTION_DAYS ago (P6)."""
+    from app.services import ats_crawler
+
+    db = SessionLocal()
+    try:
+        return {"deleted": ats_crawler.purge_closed(db)}
     finally:
         db.close()
 

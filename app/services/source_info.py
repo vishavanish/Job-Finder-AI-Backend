@@ -18,7 +18,7 @@ RANK_AGGREGATOR = 3
 
 COMPANY_ATS_SOURCES = {
     "greenhouse", "lever", "smartrecruiters", "workday", "oracle fusion", "successfactors",
-    "ashby", "recruitee", "workable", "personio", "breezy",
+    "ashby", "recruitee", "workable", "personio", "breezy", "teamtailor", "rippling", "gem",
 }
 AGGREGATOR_SOURCES = {
     "adzuna", "jooble", "careerjet",

@@ -11,6 +11,8 @@ everywhere else. Source kinds and adapters: app/providers/job_sources/.
            `key_lookup` (never passed in params), daily caps per user
   feed     remote feeds — cached in Redis, filtered by keyword, region and age
   manual   Naukri jobs the user pasted; Apify for Naukri when enabled
+  inbox    job-alert emails (P5), passed in by the caller
+  index    ATS Discovery index (P6): `index_jobs(keyword)` supplied by the caller (it needs the DB)
 
 `key_lookup(scope, platform_only=False)` returns a key_store.ResolvedKey or None.
 `on_source_result(key, error)` reports each source's outcome so the caller
@@ -298,6 +300,7 @@ def scrape_all(
     enable_naukri_auto: bool = False,
     manual_naukri_jobs: list[dict] | None = None,
     inbox_jobs: list[dict] | None = None,
+    index_jobs: Callable[[str], list[dict]] | None = None,
     enable_naukri_apify: bool = False,
     apify_naukri_actor_id: str = "",
     apify_api_token: str = "",
@@ -372,6 +375,20 @@ def scrape_all(
         progress(f"Job alert emails: {len(picked)} matching jobs (of {len(inbox_jobs)} from your inbox)")
         all_jobs.extend(picked[: results_per_keyword * max(1, len(keywords))])
         outcomes.success("email_alerts")
+
+    if "company_ats" in sources and index_jobs:
+        # P6: our index of company career pages, matched per keyword in the DB (the caller's lookup).
+        found = 0
+        try:
+            for keyword in keywords:
+                picked = index_jobs(keyword)
+                found += len(picked)
+                all_jobs.extend(picked)
+            progress(f"Company career pages: {found} matching jobs from the index")
+            outcomes.success("company_ats")
+        except Exception as e:  # noqa: BLE001 — the index failing must not fail the search
+            outcomes.failure("company_ats", f"Company career pages: {type(e).__name__}")
+            progress(f"Company career pages failed: {type(e).__name__}")
 
     if enable_naukri_apify:
         from app.services.naukri_apify_source import fetch_naukri_all_keywords

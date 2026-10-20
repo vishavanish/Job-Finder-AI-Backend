@@ -62,7 +62,7 @@ Roles are enforced by RBAC dependencies (`require_role("admin")`, `require_role(
 | 7 | **Job pipeline** | Search → dedupe → score → stream live results | exists + P3 |
 | 8 | **Apply Center** | Auto-apply and manual apply from one interface | P4 |
 | 9 | **Application tracker** | Status timeline per application + Gmail reply detection + AI rejection note | P5 |
-| 10 | **ATS Target Discovery** | Enter a job title → list companies hiring on Workday, Greenhouse, Lever, Recruitee | P6 |
+| 10 | **ATS Target Discovery** | Enter a job title → list companies hiring on 12 ATS platforms (Workday, Greenhouse, Lever, Recruitee, Ashby, SmartRecruiters, …), grouped by company | P6 |
 | 11 | **Voice interview prep** | Mock interviewer (practice) + **Live Copilot** (real-time answer suggestions on an overlay, like Parakeet AI / Cluely), scoring and feedback | P7 |
 | 12 | **Platform** | Observability, evals, CI, deployment, scale | P8 |
 
@@ -177,7 +177,8 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Keys | `services/key_store.py`, `models/ai.Secret` | Envelope-encrypted platform + BYOK keys, masked (`last4`) everywhere. Lookup: user key → platform key → `.env` key. Request-body keys still work as one-run keys (`secret_refs`). |
 | Job-source catalog | `services/provider_catalog.py`, `routes/providers.py` | `provider_catalog` rows for every source in `providers/job_sources/registry.py` (Section 7.4). Routes drop sources that are off (admin/user/`default_enabled`), paid under Free tools only, missing a key, paused after repeated errors, or remote-only feeds on a non-remote search; `skipped_sources` says why. |
 | Streaming pipeline | `routes/pipeline.py`, `services/pipeline_progress.py` | Fan-out per keyword (plain Celery `group`, **not** `chord` — chords are unreliable on Upstash), results in a Redis list, polled by offset |
-| Company ATS | `routes/company_ats.py`, `services/company_ats_sources.py` | Greenhouse, Lever, SmartRecruiters, Workday, Oracle Fusion, SuccessFactors, Ashby, Recruitee, Workable, Personio, Breezy (P3.1), custom (JSON probe → Playwright DOM fallback). SSRF guard `_reject_private_targets` (custom + workday URLs); subdomain slugs limited to DNS-label characters. |
+| Company ATS | `routes/company_ats.py`, `services/company_ats_sources.py` | Greenhouse, Lever, SmartRecruiters, Workday, Oracle Fusion, SuccessFactors, Ashby, Recruitee, Workable, Personio, Breezy (P3.1), custom (JSON probe → Playwright DOM fallback). SSRF guard `_reject_private_targets` (custom + workday URLs); subdomain slugs limited to DNS-label characters. One-off fetch per company; the shared index is ATS Discovery (next row). |
+| ATS Discovery | `providers/ats/platforms.py`, `services/ats_registry.py`, `ats_crawler.py`, `ats_search.py`, `routes/ats.py`, `scripts/discover_ats.py`, `data/ats_seed.json` | P6: shared company registry, scheduled crawler, short-row job index, title search grouped by company, `company_ats` search source (Section 6.12). |
 | Apply | `routes/apply.py`, `services/browser_apply.py` | Playwright, LinkedIn Easy Apply prefill (`_FILL_DISPATCH`, `AUTO_APPLY_CAPABLE_SOURCES = {"LinkedIn"}`), never auto-submits, capability filter; client-supplied `browser_profile_dir` is ignored (`task_params.build_apply_params`). The frontend calls `POST /apply/{id}/close`, which the backend does **not** implement. |
 | Tracking | `routes/applications.py`, `services/applications_store.py` | `record_status()` single write path (upsert + history event) |
 | Gmail | `providers/gmail.py`, `services/gmail_accounts.py`, `services/email_sync.py`, `services/job_alert_emails.py`, `routes/gmail.py` | P5: per-user OAuth (`gmail.readonly`), tokens sealed in `email_accounts`, scheduled sync, AI classification, matching, status updates with notes, needs-review inbox, job-alert emails to jobs (Section 6.11). The old file-token tracker is gone. |
@@ -190,7 +191,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Shared Redis | `core/redis_client.py` | One client per process (`get_redis()`); tests swap in fakeredis. |
 | Frontend | separate repo `Job-Finder-AI-Frontend` | React 18 + Vite + react-router, plain JS (no TypeScript), axios client with hardcoded `API_URL`. Pages: Home, Keywords, Skills, ATS Targets, Providers, Applications, Profile, Login. Deployed on Vercel. |
 
-**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
+**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts, `0008`–`0009` apply center, `0010` tracker & Gmail, `0011` ATS discovery); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
 
 **CI:** `.github/workflows/tests.yml` runs the tests on every push and pull request (no secrets needed).
 
@@ -424,6 +425,28 @@ Plan: `docs/plans/P5-tracker-gmail.md` (the owner asked on 2026-10-19 to build t
 - Create a Google Cloud OAuth client of type **Web application** with the Gmail API enabled, add the redirect URI `…/api/v1/gmail/callback`, add yourself as a test user, and set `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REDIRECT_URI`, `APP_PUBLIC_URL`.
 - Removed env: `GMAIL_ACCOUNT_LABELS`, `GMAIL_CREDENTIALS_PATH`, `GMAIL_POLL_LOOKBACK_MINUTES`. New (optional): `GMAIL_TICK_SECONDS` (300), `GMAIL_SYNC_INTERVAL_SECONDS` (900), `GMAIL_INITIAL_LOOKBACK_DAYS` (30), `GMAIL_MAX_MESSAGES_PER_SYNC` (100), `GMAIL_ACCOUNTS_MAX_PER_USER` (3), `EMAIL_MATCH_MIN_SCORE` (60), `EMAIL_MATCH_MIN_MARGIN` (15), `EMAIL_CLASSIFY_MIN_CONFIDENCE` (0.7), `EMAIL_EVENT_RETENTION_DAYS` (180), `EMAIL_JOBS_RETENTION_DAYS` (30), `RATE_LIMIT_GMAIL_SYNC` (6/hour).
 
+### 6.12 Phase 6 status — ATS Discovery (branch `dev`)
+
+Plan: `docs/plans/P6-ats-discovery.md` (owner approved all ten decisions 2026-10-19, after asking for more ATS platforms).
+
+| Item | State |
+|------|-------|
+| Platforms | ✅ 12, one `AtsPlatform` each in `providers/ats/platforms.py` (`parse_url`, `list_jobs` with ETag, `search`, `job_detail`): Greenhouse, Lever, Workday, Recruitee, Ashby, SmartRecruiters, Workable, Personio, Breezy, **Teamtailor, Rippling, Gem** (new). All live-checked 2026-10-19/20; recorded fixtures in `tests/fixtures/ats/`. **Not built:** BambooHR (careers JSON redirected for every tenant tried) and Homerun (its public feed returns Homerun's own jobs for any company name; per-company feeds use unguessable URLs). Darwinbox / Keka / Zoho Recruit / Freshteam are P6.1. Redirects are never followed (treated as "gone"). |
+| Registry | ✅ `ats_companies` (shared; unique `ref_key` = platform:slug[:host][:site]; origin seed / pipeline / user / admin). Grows from: the seed file (loaded once by the crawler tick when the registry is empty; rebuilt with `python -m app.scripts.discover_ats --candidates app/data/ats_candidates.txt --commoncrawl`), **apply links in any search result** (`ats_registry.harvest`, ≤ 25 per run), `POST /ats/companies` (a careers link; custom Teamtailor hosts must resolve to public IPs), and admins. |
+| Crawler | ✅ Beat `ats_tick` (`ATS_CRAWL_TICK_SECONDS`) claims due companies (conditional UPDATE) → `crawl_ats_company` on the maintenance queue. ≤ `ATS_HOST_CONCURRENCY` per ATS host (Redis slot), `If-None-Match` (Greenhouse answers 304), upsert by (company, external_id), jobs missing from a complete crawl closed (capped crawls: only jobs unseen for `ATS_STALE_DAYS`), 404/redirect `ATS_GONE_AFTER` times → company off, errors back off, per-platform health in `ats_platforms`. Refresh every 6 h while people search a company (`hot_until`, 7 days), else 24 h. Big tenants: ≤ `ATS_MAX_JOBS_PER_COMPANY` (Workday `ATS_WORKDAY_MAX_JOBS`), target markets (`ATS_INDEX_COUNTRIES`, India + remote) first — Workday `searchText`, SmartRecruiters `country=`. `ATS_MAX_INDEXED_JOBS` stops new rows when full. Closed jobs purged after `ATS_CLOSED_RETENTION_DAYS` (daily `purge_ats_jobs`). |
+| Index | ✅ `ats_jobs`: short rows (title, title_norm, location, country, remote, department, url, snippet ≤ 300, `job_key`, posted_at). **No full descriptions** (Supabase 500 MB); `ats_search.full_description()` fetches one on demand (Greenhouse, Lever, SmartRecruiters, Workday, Rippling; others fall back to the snippet) and caches it a day in Redis. Postgres: generated `tsv` (title A, department B, snippet C) + GIN. |
+| Search | ✅ `GET /ats/search`: normalise (seniority words; SDE/PM/QA… abbreviations) → built-in synonym groups (work under Free tools only) + AI expansion (router task `title_suggest`, cached 30 days, computed by a background task, never in the request) → title-only match (Postgres `to_tsquery` with weight A; SQLite: every word in `title_norm`) → filters (platform, location, remote, posted within, hide applied) → grouped by company (most matching jobs first), 25 per page, cached `ATS_SEARCH_CACHE_SECONDS` (per-user "applied" flags are added after the shared cache). Response carries registry size, indexed jobs and last refresh. Fewer than `ATS_MIN_COMPANIES` → `topup_task_id` (task `ats_topup`: Workday/SmartRecruiters searched by text, stale others crawled; ≤ 40 companies, 8 at a time, `ATS_TOPUP_SECONDS`). Matching companies become "hot". |
+| Pipeline | ✅ New source **`company_ats` ("Company career pages", kind `index`)**: free, on by default, needs the `ats_discovery` entitlement. Jobs keep the platform name as `source` (dedupe rank "company ATS"; Greenhouse/Lever jobs get Auto apply), `apply_url` = the ATS link; the top 10 per keyword get full descriptions. `POST /ats/jobs/{id}/track` turns an index job into a normal job (save / hide / apply buttons). |
+| Admin | ✅ `GET /admin/ats/health`, `GET/POST /admin/ats/companies`, `PATCH /admin/ats/companies/{id}` (rename / on-off), `POST /admin/ats/companies/{id}/crawl`, `PATCH /admin/ats/platforms/{platform}` (on/off). Audited. Platform on/off lives in `ats_platforms`, not `provider_catalog` (catalog rows appear as sources on users' Providers page). |
+| Tests | ✅ 311 total, 58 for P6 (1 skipped locally): every platform's fixture, URL parsing/SSRF, crawler (304, close, cap, switch-off, host slot, purge), search (synonyms, grouping, filters, applied, disabled platform, AI cache), API, pipeline source, harvest, seed. **The < 3 s acceptance test runs only in the new CI job `ats-postgres`** (Postgres 16 service, 300k synthetic jobs). |
+| Not in P6 | Embeddings / pgvector rerank; Darwinbox, Keka, Zoho Recruit, Freshteam (P6.1); Jobvite, iCIMS, JazzHR, Pinpoint (no public feed; P8 generic reader); Workday / SmartRecruiters / Recruitee apply adapters (P8); screens (F6). |
+
+**Operational changes introduced in P6**
+- Migration `0011` (run `alembic upgrade head`); on Postgres it adds the generated `tsv` column + GIN index.
+- Beat runs `ats_tick` (every 5 min) and `purge_ats_jobs` (daily); crawls run on the **maintenance** queue, top-ups and AI expansions on default. The first tick loads `app/data/ats_seed.json`.
+- New env (all optional): `ATS_CRAWL_TICK_SECONDS` (300), `ATS_CRAWL_BATCH` (50), `ATS_HOT_REFRESH_HOURS` (6), `ATS_COLD_REFRESH_HOURS` (24), `ATS_HOST_CONCURRENCY` (2), `ATS_MAX_JOBS_PER_COMPANY` (1000), `ATS_WORKDAY_MAX_JOBS` (400), `ATS_INDEX_COUNTRIES` (`India,Remote`), `ATS_MIN_COMPANIES` (10), `ATS_TOPUP_MAX_COMPANIES` (40), `ATS_TOPUP_SECONDS` (20), `ATS_STALE_DAYS` (3), `ATS_CLOSED_RETENTION_DAYS` (7), `ATS_MAX_INDEXED_JOBS` (300000), `ATS_SEARCH_CACHE_SECONDS` (600), `ATS_GONE_AFTER` (3), `RATE_LIMIT_ATS_SEARCH` (30/minute), `RATE_LIMIT_ATS_ADD_COMPANY` (10/hour).
+- Watch Supabase storage in `GET /admin/ats/health` (`registry.jobs` vs `index_limit`).
+
 ---
 
 ## 7. Modules in detail
@@ -496,7 +519,8 @@ Every job source is a row in `provider_catalog` and implements `JobSource.search
 | Arbeitnow, The Muse | feed | free | off | EU / US roles; The Muse refuses non-browser clients (403) — we don't disguise requests |
 | **Naukri** | manual | free | — | Manual import now; Naukri alert emails from Gmail in P5; JobSpy path is blocked by captcha |
 | Naukri via Apify | apify | paid | flag | Optional, user's Apify key |
-| Greenhouse, Lever, SmartRecruiters, Workday, Ashby, Recruitee, Workable, Personio, Breezy, Oracle, SuccessFactors | company ATS | free | — | `/company-ats/fetch` per company; power ATS Target Discovery (P6) |
+| Greenhouse, Lever, SmartRecruiters, Workday, Ashby, Recruitee, Workable, Personio, Breezy, Oracle, SuccessFactors | company ATS | free | — | `/company-ats/fetch` per company |
+| **Company career pages** (`company_ats`) | index | free | on (needs `ats_discovery`) | P6: the ATS Discovery index (12 platforms), matched per keyword in the DB |
 | SerpApi / JSearch (Google Jobs) | — | free_key/paid | not built | Free quotas too small to be worth it for now |
 
 ### 7.5 Job pipeline: search → dedupe → score → stream
@@ -512,7 +536,7 @@ Every job source is a row in `provider_catalog` and implements `JobSource.search
 
 ### 7.6 ATS Target Discovery (career-page jobs by title)
 
-**User story:** *"I type a job title. I get every company in the registry that is hiring for it on Workday, Greenhouse, Lever or Recruitee, with links."* `[ASSUMPTION: "recruitrehouse" = Recruitee]`
+**User story:** *"I type a job title. I get every company in the registry that is hiring for it on Workday, Greenhouse, Lever or Recruitee, with links."* `[ASSUMPTION: "recruitrehouse" = Recruitee]` — **Built in P6 with 12 platforms (Section 6.12)**; where the build differs from the design below, 6.12 wins (no pgvector rerank; synonyms from a table + cached AI; short index rows).
 
 **How it works**
 
@@ -854,8 +878,9 @@ All tables have `id`, `created_at`, `updated_at`. User-owned tables have `user_i
 | `email_accounts` | user_id, gmail_address, token_sealed, scopes, status (active/needs_reconnect), last_history_id, next_sync_at, failures (P5) |
 | `email_events` | account_id + message_id (unique), thread_id, sender, subject, snippet (≤ 300, never the body), category, confidence, company, role, summary, state, application_id, applied_status, match_score, suggestions (P5) |
 | `email_jobs` | user_id, source, title, company, location, url (unique per user), received_at — from job-alert emails (P5) |
-| `ats_companies` | platform, slug, name, careers_url, active, last_crawled_at |
-| `ats_jobs` | company_id, external_id, title, location, url, posted_at, content_hash, tsv, embedding |
+| `ats_companies` | ref_key (unique), platform, slug, host, site, name, careers_url, origin, active, job_count, etag, last_crawled/ok_at, next_crawl_at, hot_until, fail/gone counts (P6; shared, no user_id) |
+| `ats_jobs` | company_id + external_id (unique), title, title_norm, location, country, remote, department, url, snippet ≤ 300, job_key, posted_at, first/last_seen_at, closed_at, tsv (Postgres only); no embedding yet (P6) |
+| `ats_platforms` | platform, enabled, health (P6) |
 | `provider_catalog` | key, name, tier, requires_key, tos_risk, rate_limit, enabled_global, health |
 | `user_provider_settings` | user_id, provider_key, enabled, free_only flag |
 | `ai_models` | see Section 7.9 |
@@ -884,7 +909,7 @@ All routes are already served under `/api/v1` (`settings.API_V1_PREFIX`); new ro
 | Models | `GET /models` (enabled), `PUT /models/preferences`, `POST /keys` (BYOK), `DELETE /keys/{id}` |
 | Jobs | `POST /pipeline/run/stream`, `GET /pipeline/{run_id}`, `GET /pipeline/{run_id}/jobs`, `POST /pipeline/{run_id}/cancel` (F3), `GET /jobs?state=`, `POST /jobs/{id}/save|hide|seen` |
 | Alerts | `GET/POST /alerts`, `PUT/DELETE /alerts/{id}`, `POST /alerts/{id}/run-now`, `GET /alerts/{id}/runs`, `GET /alerts/runs/{run_id}/jobs` |
-| ATS | `POST /ats/discover` (job title), `GET /ats/companies`, `POST /company-ats/fetch` (existing) |
+| ATS | `GET /ats/search`, `GET /ats/stats`, `POST /ats/companies`, `GET /ats/companies/{id}/jobs`, `GET /ats/jobs/{id}`, `POST /ats/jobs/{id}/track`; admin `GET /admin/ats/health`, `GET/POST /admin/ats/companies`, `PATCH /admin/ats/companies/{id}`, `POST /admin/ats/companies/{id}/crawl`, `PATCH /admin/ats/platforms/{platform}` (P6); `POST /company-ats/fetch` (existing) |
 | Apply | `POST /apply` (existing), `GET /apply/options/{job_id}`, `POST /apply/prep`, `GET /apply/prep/{id}` (P4a), `GET/POST/PUT/DELETE /answer-bank`, `POST /answer-bank/{id}/approve` (P4a), `GET/PUT /apply/settings`, `POST /apply/runs`, `GET /apply/runs?state=waiting|&job_id=`, `GET /apply/runs/{id}`, `POST /apply/runs/{id}/answer`, `POST /apply/runs/{id}/approve`, `POST /apply/runs/{id}/cancel`, `POST /apply/runs/{id}/done`, `GET /apply/runs/{id}/proofs[/{proof_id}]` (P4b), `POST /applications/manual` (built for F3: `{job_id, via}` → `submitted` (or `emailed` with `via: "email"`, P4a) / `manual` + job state `applied`) |
 | Tracker | `GET /applications`, `GET/PATCH /applications/{id}`, `GET /applications/{id}/events`, `GET /applications/stats` |
 | Gmail | `GET /gmail/connect`, `GET /gmail/callback`, `GET /gmail/accounts`, `DELETE /gmail/accounts/{id}`, `POST /gmail/accounts/{id}/sync`, `GET /gmail/events?state=`, `GET /gmail/review`, `POST /gmail/review/{id}/resolve` (all built in P5) |
@@ -903,7 +928,7 @@ Conventions: Pydantic request/response models for every route, consistent error 
 | `default` | search, score, ats fetch, pipeline fan-out, resume parse | Multiple workers fine |
 | `apply` | Playwright apply runs: `apply_prepare`, `apply_submit` (P4b) | Low concurrency; one browser per run; memory-limited; needs Chromium installed |
 | `email` | `sync_gmail_account` per account (P5); the `gmail_tick` beat task runs on `maintenance` | Idempotent (unique account + message id); in `worker_queues` |
-| `maintenance` | Job-alerts tick (P3.2); apply-proof retention cleanup (P4b); later ATS crawler/refresh, other retention cleanup, provider health checks, usage rollups | Beat schedule (one beat process) |
+| `maintenance` | Job-alerts tick (P3.2); apply-proof retention cleanup (P4b); ATS crawler `ats_tick` → `crawl_ats_company`, `purge_ats_jobs` (P6); later provider health checks, usage rollups | Beat schedule (one beat process) |
 
 Rules: tasks are idempotent; every task receives `user_id`; secrets are resolved by `key_ref` inside the worker; progress is reported with `update_state(state="PROGRESS")`; worker `-Q` lists **must** match `settings.*_queue` names; set `acks_late` and sensible `time_limit`/`soft_time_limit` per queue.
 
