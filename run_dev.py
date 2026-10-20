@@ -33,7 +33,6 @@ NPM = shutil.which("npm") or "npm"
 DEV_ENV = {
     "ENVIRONMENT": "development",
     "DATABASE_URL": "sqlite:///./output/dev.db",
-    "EMAIL_BACKEND": "console",
     "REFRESH_COOKIE_SECURE": "false",
     "REFRESH_COOKIE_SAMESITE": "lax",
     "PYTHONUNBUFFERED": "1",

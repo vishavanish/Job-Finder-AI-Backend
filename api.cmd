@@ -7,7 +7,6 @@ set "PY=%~dp0..\venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=python"
 set ENVIRONMENT=development
 set DATABASE_URL=sqlite:///./output/dev.db
-set EMAIL_BACKEND=console
 set REFRESH_COOKIE_SECURE=false
 set REFRESH_COOKIE_SAMESITE=lax
 if not exist output mkdir output

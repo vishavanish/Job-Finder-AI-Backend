@@ -5,6 +5,7 @@
 *.pem
 *.key
 credentials.json
+client_secret*.json
 token_primary.json
 token_secondary.json
 token_*.json
