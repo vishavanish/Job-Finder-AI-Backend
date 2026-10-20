@@ -84,6 +84,9 @@ class Settings(BaseSettings):
 
     # ---- auth ----
     API_KEYS: str = ""  # comma-separated, e.g. "key1,key2"
+    # Owner accounts: always admin. Promoted on every sign-in, created even when
+    # sign-up is invite-only, and can't be demoted or disabled from the console.
+    ALWAYS_ADMIN_EMAILS: str = "avanish.coder2@gmail.com"  # comma-separated
     # ---- email tracking (Gmail, P5) ----
     GMAIL_CLIENT_ID: str = ""          # Google OAuth *web* client for Gmail (separate consent from sign-in)
     GMAIL_CLIENT_SECRET: str = ""
@@ -144,6 +147,10 @@ class Settings(BaseSettings):
     @property
     def ats_markets(self) -> tuple[str, ...]:
         return tuple(m.strip() for m in self.ATS_INDEX_COUNTRIES.split(",") if m.strip())
+
+    @property
+    def always_admin_emails(self) -> frozenset[str]:
+        return frozenset(e.strip().lower() for e in self.ALWAYS_ADMIN_EMAILS.split(",") if e.strip())
 
     @property
     def api_keys_list(self) -> list[str]:

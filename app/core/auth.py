@@ -144,6 +144,10 @@ async def get_current_user(
     if not user:
         logger.warning("rejected request: token valid but user %s not found", claims["sub"])
         raise _unauthorized("User not found.")
+    from app.services.accounts import ensure_always_admin
+
+    if ensure_always_admin(db, user):
+        db.commit()
     if not user.is_active:
         logger.warning("rejected request: user %s is disabled", user.id)
         raise account_disabled()

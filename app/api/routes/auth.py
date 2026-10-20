@@ -148,7 +148,7 @@ def google_sign_in(request: Request, req: GoogleSignIn, response: Response, db: 
 @router.post("/register", response_model=TokenResponse, status_code=201)
 @limiter.limit(settings.RATE_LIMIT_AUTH)
 def register(request: Request, req: RegisterRequest, response: Response, db: Session = Depends(get_db)):
-    if not accounts.signup_open(db):
+    if not accounts.is_always_admin(req.email) and not accounts.signup_open(db):
         logger.warning("blocked self-registration attempt (invite-only)")
         raise accounts.SignupClosed()
 
@@ -157,7 +157,7 @@ def register(request: Request, req: RegisterRequest, response: Response, db: Ses
         raise HTTPException(status.HTTP_409_CONFLICT, "An account with this email already exists.")
 
     user = User(email=normalized_email, hashed_password=hash_password(req.password), name=req.name,
-                auth_provider="password")
+                auth_provider="password", role="admin" if accounts.is_always_admin(normalized_email) else "user")
     db.add(user)
     db.flush()
     audit.record(db, actor_id=user.id, action="user.signup", target_type="user", target_id=user.id,

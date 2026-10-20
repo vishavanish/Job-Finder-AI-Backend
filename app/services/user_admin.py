@@ -24,6 +24,7 @@ from app.core.celery_app import celery_app
 from app.core.task_dispatch import task_ids_for_user
 from app.models.user import ROLES, User
 from app.services import audit, pipeline_progress, sessions
+from app.services.accounts import is_always_admin
 from app.services.otp import normalize_email
 
 logger = logging.getLogger("job_finder_api.user_admin")
@@ -110,6 +111,8 @@ def update_user(db: Session, actor: User, target: User, changes: dict, request: 
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"role must be one of {ROLES}")
         if target.id == actor.id:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "You can't change your own role.")
+        if is_always_admin(target.email):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "This is an owner account; it is always an admin.")
         _guard_last_admin(db, target)
         target.role = changes["role"]
     if "manager_id" in changes:
@@ -143,6 +146,8 @@ def set_active(db: Session, actor: User, target: User, active: bool, request: Re
     if target.id == actor.id and not active:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "You can't disable your own account.")
     if not active:
+        if is_always_admin(target.email):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "This is an owner account; it can't be disabled.")
         _guard_last_admin(db, target)
 
     before = snapshot(target)
