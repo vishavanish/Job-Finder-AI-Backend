@@ -1,4 +1,4 @@
-name: tests
+name: Deploy Job Finder API to OCI
 
 on:
   push:
