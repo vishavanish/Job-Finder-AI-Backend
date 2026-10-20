@@ -96,6 +96,33 @@ def delete_model(model_ref: str, request: Request, actor=Depends(admin_only), db
     db.commit()
 
 
+def _test_speech(model: AiModel, resolved, started: float) -> ModelTestResult:
+    """Speech rows: TTS speaks "OK", STT transcribes half a second of silence."""
+    import asyncio
+
+    from app.providers.voice import adapters as speech
+    from app.providers.voice.base import SpeechError
+
+    if model.provider == "browser":
+        return ModelTestResult(ok=True, latency_ms=0, reply="The user's browser speaks; nothing to call.")
+    key = resolved.value if resolved else ""
+    try:
+        if "stt" in (model.tasks or []):
+            stt = speech.build_stt(model.provider, model_id=model.model_id, base_url=model.base_url, api_key=key,
+                                   timeout=20.0)
+            reply = asyncio.run(stt.transcribe(b"\0" * 16000)).text or "(silence)"
+        else:
+            tts = speech.build_tts(model.provider, model_id=model.model_id, base_url=model.base_url, api_key=key,
+                                   timeout=20.0)
+            reply = f"{len(asyncio.run(tts.speak('OK')))} bytes of audio"
+    except SpeechError as e:
+        return ModelTestResult(ok=False, latency_ms=int((time.monotonic() - started) * 1000),
+                               key_source=resolved.source if resolved else None, error=str(e))
+    ai_router.reset_breaker(model.id)
+    return ModelTestResult(ok=True, latency_ms=int((time.monotonic() - started) * 1000),
+                           key_source=resolved.source if resolved else None, reply=reply[:200])
+
+
 @router.post("/models/{model_ref}/test", response_model=ModelTestResult)
 def test_model(model_ref: str, actor=Depends(admin_only), db: Session = Depends(get_db)):
     """Sends one tiny prompt with the platform (or .env) key. Recorded in the
@@ -106,6 +133,8 @@ def test_model(model_ref: str, actor=Depends(admin_only), db: Session = Depends(
         return ModelTestResult(ok=False, latency_ms=0,
                                error=f"No {model.key_scope} key: add one under Keys or in the server .env.")
     started = time.monotonic()
+    if not ai_router.serves(model, "score"):  # speech-only row (P7): test with a tiny speech call
+        return _test_speech(model, resolved, started)
     try:
         result = ai_router.call_model(
             db, model, user_id=actor.id, task="score", system="You are a connection test.",

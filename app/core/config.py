@@ -118,6 +118,28 @@ class Settings(BaseSettings):
     ATS_GONE_AFTER: int = 3                     # 404s in a row before a company is switched off
     RATE_LIMIT_ATS_SEARCH: str = "30/minute"
     RATE_LIMIT_ATS_ADD_COMPANY: str = "10/hour"
+    # ---- Voice interview prep (P7) ----
+    RATE_LIMIT_VOICE_SESSIONS: str = "20/day"
+    VOICE_PRACTICE_MAX_MINUTES: int = 45
+    VOICE_COPILOT_MAX_MINUTES: int = 90
+    VOICE_PRACTICE_COST_CAP_USD: float = 0.50
+    VOICE_COPILOT_COST_CAP_USD: float = 1.00
+    VOICE_TRANSCRIPT_RETENTION_DAYS: int = 90
+    VOICE_RESUME_SECONDS: int = 60              # a dropped socket may reconnect to its session this long
+    VOICE_IDLE_PAUSE_SECONDS: int = 30          # no message from the client -> paused
+    VOICE_END_OF_TURN_MS: int = 700             # silence that ends an answer (Practice)
+    VOICE_MIN_SPEECH_MS: int = 300              # shorter sounds are not an utterance
+    VOICE_MAX_UTTERANCE_SECONDS: int = 60       # long answers are transcribed in pieces
+    VOICE_SPECULATIVE_GRACE_MS: int = 400
+    VOICE_FIRST_TOKEN_TIMEOUT_MS: int = 2500
+    VOICE_STT_TIMEOUT_SECONDS: int = 15
+    VOICE_MAX_FRAME_MS: int = 100
+    VOICE_AUDIO_QUEUE_MS: int = 2000            # bounded audio queue per channel (oldest frames dropped)
+    VOICE_STREAM_TOKEN_SECONDS: int = 60
+    VOICE_VAD_AGGRESSIVENESS: int = 2           # webrtcvad 0-3
+    VOICE_GROUNDING_MIN: float = 0.15
+    COPILOT_ACK_VERSION: str = "2026-10"
+    STORY_BANK_MAX_PER_USER: int = 100
 
     @property
     def ats_markets(self) -> tuple[str, ...]:

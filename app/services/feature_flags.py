@@ -22,6 +22,7 @@ from app.models.admin import FeatureFlag
 FLAGS: dict[str, Callable[[], Any]] = {
     "invite_only": lambda: not get_settings().ALLOW_SELF_REGISTRATION,
     "auto_apply_enabled": lambda: True,
+    "live_copilot_enabled": lambda: True,  # global kill switch; the per-user entitlement stays off by default
 }
 
 

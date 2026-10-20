@@ -61,7 +61,7 @@ FEATURE_LABELS = {
 }
 
 # Global kill switches: feature -> feature flag that must be true.
-KILL_SWITCHES = {"auto_apply": "auto_apply_enabled"}
+KILL_SWITCHES = {"auto_apply": "auto_apply_enabled", "live_copilot": "live_copilot_enabled"}
 
 
 def effective(db: Session, user_id: str, feature: str) -> Entitlement:

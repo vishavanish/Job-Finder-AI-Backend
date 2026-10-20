@@ -88,8 +88,11 @@ def admin_view(db: Session, m: AiModel) -> dict:
 
 
 def create_model(db: Session, data: dict, *, actor_id: str) -> AiModel:
-    if data["provider"] not in PROVIDERS:
-        raise _bad(f"provider must be one of {', '.join(PROVIDERS)}")
+    allowed = (*PROVIDERS, *sorted(ai_router.SPEECH_ONLY_PROVIDERS))
+    if data["provider"] not in allowed:
+        raise _bad(f"provider must be one of {', '.join(allowed)}")
+    if data["provider"] in ai_router.SPEECH_ONLY_PROVIDERS and set(data.get("tasks") or []) - ai_router.SPEECH_TASKS:
+        raise _bad(f"{data['provider']} models only do speech: give them the task 'tts' or 'stt'.")
     base_url = validate_base_url(data.get("base_url"))
     if data["provider"] == "openai_compatible" and not base_url:
         raise _bad("OpenAI-compatible models need a base_url.")

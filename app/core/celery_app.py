@@ -80,6 +80,11 @@ celery_app.conf.beat_schedule = {
         "schedule": 24 * 3600.0,
         "options": {"queue": settings.maintenance_queue, "expires": 3600},
     },
+    "purge-voice-data": {
+        "task": "job_finder.purge_voice_data",
+        "schedule": 24 * 3600.0,
+        "options": {"queue": settings.maintenance_queue, "expires": 3600},
+    },
     "purge-apply-proofs": {
         "task": "job_finder.purge_apply_proofs",
         "schedule": 24 * 3600.0,
