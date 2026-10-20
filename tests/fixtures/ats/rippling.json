@@ -1,0 +1,48 @@
+{
+ "items": [
+  {
+   "id": "84d388b6-7656-434c-8862-0312eb6b97ac",
+   "name": "Business Operations Manager",
+   "url": "https://ats.rippling.com/rippling/jobs/84d388b6-7656-434c-8862-0312eb6b97ac",
+   "department": {
+    "name": "Bizops"
+   },
+   "locations": [
+    {
+     "name": "San Francisco, CA",
+     "country": "United States",
+     "countryCode": "US",
+     "state": "California",
+     "stateCode": "CA",
+     "city": "San Francisco",
+     "workplaceType": "ON_SITE"
+    }
+   ],
+   "language": "en-US"
+  },
+  {
+   "id": "84d388b6-7656-434c-8862-0312eb6b97ac",
+   "name": "Business Operations Manager",
+   "url": "https://ats.rippling.com/rippling/jobs/84d388b6-7656-434c-8862-0312eb6b97ac",
+   "department": {
+    "name": "Bizops"
+   },
+   "locations": [
+    {
+     "name": "New York, NY",
+     "country": "United States",
+     "countryCode": "US",
+     "state": "New York",
+     "stateCode": "NY",
+     "city": "New York",
+     "workplaceType": "ON_SITE"
+    }
+   ],
+   "language": "en-US"
+  }
+ ],
+ "page": 0,
+ "pageSize": 20,
+ "totalItems": 2,
+ "totalPages": 1
+}
