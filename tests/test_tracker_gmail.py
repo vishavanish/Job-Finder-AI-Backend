@@ -255,6 +255,9 @@ def test_rejection_updates_the_application_with_a_formal_note(client, make_user,
     assert last["note"].startswith("On ") and "Acme Corp told you it will not move forward" in last["note"]
     assert "Backend Engineer" in last["note"] and "Unfortunately" not in last["note"]  # template, no quoting
     assert last["email"]["subject"] == "Your application to Acme Corp"
+    assert last["email"]["id"] and last["email"]["category"] == "rejection" and last["email"]["snippet"]
+    assert last["email"]["gmail_url"].startswith("https://mail.google.com/mail/u/")
+    assert last["email"]["gmail_url"].endswith("/#all/m1")
 
     # idempotent: a second sync with nothing new changes nothing and calls no AI
     calls = len(ai.calls)
