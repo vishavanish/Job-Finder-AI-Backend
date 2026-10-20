@@ -28,7 +28,7 @@ from app.core.config import get_settings
 from app.core.db import get_db
 from app.models.application import Application
 from app.models.jobs import Job
-from app.models.email_schemas import ApplicationTimeline, TimelineEvent, TrackerStats
+from app.models.email_schemas import ApplicationTimeline, TimelineEmail, TimelineEvent, TrackerStats
 from app.models.schemas import ApplicationLogEntry, ApplicationLogResult, ApplicationStatusUpdate
 from app.services import job_store
 from app.services.applications_store import record_status
@@ -141,20 +141,30 @@ def tracker_stats(days: int = Query(0, ge=0, le=3650, description="0 = all time"
 def application_events(application_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
     """The timeline: every status change with where it came from (apply_engine, manual, email_parser) and, for
     email changes, which email caused it."""
-    from app.models.email import EmailEvent
+    from urllib.parse import quote
+
+    from app.models.email import EmailAccount, EmailEvent
 
     row = db.query(Application).filter(Application.id == application_id, Application.user_id == user.id).first()
     if not row:
         raise HTTPException(404, "no application found with this id")
     email_ids = [e.email_event_id for e in row.events if e.email_event_id]
-    emails = {m.id: m for m in db.query(EmailEvent).filter(EmailEvent.id.in_(email_ids),
-                                                           EmailEvent.user_id == user.id).all()} if email_ids else {}
+    emails = {m.id: (m, address) for m, address in
+              db.query(EmailEvent, EmailAccount.gmail_address)
+              .join(EmailAccount, EmailAccount.id == EmailEvent.account_id)
+              .filter(EmailEvent.id.in_(email_ids), EmailEvent.user_id == user.id).all()} if email_ids else {}
+
+    def email_out(m, address: str) -> TimelineEmail:
+        return TimelineEmail(id=m.id, sender=m.sender, subject=m.subject, snippet=m.snippet or "",
+                             received_at=m.received_at, category=m.category,
+                             gmail_url=f"https://mail.google.com/mail/u/{quote(address)}/#all/{quote(m.message_id)}")
+
     events = []
     for e in row.events:
-        m = emails.get(e.email_event_id or "")
+        found = emails.get(e.email_event_id or "")
         events.append(TimelineEvent(
             status=e.status, status_source=e.status_source, note=e.note, created_at=e.created_at,
-            email={"sender": m.sender, "subject": m.subject, "received_at": m.received_at.isoformat()} if m else None,
+            email=email_out(*found) if found else None,
         ))
     return ApplicationTimeline(application_id=row.id, events=events)
 

@@ -85,12 +85,23 @@ class SyncResult(BaseModel):
 
 # ---------------------------------------------------------------- tracker
 
+class TimelineEmail(BaseModel):
+    """The email behind a status change: enough to recognise it, plus a link to open it in Gmail."""
+    id: str
+    sender: str
+    subject: str
+    snippet: str = ""
+    received_at: datetime
+    category: Optional[str] = None
+    gmail_url: Optional[str] = Field(None, description="Opens the message in Gmail (signed in as that account)")
+
+
 class TimelineEvent(BaseModel):
     status: str
     status_source: str
     note: Optional[str] = None
     created_at: datetime
-    email: Optional[dict] = Field(None, description="{sender, subject, received_at} of the email that caused it")
+    email: Optional[TimelineEmail] = Field(None, description="The email that caused this change (email_parser)")
 
 
 class ApplicationTimeline(BaseModel):
