@@ -155,3 +155,41 @@ def make_admin(make_user):
         set_role(user_id, "admin")
         return user_id, headers
     return _make
+
+
+@pytest.fixture(autouse=True)
+def _socket_exit_waits_for_the_app(monkeypatch):
+    """Starlette's WebSocketTestSession cancels the app right after sending the
+    disconnect, so a voice session still handling the drop could be cancelled
+    mid-way and the test failed with CancelledError (only on slower CI runners).
+    Send the disconnect first and wait (≤ 10 s) for the app to return."""
+    import threading
+
+    from starlette.testclient import WebSocketTestSession
+
+    enter, exit_ = WebSocketTestSession.__enter__, WebSocketTestSession.__exit__
+
+    def _enter(self):
+        app, done = self.app, threading.Event()
+
+        async def wrapped(scope, receive, send):
+            try:
+                await app(scope, receive, send)
+            finally:
+                done.set()
+
+        self.app, self._app_done = wrapped, done
+        return enter(self)
+
+    def _exit(self, *args):
+        done = getattr(self, "_app_done", None)
+        if done is not None and not done.is_set():
+            try:
+                self.close(1000)
+            except Exception:  # noqa: BLE001 — the normal exit below reports real errors
+                pass
+            done.wait(10)
+        return exit_(self, *args)
+
+    monkeypatch.setattr(WebSocketTestSession, "__enter__", _enter)
+    monkeypatch.setattr(WebSocketTestSession, "__exit__", _exit)
