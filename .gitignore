@@ -20,6 +20,11 @@ env/
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+dump.rdb
 
 # ---- app data / generated ----
 output/
