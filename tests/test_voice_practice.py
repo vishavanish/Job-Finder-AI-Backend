@@ -289,6 +289,9 @@ def test_socket_needs_a_valid_single_use_token(client, make_user, script):
     with client.websocket_connect(created["stream_path"]) as ws:
         auth(ws, created)
         assert ws.receive_json()["type"] == "status"
+        # End before leaving: the test client cancels a server still saving a dropped session.
+        ws.send_text(json.dumps({"type": "control", "action": "end"}))
+        recv_until(ws, "session.ended")
     with client.websocket_connect(created["stream_path"]) as ws:  # the same token again
         auth(ws, created)
         assert ws.receive_json()["code"] == "auth_failed"
@@ -420,6 +423,8 @@ def test_only_one_live_voice_session(client, make_user, script):
         ws.receive_json()
         resp = client.post(f"{API}/voice/sessions", json={}, headers=headers)
         assert resp.status_code == 409 and resp.json()["detail"]["code"] == "voice_session_busy"
+        ws.send_text(json.dumps({"type": "control", "action": "end"}))
+        recv_until(ws, "session.ended")
 
 
 def test_oversized_frames_close_the_socket(client, make_user, script):
