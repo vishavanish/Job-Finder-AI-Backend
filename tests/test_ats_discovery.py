@@ -508,7 +508,7 @@ def test_postgres_search_under_three_seconds_on_300k_jobs():
         s.execute(text(
             "INSERT INTO ats_jobs (id, company_id, external_id, title, title_norm, location, country, remote, "
             "department, url, snippet, job_key, content_hash, posted_at, first_seen_at, last_seen_at) "
-            "SELECT 'j' || g, 'c' || (1 + g % 3000), 'e' || g, t.title || ' ' || (g % 7), lower(t.title), "
+            "SELECT 'j' || g, 'c' || (1 + (g / 10) % 3000), 'e' || g, t.title || ' ' || (g % 7), lower(t.title), "
             "'Bengaluru, India', '', g % 4 = 0, 'Eng', 'https://x/' || g, 'Build things with python and sql', "
             "'k' || g, 'h', :now - (g % 90) * interval '1 day', :now, :now "
             "FROM generate_series(1, 300000) g JOIN (SELECT unnest(:titles) AS title, "
