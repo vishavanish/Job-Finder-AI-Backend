@@ -21,6 +21,7 @@ without it are streamed as one chunk by stream_text().
 """
 from __future__ import annotations
 
+import base64
 import json
 from typing import Iterator
 
@@ -56,15 +57,20 @@ class GeminiAdapter:
 
 
     def stream(self, spec: ModelSpec, *, api_key: str, system: str, user: str, max_tokens: int,
-               timeout: float, usage: dict) -> Iterator[str]:
+               timeout: float, usage: dict, images: list[tuple[str, bytes]] | None = None) -> Iterator[str]:
         try:
             from google import genai
         except ImportError as e:
             raise LLMError("google-genai is not installed", retryable=False) from e
         config = {"system_instruction": system, "temperature": TEMPERATURE, "max_output_tokens": max_tokens}
+        contents: object = user
+        if images:
+            from google.genai import types
+            contents = [*(types.Part.from_bytes(data=data, mime_type=mime) for mime, data in images), user]
         try:
             client = genai.Client(api_key=api_key, http_options={"timeout": int(timeout * 1000)})
-            for chunk in client.models.generate_content_stream(model=spec.model_id, contents=user, config=config):
+            for chunk in client.models.generate_content_stream(model=spec.model_id, contents=contents,
+                                                               config=config):
                 meta = getattr(chunk, "usage_metadata", None)
                 if meta is not None:
                     usage["tokens_in"] = int(getattr(meta, "prompt_token_count", 0) or 0)
@@ -106,7 +112,9 @@ class GroqAdapter:
         return _openai_style_result(resp)
 
     def stream(self, spec: ModelSpec, *, api_key: str, system: str, user: str, max_tokens: int,
-               timeout: float, usage: dict) -> Iterator[str]:
+               timeout: float, usage: dict, images: list[tuple[str, bytes]] | None = None) -> Iterator[str]:
+        if images:
+            raise LLMError("this model does not read images", retryable=False)
         try:
             from groq import Groq
         except ImportError as e:
@@ -187,15 +195,20 @@ class AnthropicAdapter:
         return LLMResult(text=text, tokens_in=resp.usage.input_tokens, tokens_out=resp.usage.output_tokens)
 
     def stream(self, spec: ModelSpec, *, api_key: str, system: str, user: str, max_tokens: int,
-               timeout: float, usage: dict) -> Iterator[str]:
+               timeout: float, usage: dict, images: list[tuple[str, bytes]] | None = None) -> Iterator[str]:
         try:
             import anthropic
         except ImportError as e:
             raise LLMError("anthropic is not installed", retryable=False) from e
         client = anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=0)
+        content: object = user
+        if images:
+            content = [*({"type": "image", "source": {"type": "base64", "media_type": mime,
+                                                       "data": base64.b64encode(data).decode()}}
+                         for mime, data in images), {"type": "text", "text": user}]
         try:
             with client.messages.stream(model=spec.model_id, max_tokens=max_tokens, system=system,
-                                        messages=[{"role": "user", "content": user}]) as s:
+                                        messages=[{"role": "user", "content": content}]) as s:
                 for text in s.text_stream:
                     yield text
                 final = s.get_final_message()
@@ -245,16 +258,22 @@ class OpenAICompatibleAdapter:
                          tokens_out=int(usage.get("completion_tokens") or 0))
 
     def stream(self, spec: ModelSpec, *, api_key: str, system: str, user: str, max_tokens: int,
-               timeout: float, usage: dict) -> Iterator[str]:
+               timeout: float, usage: dict, images: list[tuple[str, bytes]] | None = None) -> Iterator[str]:
         """Server-sent events from /chat/completions (OpenAI, OpenRouter, ...)."""
         if not spec.base_url:
             raise LLMError("openai_compatible model has no base_url", retryable=False)
         headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
+        content: object = user
+        if images:
+            content = [{"type": "text", "text": user},
+                       *({"type": "image_url", "image_url": {"url": f"data:{mime};base64,"
+                                                                    f"{base64.b64encode(data).decode()}"}}
+                         for mime, data in images)]
         body = {
             "model": spec.model_id,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}],
             "max_tokens": max_tokens,
             "temperature": TEMPERATURE,
             "stream": True,
@@ -301,12 +320,16 @@ PROVIDERS = tuple(ADAPTERS)
 
 
 def stream_text(adapter, spec: ModelSpec, *, api_key: str, system: str, user: str, max_tokens: int,
-                timeout: float, usage: dict) -> Iterator[str]:
-    """The adapter's stream(), or its complete() as a single chunk."""
+                timeout: float, usage: dict, images: list[tuple[str, bytes]] | None = None) -> Iterator[str]:
+    """The adapter's stream(), or its complete() as a single chunk. Images
+    (mime, bytes) go only to adapters that read them."""
     if hasattr(adapter, "stream"):
+        kwargs = {"images": images} if images else {}
         yield from adapter.stream(spec, api_key=api_key, system=system, user=user, max_tokens=max_tokens,
-                                  timeout=timeout, usage=usage)
+                                  timeout=timeout, usage=usage, **kwargs)
         return
+    if images:
+        raise LLMError("this model does not read images", retryable=False)
     result = adapter.complete(spec, api_key=api_key, system=system, user=user, json_mode=False,
                               max_tokens=max_tokens, timeout=timeout)
     usage["tokens_in"], usage["tokens_out"] = result.tokens_in, result.tokens_out

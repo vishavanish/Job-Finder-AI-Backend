@@ -30,6 +30,8 @@ from app.services import ai_router
 
 logger = logging.getLogger("job_finder_api.voice_speech")
 
+STREAMING_PROVIDERS = frozenset({"deepgram"})
+
 
 @dataclass
 class SpeechChoice:
@@ -42,8 +44,13 @@ class SpeechChoice:
     api_key: str
     key_source: str
 
+    @property
+    def streaming(self) -> bool:
+        return self.provider in STREAMING_PROVIDERS
+
     def public(self) -> dict:
-        return {"name": self.display_name, "provider": self.provider, "model_id": self.model_id, "tier": self.tier}
+        return {"name": self.display_name, "provider": self.provider, "model_id": self.model_id, "tier": self.tier,
+                "streaming": self.streaming}
 
 
 def resolve(db: Session, *, user_id: str, task: str, free_only: bool = False) -> tuple[list[SpeechChoice], list[str]]:
@@ -60,6 +67,15 @@ def make_stt(choice: SpeechChoice):
     """Adapter for one STT choice (tests replace this)."""
     return adapters.build_stt(choice.provider, model_id=choice.model_id, base_url=choice.base_url,
                               api_key=choice.api_key, timeout=float(get_settings().VOICE_STT_TIMEOUT_SECONDS))
+
+
+def make_streaming_stt(choice: SpeechChoice, *, language: str | None, diarize: bool):
+    """A streaming STT connection for one audio channel (tests replace this)."""
+    from app.providers.voice.deepgram import DeepgramStreamingSTT
+    if choice.provider != "deepgram":
+        raise SpeechError(f"{choice.display_name} does not stream", retryable=False)
+    return DeepgramStreamingSTT(model_id=choice.model_id, api_key=choice.api_key, language=language,
+                                diarize=diarize)
 
 
 def make_tts(choice: SpeechChoice):
@@ -92,6 +108,20 @@ class SpeechRouter:
         self.tts = list(tts)
 
     @property
+    def streaming_choice(self) -> SpeechChoice | None:
+        """The first STT model when it streams (Live Copilot's interviewer channel)."""
+        return self.stt[0] if self.stt and self.stt[0].streaming else None
+
+    async def record_stream(self, choice: SpeechChoice, *, seconds: float, latency_ms: int, success: bool,
+                            error: str | None = None) -> float:
+        return await asyncio.to_thread(_ledger, self.user_id, "stt", choice, units=max(0, round(seconds)),
+                                       latency_ms=latency_ms, success=success, error=error, ref=self.ref)
+
+    def drop(self, choice: SpeechChoice) -> None:
+        if choice in self.stt:
+            self.stt.remove(choice)
+
+    @property
     def tts_kind(self) -> str:
         return "browser" if not self.tts or self.tts[0].provider == "browser" else "server"
 
@@ -103,8 +133,11 @@ class SpeechRouter:
     async def transcribe(self, pcm: bytes, *, language: str | None = None) -> tuple[Transcript, float]:
         """(transcript, cost). Raises SpeechError when every model failed."""
         errors: list[str] = []
-        while self.stt:
-            choice = self.stt[0]
+        while True:
+            utterance_models = [c for c in self.stt if not c.streaming]
+            if not utterance_models:
+                break
+            choice = utterance_models[0]
             started = time.monotonic()
             seconds = max(1, round(duration_ms(pcm) / 1000))
             try:
@@ -115,9 +148,9 @@ class SpeechRouter:
                                         success=False, error=str(e), ref=self.ref)
                 errors.append(f"{choice.display_name}: {e}")
                 logger.warning("voice: stt %s failed session=%s: %s", choice.model_id, self.ref, e)
-                if e.retryable and len(self.stt) == 1:
+                if e.retryable and len(utterance_models) == 1:
                     raise
-                self.stt.pop(0)
+                self.stt.remove(choice)
                 continue
             latency = int((time.monotonic() - started) * 1000)
             cost = await asyncio.to_thread(_ledger, self.user_id, "stt", choice, units=seconds, latency_ms=latency,

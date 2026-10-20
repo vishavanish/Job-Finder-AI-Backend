@@ -58,8 +58,12 @@ class VoiceProvidersOut(BaseModel):
     reason: Optional[str] = None
 
 
+class CopilotAckIn(BaseModel):
+    version: str = Field(..., max_length=32, description="The copilot_ack_version the user just read")
+
+
 class SessionCreateIn(BaseModel):
-    mode: Literal["mock"] = "mock"
+    mode: Literal["mock", "copilot"] = "mock"
     job_id: Optional[str] = None
     role: Optional[str] = Field(None, max_length=200, description="Typed role when no job is chosen")
     interview_type: InterviewType = "behavioral"
@@ -68,6 +72,10 @@ class SessionCreateIn(BaseModel):
     language: Optional[str] = Field(None, max_length=16)
     focus_questions: list[str] = Field(default_factory=list, max_length=20,
                                        description="Questions to drill (e.g. weak ones from an earlier session)")
+    # Live Copilot only (defaults come from voice settings)
+    answer_style: Optional[AnswerStyle] = None
+    answer_length: Optional[AnswerLength] = None
+    sources: Optional[Literal["tab_mic", "mic"]] = Field(None, description="Tab audio + mic, or mic only")
 
 
 class VoiceSessionOut(BaseModel):
@@ -203,3 +211,13 @@ class StoryList(BaseModel):
 class TaskQueuedOut(BaseModel):
     task_id: str
     message: str
+
+
+class VoiceHealthOut(BaseModel):
+    days: int
+    sessions: dict
+    latency: dict = Field(..., description="p50/p95 per stage, by mode")
+    speech: list[dict]
+    llm: list[dict]
+    spend_usd: float
+    flags: dict

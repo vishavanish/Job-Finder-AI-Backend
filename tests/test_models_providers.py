@@ -17,7 +17,7 @@ from app.services import ai_router, key_store
 SEED_MODEL_IDS = {"gemini-2.5-flash", "openai/gpt-oss-120b", "Qwen/Qwen3-8B",
                   # P7 speech rows (on) and the OpenRouter / OpenAI rows (seeded switched off)
                   "whisper-large-v3-turbo", "speech-synthesis", "openai/gpt-oss-120b:free", "gpt-5-mini",
-                  "gpt-4o-mini-transcribe", "gpt-4o-mini-tts"}
+                  "gpt-4o-mini-transcribe", "gpt-4o-mini-tts", "nova-3"}
 SEEDED_OFF = {"openai/gpt-oss-120b:free", "gpt-5-mini", "gpt-4o-mini-transcribe", "gpt-4o-mini-tts"}
 USER_KEY = "sk-user-own-key-1234567890abcd"
 PLATFORM_KEY = "sk-platform-key-0987654321wxyz"

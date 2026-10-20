@@ -107,7 +107,17 @@ def _test_speech(model: AiModel, resolved, started: float) -> ModelTestResult:
         return ModelTestResult(ok=True, latency_ms=0, reply="The user's browser speaks; nothing to call.")
     key = resolved.value if resolved else ""
     try:
-        if "stt" in (model.tasks or []):
+        if model.provider == "deepgram":
+            from app.providers.voice.deepgram import DeepgramStreamingSTT
+
+            async def _probe() -> str:
+                stt = DeepgramStreamingSTT(model_id=model.model_id, api_key=key)
+                await stt.start()
+                await stt.send(b"\0" * 16000)
+                seconds = await stt.close()
+                return f"streamed {seconds:.1f} s of silence"
+            reply = asyncio.run(_probe())
+        elif "stt" in (model.tasks or []):
             stt = speech.build_stt(model.provider, model_id=model.model_id, base_url=model.base_url, api_key=key,
                                    timeout=20.0)
             reply = asyncio.run(stt.transcribe(b"\0" * 16000)).text or "(silence)"

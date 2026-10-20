@@ -23,7 +23,8 @@ from app.services import ai_router
 
 class LLMStream:
     def __init__(self, *, user_id: str, task: str, system: str, user_prompt: str, max_tokens: int = 600,
-                 free_only: bool = False, ref: str | None = None, timeout: float | None = None):
+                 free_only: bool = False, ref: str | None = None, timeout: float | None = None,
+                 images: list[tuple[str, bytes]] | None = None):
         self.user_id = user_id
         self.task = task
         self.system = system
@@ -32,6 +33,7 @@ class LLMStream:
         self.free_only = free_only
         self.ref = ref
         self.timeout = timeout
+        self.images = images  # held in memory for this one call only
         self.outcome = ai_router.StreamOutcome()
         self._cancel = threading.Event()
         self._queue: asyncio.Queue | None = None
@@ -52,7 +54,7 @@ class LLMStream:
             for chunk in ai_router.stream(db, user_id=self.user_id, task=self.task, system=self.system,
                                           user_prompt=self.user_prompt, outcome=self.outcome,
                                           max_tokens=self.max_tokens, ref=self.ref, free_only=self.free_only,
-                                          timeout=self.timeout, cancel=self._cancel):
+                                          timeout=self.timeout, cancel=self._cancel, images=self.images):
                 put(("chunk", chunk))
                 if self._cancel.is_set():
                     break
@@ -64,6 +66,7 @@ class LLMStream:
         except Exception as e:  # noqa: BLE001 — surfaced to the socket as a provider error
             put(("error", LLMError(f"{type(e).__name__}: {e}"[:200])))
         finally:
+            self.images = None
             db.close()
 
     async def chunks(self) -> AsyncIterator[str]:

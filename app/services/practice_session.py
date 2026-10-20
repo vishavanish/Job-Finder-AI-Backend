@@ -43,12 +43,9 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 
 from fastapi import WebSocket
-from starlette.websockets import WebSocketState
 
-from app.core.auth import as_utc
 from app.core.config import get_settings
 from app.core.db import SessionLocal
 from app.models.user import User
@@ -57,16 +54,12 @@ from app.providers.voice.base import BYTES_PER_MS, SpeechError
 from app.providers.voice.vad import Segmenter, SpeechStart, Utterance
 from app.services import ai_router, entitlements, voice_auth, voice_context, voice_speech, voice_store
 from app.services.voice_llm import LLMStream
+from app.services.voice_socket import (  # noqa: F401 — close codes re-exported for callers/tests
+    CLOSE_AUTH, CLOSE_BUSY, CLOSE_COST_CAP, CLOSE_ENDED, CLOSE_FORBIDDEN, CLOSE_TOO_BIG, VoiceSocket,
+    authenticate, lock_or_reject, reject_gate, schedule_finalize,
+)
 
 logger = logging.getLogger("job_finder_api.practice")
-
-# Close codes (P7 plan 2.6).
-CLOSE_AUTH = 4401
-CLOSE_COST_CAP = 4402
-CLOSE_FORBIDDEN = 4403
-CLOSE_ENDED = 4404
-CLOSE_BUSY = 4409
-CLOSE_TOO_BIG = 1009
 
 CHANNEL_USER = 1
 AUDIO_OUT = 9
@@ -105,27 +98,18 @@ class Gen:
         return bool(self.spoken)
 
 
-class PracticeSession:
+class PracticeSession(VoiceSocket):
     def __init__(self, ws: WebSocket, *, row: VoiceSession, user_id: str, ctx: voice_context.SessionContext,
                  speech: voice_speech.SpeechRouter, history: list, voice: str | None):
         s = get_settings()
-        self.ws = ws
-        self.session_id = row.id
-        self.user_id = user_id
+        super().__init__(ws, session_id=row.id, user_id=user_id, started_at=row.started_at, cost_usd=row.cost_usd,
+                         cost_cap=row.cost_cap_usd or s.VOICE_PRACTICE_COST_CAP_USD)
         self.config = dict(row.config or {})
         self.length = int(self.config.get("length") or 5)
         self.language = self.config.get("language") or "en"
         self.ctx = ctx
         self.speech = speech
         self.voice = voice
-        self.cost = float(row.cost_usd or 0.0)
-        self.cost_cap = float(row.cost_cap_usd or s.VOICE_PRACTICE_COST_CAP_USD)
-        self.free_only = self.cost >= self.cost_cap
-        started = row.started_at
-        self.elapsed_before = 0.0
-        if started is not None:
-            self.elapsed_before = max(0.0, (datetime.now(timezone.utc) - as_utc(started)).total_seconds())
-        self.opened = time.monotonic()
         self.max_seconds = s.VOICE_PRACTICE_MAX_MINUTES * 60
         self.segmenter = Segmenter(end_silence_ms=s.VOICE_END_OF_TURN_MS, min_speech_ms=s.VOICE_MIN_SPEECH_MS,
                                    max_utterance_ms=s.VOICE_MAX_UTTERANCE_SECONDS * 1000,
@@ -150,15 +134,12 @@ class PracticeSession:
         self.stt_ms: int | None = None
         self.paused = False
         self.idle_paused = False
-        self.ended = False
         self.gen: Gen | None = None
         self.reply_task: asyncio.Task | None = None
         self.epoch = 0
         self.stt_queue: asyncio.Queue = asyncio.Queue()
         self.stt_busy = False
         self.tts_queue: asyncio.Queue = asyncio.Queue()
-        self.tasks: list[asyncio.Task] = []
-        self.send_lock = asyncio.Lock()
         self.last_touch = time.monotonic()
 
     # ------------------------------------------------------------ helpers
@@ -181,33 +162,6 @@ class PracticeSession:
     @property
     def awaiting_answer(self) -> bool:
         return bool(self.turns) and self.turns[-1].speaker == "interviewer" and self.turns[-1].kind == "question"
-
-    def _elapsed(self) -> float:
-        return self.elapsed_before + (time.monotonic() - self.opened)
-
-    async def send(self, payload: dict | bytes) -> None:
-        if self.ws.application_state != WebSocketState.CONNECTED:
-            return
-        async with self.send_lock:
-            try:
-                if isinstance(payload, bytes):
-                    await self.ws.send_bytes(payload)
-                else:
-                    await self.ws.send_text(json.dumps(payload, default=str))
-            except Exception:  # noqa: BLE001 — the socket went away; run() notices on its next receive
-                pass
-
-    async def status(self, state: str, **extra) -> None:
-        await self.send({"type": "status", "state": state, **extra})
-
-    async def error(self, code: str, message: str, *, retryable: bool) -> None:
-        await self.send({"type": "error", "code": code, "message": message, "retryable": retryable})
-
-    def _spawn(self, coro) -> asyncio.Task:
-        task = asyncio.create_task(coro)
-        self.tasks.append(task)
-        task.add_done_callback(lambda t: self.tasks.remove(t) if t in self.tasks else None)
-        return task
 
     # ------------------------------------------------------------ main loop
 
@@ -681,34 +635,14 @@ class PracticeSession:
             pass
 
     async def close(self) -> None:
-        """Cancels every task this session started (except the caller's own,
-        when a reply task ends the session). Safe to call twice."""
+        """Cancels every task this session started. Safe to call twice."""
         if self.gen is not None:
             self.gen.stream.cancel()
-        current = asyncio.current_task()
-        others = [t for t in list(self.tasks) if t is not current]
-        for task in others:
-            task.cancel()
-        if others:
-            await asyncio.gather(*others, return_exceptions=True)
+        await self.cancel_tasks()
         self.segmenter = None  # drops any buffered audio
 
 
-def schedule_finalize(session_id: str, countdown: int | None = None) -> None:
-    from app.core.celery_tasks import voice_finalize_task
-    opts = {"countdown": countdown} if countdown else {}
-    voice_finalize_task.apply_async(args=[session_id], queue=get_settings().default_queue, **opts)
-
-
 # ---------------------------------------------------------------- the socket gateway
-
-async def _reject(ws: WebSocket, code: int, err: str, message: str) -> None:
-    try:
-        await ws.send_text(json.dumps({"type": "error", "code": err, "message": message, "retryable": False}))
-        await ws.close(code=code)
-    except Exception:  # noqa: BLE001
-        pass
-
 
 def _gate(session_id: str, claims: dict) -> tuple[str | None, str, dict]:
     """Sync DB checks for a new socket. Returns (error code or None, message, data)."""
@@ -739,33 +673,15 @@ def _gate(session_id: str, claims: dict) -> tuple[str | None, str, dict]:
 
 
 async def run_socket(ws: WebSocket, session_id: str) -> None:
-    await ws.accept()
-    try:
-        first = await asyncio.wait_for(ws.receive(), timeout=5)
-    except asyncio.TimeoutError:
-        await _reject(ws, CLOSE_AUTH, "auth_required", "Send {\"type\": \"auth\", \"token\": ...} first.")
-        return
-    if first["type"] == "websocket.disconnect":
-        return
-    try:
-        msg = json.loads(first.get("text") or "")
-    except ValueError:
-        msg = {}
-    claims = voice_auth.consume(str(msg.get("token") or ""), session_id) if msg.get("type") == "auth" else None
+    claims = await authenticate(ws, session_id)
     if claims is None:
-        await _reject(ws, CLOSE_AUTH, "auth_failed", "This stream token is invalid, expired or already used.")
         return
-
     err, message, data = await asyncio.to_thread(_gate, session_id, claims)
     if err:
-        code = {"auth": CLOSE_AUTH, "ended": CLOSE_ENDED, "forbidden": CLOSE_FORBIDDEN}[err]
-        await _reject(ws, code, {"auth": "auth_failed", "ended": "session_ended",
-                                 "forbidden": "feature_disabled"}[err], message)
+        await reject_gate(ws, err, message)
         return
     user_id = data["user_id"]
-    if not voice_auth.acquire_live(user_id, session_id):
-        await _reject(ws, CLOSE_BUSY, "voice_session_busy",
-                      "Another voice session is open. End it first (only one at a time).")
+    if not await lock_or_reject(ws, user_id, session_id):
         return
 
     speech = voice_speech.SpeechRouter(user_id=user_id, ref=session_id, stt=data["stt"], tts=data["tts"])
