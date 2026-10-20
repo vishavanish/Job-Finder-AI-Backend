@@ -1,12 +1,19 @@
 # P7 — Voice Interview Prep: Practice mode (mock interviewer) + Live Copilot (web)
 
-Status: **approved 2026-10-20 (all recommended defaults + OpenRouter fallback / OpenAI ready, decisions 3a/3b). P7a Practice built on `dev` (uncommitted) — see CLAUDE.md 6.13. P7b Live Copilot not built yet.**
+Status: **approved 2026-10-20 (all recommended defaults + OpenRouter fallback / OpenAI ready, decisions 3a/3b). P7a Practice committed on `dev` (`3294b39`); P7b Live Copilot built after it — see CLAUDE.md 6.13.**
 Deviations in P7a:
 - LLM `stream()` adapters are synchronous generators run in a worker thread (`services/voice_llm.py`), not `async def` — the same adapters serve Celery.
 - Deepgram streaming STT and Deepgram Aura / ElevenLabs TTS move to P7b; P7a ships Groq Whisper + OpenAI-compatible STT/TTS + browser voice.
 - The socket also takes typed answers (`{"type": "text"}`) for keyboard users.
 - Story drafts use the `interview_chat` task; scores are 1–5.
-- `voice_bench.py` and `GET /admin/voice/health` stay in P7b step 11 (as planned). The screens are F7 (separate plan: `job-finder-frontend/docs/plans/F7-interview-prep.md`).
+- `voice_bench.py` and `GET /admin/voice/health` stay in P7b step 11 (as planned).
+Deviations in P7b:
+- Deepgram is the only streaming STT built; Deepgram Aura / ElevenLabs voices are not built (Practice uses browser or OpenAI voices).
+- The user's own mic channel uses the per-utterance model even when Deepgram is available (cheaper; it is context only).
+- `question.detected` carries the type as `qtype` (`type` is the message envelope's field); also `question.updated` for speculative restarts and `answer.cancelled` reasons `restarted` / `regenerating` / `no_model`.
+- Mic-only diarization: the user marks their own speaker once with the `that_was_me` control (nothing is guessed).
+- `answer.done` adds `unverified` (names/numbers not found in the resume, stories or job) for personal question types.
+- The question-gate eval set has 125 lines (plan said ~150). The screens are F7 (separate plan: `job-finder-frontend/docs/plans/F7-interview-prep.md`).
 Inputs:
 - CLAUDE.md §7.10 (Practice + Live Copilot, WebSocket protocol, latency budget, transparency rules), §7.9 (registry/router), §8 (`voice_sessions`, `voice_turns`, `voice_feedback`, `story_bank`), §9 (Voice endpoints), §12 (privacy), §15 (P7 acceptance).
 - Today's code: `ai_router.TASKS` already lists `interview_chat` / `interview_eval` (comment: "stt/tts/embeddings arrive with P7"); entitlements `voice_prep` (on) and `live_copilot` (**off**) already exist in `services/entitlements.py`. LLM adapters (`providers/llm/adapters.py`) are **synchronous `complete()` only** — no streaming, and the app has **no WebSocket route yet**.

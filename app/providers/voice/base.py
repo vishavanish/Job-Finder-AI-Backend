@@ -10,6 +10,7 @@ copilot in P7b behind the same router task.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import wave
 from dataclasses import dataclass, field
@@ -34,10 +35,24 @@ class Transcript:
     start_ms: int = 0
     end_ms: int = 0
     words: list[dict] = field(default_factory=list)  # [{word, start_ms, end_ms}] when the provider gives them
+    speaker: int | None = None     # diarization: the main speaker of this piece
+    utterance_end: bool = False    # the speaker stopped (endpointing / UtteranceEnd)
 
 
 class STTProvider(Protocol):
     async def transcribe(self, pcm: bytes, *, language: str | None = None) -> Transcript: ...
+
+
+class StreamingSTTProvider(Protocol):
+    """True streaming STT (P7b): audio in as it arrives, partial and final
+    transcripts out on `events`, `None` on the queue when the stream ends."""
+    events: "asyncio.Queue[Transcript | None]"
+
+    async def start(self) -> None: ...
+
+    async def send(self, pcm: bytes) -> None: ...
+
+    async def close(self) -> float: ...  # seconds of audio sent (for the usage ledger)
 
 
 class TTSProvider(Protocol):

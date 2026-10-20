@@ -39,7 +39,7 @@ class Script:
         self.calls: list[dict] = []
 
     def stream(self, db, *, user_id, task, system, user_prompt, outcome, max_tokens=800, ref=None,
-               free_only=False, timeout=None, cancel=None):
+               free_only=False, timeout=None, cancel=None, images=None):
         self.calls.append({"task": task, "prompt": user_prompt, "free_only": free_only, "system": system})
         if self.fail_when_free_only and free_only:
             raise ai_router.NoModelAvailable(task, ["test: paid model skipped"])

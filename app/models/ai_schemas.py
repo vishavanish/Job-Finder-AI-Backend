@@ -12,7 +12,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, SecretStr
 
-Provider = Literal["gemini", "groq", "huggingface", "anthropic", "openai_compatible", "browser"]
+Provider = Literal["gemini", "groq", "huggingface", "anthropic", "openai_compatible", "browser", "deepgram"]
 Tier = Literal["free", "paid"]
 SourceTier = Literal["free", "free_key", "paid", "byok"]
 TosRisk = Literal["none", "low", "high"]

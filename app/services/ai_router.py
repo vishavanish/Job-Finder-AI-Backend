@@ -46,10 +46,10 @@ TASKS = ("score", "resume_parse", "title_suggest", "resume_tailor", "cover_lette
          "question_gate", "stt", "tts")
 SPEECH_TASKS = frozenset({"stt", "tts"})
 # Providers that only do speech (no text adapter in app/providers/llm).
-SPEECH_ONLY_PROVIDERS = frozenset({"browser"})
+SPEECH_ONLY_PROVIDERS = frozenset({"browser", "deepgram"})
 
 # Providers that cannot run without a key (openai_compatible may be a keyless local server).
-KEY_REQUIRED = {"gemini", "groq", "huggingface", "anthropic"}
+KEY_REQUIRED = {"gemini", "groq", "huggingface", "anthropic", "deepgram"}
 
 
 class NoModelAvailable(Exception):
@@ -327,7 +327,8 @@ class StreamOutcome:
 
 def stream(db: Session, *, user_id: str | None, task: str, system: str, user_prompt: str,
            outcome: StreamOutcome, max_tokens: int = 800, ref: str | None = None, free_only: bool = False,
-           timeout: float | None = None, cancel: threading.Event | None = None) -> Iterator[str]:
+           timeout: float | None = None, cancel: threading.Event | None = None,
+           images: list[tuple[str, bytes]] | None = None) -> Iterator[str]:
     """Streams `task` from the first model in the chain that produces a
     first chunk. A model that fails BEFORE its first chunk is skipped (the
     next one is tried); a failure after that raises LLMError — the caller
@@ -350,7 +351,7 @@ def stream(db: Session, *, user_id: str | None, task: str, system: str, user_pro
         started = time.monotonic()
         chunks: list[str] = []
         gen = stream_text(adapter, spec, api_key=api_key, system=system, user=user_prompt, max_tokens=limit,
-                          timeout=limit_timeout, usage=usage)
+                          timeout=limit_timeout, usage=usage, images=images)
         try:
             for chunk in gen:
                 if not chunks:
