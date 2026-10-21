@@ -145,7 +145,7 @@ flowchart TB
 | Layer | Choice |
 |-------|--------|
 | API | Python 3.11+, FastAPI, Pydantic v2, SlowAPI rate limiting |
-| Async work | Celery + Redis (Upstash, TLS `rediss://`), Celery beat for schedules |
+| Async work | Celery + Redis (Upstash over TLS `rediss://`, or Redis/Valkey on the same VM over plain `redis://localhost`), Celery beat for schedules |
 | Database | Postgres (Supabase, pooler port 6543 transaction mode), SQLAlchemy, **Alembic migrations**, pgvector |
 | Browser automation | Playwright (Chromium) on the `apply` queue |
 | Scraping | `python-jobspy`, Apify actors (optional), official/public ATS endpoints |
@@ -191,7 +191,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Shared Redis | `core/redis_client.py` | One client per process (`get_redis()`); tests swap in fakeredis. |
 | Frontend | separate repo `Job-Finder-AI-Frontend` | React 18 + Vite + react-router, plain JS (no TypeScript), axios client with hardcoded `API_URL`. Pages: Home, Keywords, Skills, ATS Targets, Providers, Applications, Profile, Login. Deployed on Vercel. |
 
-**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts, `0008`–`0009` apply center, `0010` tracker & Gmail, `0011` ATS discovery); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
+**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts, `0008`–`0009` apply center, `0010` tracker & Gmail, `0011` ATS discovery, `0012`–`0013` voice, `0014` Gemini 2.5 Flash → 3.8 Flash); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
 
 **CI:** `.github/workflows/tests.yml` runs the tests on every push and pull request (no secrets needed).
 
@@ -264,7 +264,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 
 | Item | State |
 |------|-------|
-| AI model registry | ✅ `ai_models` + admin CRUD (`/admin/models`), test button, per-task defaults. Admin adds any model, free or paid, without code; enabled models appear in users' `GET /models` at once. Seeded: Gemini 2.5 Flash → GPT-OSS 120B (Groq) → Qwen3 8B (HF), all free. |
+| AI model registry | ✅ `ai_models` + admin CRUD (`/admin/models`), test button, per-task defaults. Admin adds any model, free or paid, without code; enabled models appear in users' `GET /models` at once. Seeded: Gemini 2.5 Flash → GPT-OSS 120B (Groq) → Qwen3 8B (HF), all free. Migration `0014` (2026-10-21) renames the Gemini row to `gemini-3.8-flash`: Google returns 404 for 2.5 Flash to new accounts. |
 | Providers | ✅ `gemini`, `groq`, `huggingface`, `anthropic`, `openai_compatible` (covers OpenAI, OpenRouter, Together, DeepSeek, Mistral, local Ollama). |
 | Router | ✅ user choice → admin default → priority; skips disabled, wrong task, paid-not-allowed, Free-tools-only, keyless and breaker-open models (`AI_BREAKER_FAILURES` / `AI_BREAKER_COOLDOWN_SECONDS`). |
 | Paid models | ✅ usable with the `premium_models` entitlement (platform key) **or** the user's own key for that scope; never under Free tools only (owner decision 2026-10-15). |
