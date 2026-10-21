@@ -283,6 +283,13 @@ class Settings(BaseSettings):
         return [x.strip() for x in self.GOOGLE_CLIENT_IDS.split(",") if x.strip()]
 
 
+def _is_local_redis(url: str) -> bool:
+    """True for a Redis/Valkey on this machine (localhost, 127.x, ::1)."""
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or "").lower()
+    return host in ("localhost", "::1") or host.startswith("127.")
+
+
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()
@@ -302,11 +309,12 @@ def get_settings() -> Settings:
             "console in .env."
         )
         
-    elif not settings.REDIS_URL.startswith("rediss://"):
+    elif not settings.REDIS_URL.startswith("rediss://") and not _is_local_redis(settings.REDIS_URL):
+        # A Redis/Valkey on the same machine needs no TLS; a remote one does
+        # (Upstash refuses plain redis://, and anything else sends data in clear).
         logger.warning(
-            "startup: REDIS_URL does not start with 'rediss://' (TLS) — "
-            "Upstash requires TLS on its free tier; a plain 'redis://' "
-            "URL will likely fail to connect."
+            "startup: REDIS_URL points at a remote host without TLS — use "
+            "'rediss://' (Upstash requires it; otherwise traffic is unencrypted)."
         )
 
     # Fold the deprecated AUTH_DATABASE_URL into DATABASE_URL if that's all
