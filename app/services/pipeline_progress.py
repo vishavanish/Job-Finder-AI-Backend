@@ -79,7 +79,10 @@ def claim_job_key(*, run_id: str, job_key: str) -> bool:
     return is_new
 
 
-def create_run(*, user_id: str, total_keywords: int) -> str:
+def create_run(*, user_id: str, total_keywords: int, kind: str = "search", keywords: list[str] | None = None,
+               skipped_sources: list[str] | None = None) -> str:
+    """`kind` "search" = a search the user started on Jobs (GET /pipeline/runs/latest
+    finds it again); "alert" = a job-alert run in the background."""
     run_id = str(uuid.uuid4())
     r = _redis()
     r.hset(_meta_key(run_id), mapping={
@@ -89,6 +92,10 @@ def create_run(*, user_id: str, total_keywords: int) -> str:
         "keywords_completed": 0,
         "error": "",
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "kind": kind,
+        "seq": r.incr("pipeline_run_seq"),  # orders runs made in the same clock tick
+        "keywords": json.dumps(keywords or []),
+        "skipped_sources": json.dumps(skipped_sources or []),
     })
     r.expire(_meta_key(run_id), RUN_TTL_SECONDS)
     r.sadd(_user_runs_key(user_id), run_id)
@@ -98,6 +105,29 @@ def create_run(*, user_id: str, total_keywords: int) -> str:
 
 def _user_runs_key(user_id: str) -> str:
     return f"user_runs:{user_id}"
+
+
+def latest_search_run(user_id: str) -> dict | None:
+    """The user's newest search started from Jobs that Redis still holds
+    (runs live RUN_TTL_SECONDS), with its keywords and skipped sources."""
+    r = _redis()
+    newest: tuple[tuple[str, int], str] | None = None
+    for run_id in r.smembers(_user_runs_key(user_id)):
+        meta = r.hgetall(_meta_key(run_id))
+        if not meta or meta.get("kind", "search") != "search":
+            continue
+        order = (meta.get("created_at", ""), int(meta.get("seq") or 0))
+        if newest is None or order > newest[0]:
+            newest = (order, run_id)
+    if newest is None:
+        return None
+    run = get_run_meta(run_id=newest[1])
+    if run is None:
+        return None
+    meta = r.hgetall(_meta_key(newest[1]))
+    run.update(created_at=newest[0][0], keywords=json.loads(meta.get("keywords") or "[]"),
+               skipped_sources=json.loads(meta.get("skipped_sources") or "[]"))
+    return run
 
 
 def cancel_runs_for_user(user_id: str) -> int:

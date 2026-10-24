@@ -20,12 +20,17 @@ TosRisk = Literal["none", "low", "high"]
 
 # ---------------------------------------------------------------- models
 
+PAUSE_REASON_DOC = ("Why it is paused: rate_limit (back shortly), broken (an admin must fix its "
+                    "key, credits or model) or breaker (repeated failures)")
+
+
 class ModelHealth(BaseModel):
     consecutive_failures: int = 0
     last_success_at: Optional[datetime] = None
     last_error_at: Optional[datetime] = None
     last_error: Optional[str] = None
     paused: bool = Field(False, description="Circuit breaker open: skipped until the cooldown ends")
+    pause_reason: Optional[str] = Field(None, description=PAUSE_REASON_DOC)
 
 
 class AdminModelOut(BaseModel):
@@ -111,6 +116,7 @@ class UserModelOut(BaseModel):
     reason: Optional[str] = Field(None, description="Why the model can't be used now")
     uses_own_key: bool
     paused: bool
+    pause_reason: Optional[str] = Field(None, description=PAUSE_REASON_DOC)
 
 
 class ModelCatalogOut(BaseModel):

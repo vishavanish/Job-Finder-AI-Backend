@@ -300,7 +300,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 - Migration `0005` (run `alembic upgrade head`).
 - New dependencies: `pypdf`, `python-docx` (+ `lxml`) — `pip install -r requirements.txt` on deploy.
 - The worker must run for resume parsing (default queue).
-- New env (all optional): `RESUME_MAX_BYTES` (5 MB), `RESUME_MAX_PER_USER` (20), `RESUME_PARSE_MAX_CHARS` (20000), `SEARCH_PROFILES_MAX_PER_USER` (20), `RATE_LIMIT_RESUME_UPLOAD` (10/hour), `RATE_LIMIT_PROFILE_AI` (20/hour).
+- New env (all optional): `RESUME_MAX_BYTES` (4 MB since QA1 — Vercel proxies ~4.5 MB bodies), `RESUME_MAX_PER_USER` (20), `RESUME_PARSE_MAX_CHARS` (20000), `SEARCH_PROFILES_MAX_PER_USER` (20), `RATE_LIMIT_RESUME_UPLOAD` (10/hour), `RATE_LIMIT_PROFILE_AI` (20/hour).
 - Stored resumes, like stored keys, depend on `SECRETS_MASTER_KEY`.
 
 ### 6.7 Phase 3.1 status — free job sources (branch `dev`)
@@ -475,6 +475,25 @@ Plan: `docs/plans/P7-voice-prep.md` (owner approved all defaults 2026-10-20, plu
 - Live Copilot for a user: Admin → Users → entitlements → turn on `live_copilot`; the user accepts the notice on first use. Fast copilot speech recognition: add a platform (or BYOK) key with scope `deepgram`; the row is paid, so the user also needs `premium_models` or their own key.
 - To use OpenRouter as fallback: Admin → Platform keys → add scope `openrouter`, then switch on "GPT-OSS 120B (OpenRouter, fallback)" in Admin → AI models. ChatGPT: add scope `openai`, check the model names, switch the OpenAI rows on.
 - New env (all optional): `RATE_LIMIT_VOICE_SESSIONS` (20/day), `VOICE_PRACTICE_MAX_MINUTES` (45), `VOICE_COPILOT_MAX_MINUTES` (90), `VOICE_PRACTICE_COST_CAP_USD` (0.50), `VOICE_COPILOT_COST_CAP_USD` (1.00), `VOICE_TRANSCRIPT_RETENTION_DAYS` (90), `VOICE_RESUME_SECONDS` (60), `VOICE_IDLE_PAUSE_SECONDS` (30), `VOICE_END_OF_TURN_MS` (700), `VOICE_MIN_SPEECH_MS` (300), `VOICE_MAX_UTTERANCE_SECONDS` (60), `VOICE_SPECULATIVE_GRACE_MS` (400), `VOICE_FIRST_TOKEN_TIMEOUT_MS` (2500), `VOICE_STT_TIMEOUT_SECONDS` (15), `VOICE_MAX_FRAME_MS` (100), `VOICE_AUDIO_QUEUE_MS` (2000), `VOICE_STREAM_TOKEN_SECONDS` (60), `VOICE_VAD_AGGRESSIVENESS` (2), `VOICE_GROUNDING_MIN` (0.15), `COPILOT_ACK_VERSION` (2026-10), `STORY_BANK_MAX_PER_USER` (100).
+
+### 6.14 QA1 — quick wins from the live QA pass (branch `dev`)
+
+Plan: `docs/plans/QA1-quick-wins.md` (owner approved the recommended defaults 2026-10-25).
+
+| Item | State |
+|------|-------|
+| AI failures by kind | ✅ `ai_router.failure_kind`: rate limit (429/quota) pauses only that model for `AI_RATE_LIMIT_PAUSE_SECONDS`, doubling while it repeats (cap `AI_RATE_LIMIT_MAX_PAUSE_SECONDS`); broken setup (401/402/403/404, retired model, missing package) → `AI_BROKEN_PAUSE_SECONDS`; an unusable reply never pauses a model; other errors use the breaker. The pause reason is the `ai_open:` value and shows as `pause_reason` in `GET /models` and admin health. When every model is paused for a passing reason, the one back soonest is still tried once. |
+| Provider slots | ✅ at most `AI_PROVIDER_CONCURRENCY` calls per provider at once (Redis sorted set, stale slots expire); waits up to `AI_PROVIDER_SLOT_WAIT_SECONDS`, then calls anyway. Streams (voice) are not slotted. |
+| Latest search | ✅ `GET /pipeline/runs/latest` (newest run started from Jobs while Redis holds it, 6 h; job-alert runs have `kind: "alert"` and are left out) with `keywords`, `skipped_sources`, `created_at`. |
+| "Will run" | ✅ `provider_catalog.search_availability`: Naukri (paste-in) and Naukri via Apify (not used by Jobs searches) no longer say "will run", so `GET /providers` matches `effective_sources`. Key reasons use display names ("needs an Adzuna API key"). |
+| Prep pack errors | ✅ `apply_packs.error` = one short line for people; `error_detail` (migration `0015`) = which models were tried and why. |
+| Resume size | ✅ `RESUME_MAX_BYTES` default 4 MB: the frontend now reaches the API through a Vercel rewrite, which caps bodies at ~4.5 MB. |
+
+**Operational changes introduced in QA1**
+- Migration `0015` (run `alembic upgrade head`).
+- The frontend calls the API through its own origin (`vercel.json` rewrite `/api/*` → this server), so the refresh cookie is first-party. The API now sees Vercel's IPs: per-IP rate limits are shared across users until a custom domain replaces the rewrite. Voice WebSockets still go straight to this server (`VITE_WS_ORIGIN`).
+- New env (all optional): `AI_RATE_LIMIT_PAUSE_SECONDS` (60), `AI_RATE_LIMIT_MAX_PAUSE_SECONDS` (1800), `AI_BROKEN_PAUSE_SECONDS` (3600), `AI_PROVIDER_CONCURRENCY` (2, 0 = off), `AI_PROVIDER_SLOT_WAIT_SECONDS` (30).
+- Admin steps after deploy: switch off "Qwen3 8B (Hugging Face)" (402, no credits) and "Gemini 3.7 Flash"; add a platform key with scope `openrouter` and switch on the OpenRouter fallback row.
 
 ---
 

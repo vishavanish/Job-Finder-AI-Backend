@@ -129,7 +129,7 @@ def request_pack(db: Session, *, user_id: str, job: Job, tailor_resume: bool, co
         db.add(pack)
     pack.master_resume_id, pack.master_hash = master.id, mhash
     pack.want_resume, pack.want_cover_letter = tailor_resume, cover_letter
-    pack.status, pack.error = "pending", None
+    pack.status, pack.error, pack.error_detail = "pending", None, None
     db.flush()
     return pack, True
 
@@ -380,6 +380,7 @@ def build_pack(db: Session, pack: ApplyPack) -> ApplyPack:
     dropped: list[str] = []
     engines: list[str] = []
     errors: list[str] = []
+    failed_parts: list[str] = []
 
     if pack.want_resume:
         try:
@@ -387,6 +388,7 @@ def build_pack(db: Session, pack: ApplyPack) -> ApplyPack:
                                                  allowed=resume_facts, ref=pack.id)
         except ai_router.NoModelAvailable as e:
             errors.append(f"Tailored resume: {e}")
+            failed_parts.append("tailored resume")
         else:
             old = db.get(Resume, pack.tailored_resume_id) if pack.tailored_resume_id else None
             pack.tailored_resume_id = _store_tailored(db, master=master, parsed=tailored, job=job, engine=engine).id
@@ -402,6 +404,7 @@ def build_pack(db: Session, pack: ApplyPack) -> ApplyPack:
                                                    allowed=letter_facts, ref=pack.id)
         except ai_router.NoModelAvailable as e:
             errors.append(f"Cover letter: {e}")
+            failed_parts.append("cover letter")
         else:
             pack.cover_letter = f"Dear Hiring Team,\n\n{body}\n\nBest regards,\n{name}".strip()
             dropped += lost
@@ -423,5 +426,15 @@ def build_pack(db: Session, pack: ApplyPack) -> ApplyPack:
         pack.status = "failed"
     else:
         pack.status = "ready"
-    pack.error = "; ".join(errors)[:1000] or None
+    pack.error = _failure_message(failed_parts)
+    pack.error_detail = "; ".join(errors)[:2000] or None
     return pack
+
+
+def _failure_message(parts: list[str]) -> str | None:
+    """One short line for people; the per-model detail goes to error_detail."""
+    if not parts:
+        return None
+    what = " and ".join(parts)
+    verb = "weren't" if len(parts) > 1 else "wasn't"
+    return f"The AI models are busy right now, so the {what} {verb} written. Try again in a few minutes."

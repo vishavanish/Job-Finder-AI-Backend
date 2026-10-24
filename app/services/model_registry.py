@@ -82,7 +82,7 @@ def admin_view(db: Session, m: AiModel) -> dict:
         "enabled_global": m.enabled_global, "priority": m.priority, "notes": m.notes,
         "health": {"consecutive_failures": m.consecutive_failures or 0, "last_success_at": m.last_success_at,
                    "last_error_at": m.last_error_at, "last_error": m.last_error,
-                   "paused": ai_router.breaker_open(m.id)},
+                   "paused": ai_router.breaker_open(m.id), "pause_reason": ai_router.pause_reason(m.id)},
         "created_at": m.created_at, "updated_at": m.updated_at,
     }
 
@@ -187,7 +187,7 @@ def user_catalog(db: Session, user: User) -> dict:
             "id": m.id, "display_name": m.display_name, "provider": m.provider, "model_id": m.model_id,
             "tier": m.tier, "tasks": list(m.tasks or []), "key_scope": m.key_scope,
             "available": verdict.allowed, "reason": verdict.reason, "uses_own_key": m.key_scope in scopes,
-            "paused": ai_router.breaker_open(m.id),
+            "paused": ai_router.breaker_open(m.id), "pause_reason": ai_router.pause_reason(m.id),
         })
     enabled_ids = {m.id for m in models}
     return {

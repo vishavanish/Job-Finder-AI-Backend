@@ -69,7 +69,8 @@ class ApplyPack(Base):
     email_body = Column(Text, nullable=True)
     dropped = Column(JSON, nullable=False, default=list)  # AI claims removed by the fact check
     engine = Column(String(300), nullable=True)
-    error = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)  # short, for people
+    error_detail = Column(Text, nullable=True)  # which models were tried and why each failed (0015)
     created_at = Column(DateTime, default=_now, nullable=False)
     updated_at = Column(DateTime, default=_now, onupdate=_now, nullable=False)
 

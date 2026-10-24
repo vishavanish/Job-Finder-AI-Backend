@@ -11,8 +11,16 @@ default for the task -> every other model that serves the task, by
     entitlement or the user's own key for that model's key scope),
   - paid while the user has "Free tools only" on,
   - missing a key (nothing stored and nothing in .env),
-  - tripped by the circuit breaker (AI_BREAKER_FAILURES failures in a row
-    -> skipped for AI_BREAKER_COOLDOWN_SECONDS, then tried again).
+  - paused after a failure (see `failure_kind`): a rate limit pauses it for
+    AI_RATE_LIMIT_PAUSE_SECONDS (doubling while it repeats), a broken setup
+    (bad key, no credits, retired model) for AI_BROKEN_PAUSE_SECONDS, other
+    errors trip the circuit breaker (AI_BREAKER_FAILURES in a row ->
+    AI_BREAKER_COOLDOWN_SECONDS). A reply that could not be used does not
+    pause the model. When every model is paused for a passing reason, the
+    one whose pause ends first is still tried once.
+
+Calls to one provider are limited to AI_PROVIDER_CONCURRENCY at a time
+across all workers, so one big search can't use up a free tier.
 
 Every attempt, successful or not, is written to usage_ledger with tokens,
 latency and cost. Keys are looked up here at run time (key_store) and
@@ -21,6 +29,7 @@ never logged.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -106,27 +115,126 @@ def _open_key(model_id: str) -> str:
     return f"ai_open:{model_id}"
 
 
+def _rate_key(model_id: str) -> str:
+    return f"ai_rate:{model_id}"
+
+
+# Why a model is paused (the value of its ai_open key) and how users see it.
+PAUSE_REASONS = {
+    "rate_limit": "busy (rate limit), back shortly",
+    "broken": "set up wrong (key, credits or retired model) — an admin must fix it",
+    "breaker": "paused after repeated failures",
+}
+
+_RATE_LIMIT_MARKERS = ("resource_exhausted", "rate limit", "ratelimit", "too many requests", "quota")
+_BROKEN_MARKERS = ("unauthenticated", "permission_denied", "not_found", "payment required", "api key not valid",
+                   "invalid api key", "invalid_api_key", "is not installed", "has no base_url",
+                   "unknown provider", "no longer available")
+_BAD_REPLY_MARKERS = ("empty response", "could not be parsed", "unexpected response shape",
+                      "declined the request", "does not read images")
+# A status code on its own, not part of a request id like "Root=1-6ad8f404-5b7d".
+_STATUS = re.compile(r"(?<![\w-])(4\d\d)(?![\w-])")
+
+
+def failure_kind(error: str) -> str:
+    """rate_limit | broken | bad_reply | transient, from the error text
+    (adapters raise LLMError with the provider's message)."""
+    text = (error or "").lower()
+    if any(m in text for m in _BAD_REPLY_MARKERS):
+        return "bad_reply"
+    codes = set(_STATUS.findall(text))
+    if "429" in codes or any(m in text for m in _RATE_LIMIT_MARKERS):
+        return "rate_limit"
+    if codes & {"401", "402", "403", "404"} or any(m in text for m in _BROKEN_MARKERS):
+        return "broken"
+    return "transient"
+
+
 def breaker_open(model_id: str) -> bool:
     return bool(get_redis().exists(_open_key(model_id)))
 
 
-def _record_failure(model_id: str) -> None:
+def pause_reason(model_id: str) -> str | None:
+    """Why the model is paused right now (a PAUSE_REASONS key), or None."""
+    raw = get_redis().get(_open_key(model_id))
+    if raw is None:
+        return None
+    value = raw.decode() if isinstance(raw, bytes) else str(raw)
+    return value if value in PAUSE_REASONS else "breaker"
+
+
+def _pause(model_id: str, reason: str, seconds: int) -> None:
+    get_redis().set(_open_key(model_id), reason, ex=max(1, int(seconds)))
+    logger.warning("ai_router: model=%s paused %ss (%s)", model_id, seconds, reason)
+
+
+def _record_failure(model_id: str, error: str = "") -> None:
     s = get_settings()
     r = get_redis()
+    kind = failure_kind(error)
+    if kind == "bad_reply":
+        return  # the model answered; this prompt's reply just wasn't usable
+    if kind == "rate_limit":
+        hits = r.incr(_rate_key(model_id))
+        r.expire(_rate_key(model_id), s.AI_RATE_LIMIT_MAX_PAUSE_SECONDS * 2)
+        pause = min(s.AI_RATE_LIMIT_PAUSE_SECONDS * 2 ** (hits - 1), s.AI_RATE_LIMIT_MAX_PAUSE_SECONDS)
+        _pause(model_id, "rate_limit", pause)
+        return
+    if kind == "broken":
+        _pause(model_id, "broken", s.AI_BROKEN_PAUSE_SECONDS)
+        r.delete(_fail_key(model_id))
+        return
     fails = r.incr(_fail_key(model_id))
     r.expire(_fail_key(model_id), s.AI_BREAKER_COOLDOWN_SECONDS * 2)
     if fails >= s.AI_BREAKER_FAILURES:
-        r.set(_open_key(model_id), 1, ex=s.AI_BREAKER_COOLDOWN_SECONDS)
+        _pause(model_id, "breaker", s.AI_BREAKER_COOLDOWN_SECONDS)
         r.delete(_fail_key(model_id))
-        logger.warning("ai_router: breaker opened for model=%s", model_id)
 
 
 def _record_success(model_id: str) -> None:
-    get_redis().delete(_fail_key(model_id))
+    get_redis().delete(_fail_key(model_id), _rate_key(model_id))
 
 
 def reset_breaker(model_id: str) -> None:
-    get_redis().delete(_fail_key(model_id), _open_key(model_id))
+    get_redis().delete(_fail_key(model_id), _open_key(model_id), _rate_key(model_id))
+
+
+# ---------------------------------------------------------------- provider slots
+
+def _slot_key(provider: str) -> str:
+    return f"ai_slots:{provider}"
+
+
+def _take_slot(provider: str) -> str | None:
+    """Waits (up to AI_PROVIDER_SLOT_WAIT_SECONDS) for one of the provider's
+    AI_PROVIDER_CONCURRENCY call slots. Returns a token to give back, or None
+    when slots are off or the wait ran out (the call then goes ahead anyway —
+    a slow answer beats none; the provider's own limit still applies)."""
+    s = get_settings()
+    if s.AI_PROVIDER_CONCURRENCY <= 0:
+        return None
+    r = get_redis()
+    key = _slot_key(provider)
+    token = f"{time.time()}:{threading.get_ident()}:{id(object())}"
+    stale_after = s.AI_REQUEST_TIMEOUT_SECONDS + 30  # a crashed worker's slot frees itself
+    deadline = time.monotonic() + s.AI_PROVIDER_SLOT_WAIT_SECONDS
+    while True:
+        now = time.time()
+        r.zremrangebyscore(key, 0, now - stale_after)
+        if r.zcard(key) < s.AI_PROVIDER_CONCURRENCY:
+            r.zadd(key, {token: now})
+            r.expire(key, stale_after)
+            return token
+        if time.monotonic() >= deadline:
+            logger.warning("ai_router: no free %s slot after %ss — calling anyway", provider,
+                           s.AI_PROVIDER_SLOT_WAIT_SECONDS)
+            return None
+        time.sleep(0.25)
+
+
+def _give_slot(provider: str, token: str | None) -> None:
+    if token:
+        get_redis().zrem(_slot_key(provider), token)
 
 
 # ---------------------------------------------------------------- access
@@ -178,7 +286,9 @@ def resolve_chain(db: Session, *, user: User | None, task: str, extra_scopes: se
     user_scopes = key_store.user_key_scopes(db, user.id if user else None)
     chain: list[AiModel] = []
     skipped: list[str] = []
+    paused: list[tuple[int, AiModel]] = []  # (seconds left, model) — passing pauses only
     seen: set[str] = set()
+    r = get_redis()
     for m in ordered:
         if m.id in seen or not serves(m, task):
             continue
@@ -188,10 +298,16 @@ def resolve_chain(db: Session, *, user: User | None, task: str, extra_scopes: se
             if m.enabled_global:
                 skipped.append(f"{m.display_name}: {verdict.reason}")
             continue
-        if breaker_open(m.id):
-            skipped.append(f"{m.display_name}: paused after repeated failures")
+        reason = pause_reason(m.id)
+        if reason:
+            skipped.append(f"{m.display_name}: {PAUSE_REASONS[reason]}")
+            if reason != "broken":
+                paused.append((int(r.ttl(_open_key(m.id)) or 0), m))
             continue
         chain.append(m)
+    if not chain and paused:
+        # Everything is resting: one try on the model that is back soonest beats failing outright.
+        chain.append(min(paused, key=lambda p: p[0])[1])
     return chain, skipped
 
 
@@ -210,7 +326,7 @@ def record_usage(db: Session, *, user_id: str | None, task: str, model: AiModel,
     if success:
         _record_success(model.id)
     else:
-        _record_failure(model.id)
+        _record_failure(model.id, error or "")
     return cost
 
 
@@ -247,6 +363,7 @@ def call_model(db: Session, model: AiModel, *, user_id: str | None, task: str, s
     adapter = get_adapter(model.provider)
     spec = ModelSpec(model.provider, model.model_id, model.base_url, model.max_output_tokens)
     limit = min(max_tokens, model.max_output_tokens) if model.max_output_tokens else max_tokens
+    slot = _take_slot(model.provider)
     started = time.monotonic()
     try:
         result = adapter.complete(spec, api_key=api_key, system=system, user=user_prompt, json_mode=json_mode,
@@ -259,14 +376,16 @@ def call_model(db: Session, model: AiModel, *, user_id: str | None, task: str, s
         latency = int((time.monotonic() - started) * 1000)
         _ledger(db, user_id=user_id, task=task, model=model, key_source=key_source, tokens_in=0, tokens_out=0,
                 latency_ms=latency, success=False, error=str(e), ref=ref)
-        _record_failure(model.id)
+        _record_failure(model.id, str(e))
         raise
     except Exception as e:  # noqa: BLE001 — an adapter bug must not stop the chain
         latency = int((time.monotonic() - started) * 1000)
         _ledger(db, user_id=user_id, task=task, model=model, key_source=key_source, tokens_in=0, tokens_out=0,
                 latency_ms=latency, success=False, error=short_error(e), ref=ref)
-        _record_failure(model.id)
+        _record_failure(model.id, short_error(e))
         raise LLMError(short_error(e)) from e
+    finally:
+        _give_slot(model.provider, slot)
 
     latency = int((time.monotonic() - started) * 1000)
     cost = _ledger(db, user_id=user_id, task=task, model=model, key_source=key_source,
@@ -368,7 +487,7 @@ def stream(db: Session, *, user_id: str | None, task: str, system: str, user_pro
             _ledger(db, user_id=user_id, task=task, model=model, key_source=source, tokens_in=0,
                     tokens_out=_estimate_tokens("".join(chunks)), latency_ms=latency, success=False, error=str(e),
                     ref=ref)
-            _record_failure(model.id)
+            _record_failure(model.id, str(e))
             if chunks:
                 raise
             logger.warning("ai_router: stream %s failed for task=%s user=%s: %s", model.model_id, task, user_id, e)
@@ -376,7 +495,7 @@ def stream(db: Session, *, user_id: str | None, task: str, system: str, user_pro
             continue
         except Exception as e:  # noqa: BLE001 — an adapter bug must not stop the chain
             gen.close()
-            _record_failure(model.id)
+            _record_failure(model.id, short_error(e))
             if chunks:
                 raise LLMError(short_error(e)) from e
             attempts.append(f"{model.display_name}: {short_error(e)}")
@@ -386,7 +505,7 @@ def stream(db: Session, *, user_id: str | None, task: str, system: str, user_pro
 
         if not chunks:
             attempts.append(f"{model.display_name}: empty response")
-            _record_failure(model.id)
+            _record_failure(model.id, "empty response")
             continue
         text = "".join(chunks)
         latency = int((time.monotonic() - started) * 1000)

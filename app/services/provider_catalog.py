@@ -92,8 +92,9 @@ def availability(db: Session, user: User, row: ProviderCatalog, *, choices: dict
         shared_ok = not user_key_only(row.key)
         if not any(key_store.has_user_key(db, user.id, s) or (shared_ok and key_store.platform_key_available(db, s))
                    for s in scopes):
-            owner = "your own " if not shared_ok else "a "
-            return False, f"needs {owner}{' or '.join(scopes)} API key"
+            label = " or ".join(_SCOPE_LABELS.get(s, s.title()) for s in scopes)
+            article = "an" if label[:1].lower() in "aeiou" else "a"
+            return False, (f"needs your own {label} API key" if not shared_ok else f"needs {article} {label} API key")
     if registry.kind(row.key) == "inbox":
         from app.models.email import EmailAccount
         if not db.query(EmailAccount.id).filter(EmailAccount.user_id == user.id,
@@ -107,6 +108,27 @@ def availability(db: Session, user: User, row: ProviderCatalog, *, choices: dict
     if until:
         return False, f"paused after repeated errors — retrying after {until:%H:%M} UTC"
     return True, None
+
+
+_SCOPE_LABELS = {"apify": "Apify", "adzuna": "Adzuna", "jooble": "Jooble", "careerjet": "Careerjet",
+                 "serpapi": "SerpApi", "jsearch": "JSearch", "brightdata": "Bright Data", "themuse": "The Muse"}
+
+# Sources a normal search never runs on its own (QA1 §6), with what users see instead of "will run".
+NOT_IN_SEARCH = {
+    "manual": "you paste these jobs in; searches don't fetch them",
+    "apify": "searches from Jobs don't use it yet",
+}
+
+
+def search_availability(db: Session, user: User, row: ProviderCatalog, *,
+                        choices: dict[str, bool] | None = None) -> tuple[bool, str | None]:
+    """Whether a normal search from Jobs runs this source — what GET /providers
+    shows as "will run", so the page and effective_sources() agree."""
+    ok, reason = availability(db, user, row, choices=choices)
+    note = NOT_IN_SEARCH.get(registry.kind(row.key) or "")
+    if ok and note:
+        return False, note
+    return ok, reason
 
 
 def effective_sources(db: Session, user: User, *, requested: list[str] | None, want_naukri_apify: bool,

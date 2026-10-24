@@ -269,7 +269,7 @@ def test_free_key_source_runs_with_the_users_key_which_is_never_enqueued(client,
     resp, params = _search(client, headers, dispatched, locations=["Pune, India"],
                            sources=["adzuna", "careerjet"])
     assert resp.status_code == 202 and params["sources"] == ["adzuna"]
-    assert any("Careerjet: needs a careerjet API key" in n for n in params["skipped_sources"])
+    assert any("Careerjet: needs a Careerjet API key" in n for n in params["skipped_sources"])
     assert "my-adzuna-secret" not in json.dumps(dispatched)
 
 
@@ -350,7 +350,7 @@ def test_providers_page_lists_new_sources_with_defaults(client, make_user):
     view = {s["key"]: s for s in client.get("/api/v1/providers", headers=headers).json()["sources"]}
     assert set(registry.SOURCES) <= set(view)
     assert view["glassdoor"]["enabled"] is False and view["glassdoor"]["default_enabled"] is False
-    assert view["adzuna"]["tier"] == "free_key" and view["adzuna"]["reason"] == "needs a adzuna API key"
+    assert view["adzuna"]["tier"] == "free_key" and view["adzuna"]["reason"] == "needs an Adzuna API key"
     assert view["remoteok"]["available"] is True and view["remoteok"]["health"]["paused_until"] is None
 
 

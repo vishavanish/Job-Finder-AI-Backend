@@ -75,6 +75,15 @@ class Settings(BaseSettings):
     # ---- AI router (CLAUDE.md 7.9) ----
     AI_BREAKER_FAILURES: int = 3          # consecutive failures before a model is skipped
     AI_BREAKER_COOLDOWN_SECONDS: int = 300
+    # Rate limits (429) pause only the model that hit them, for this long; a model that keeps
+    # hitting them waits twice as long each time, up to the max (QA1 §3).
+    AI_RATE_LIMIT_PAUSE_SECONDS: int = 60
+    AI_RATE_LIMIT_MAX_PAUSE_SECONDS: int = 1800
+    # A model that is set up wrong (bad key, no credits, retired model) is paused this long.
+    AI_BROKEN_PAUSE_SECONDS: int = 3600
+    # At most this many calls at once per provider (all workers together); 0 = no limit.
+    AI_PROVIDER_CONCURRENCY: int = 2
+    AI_PROVIDER_SLOT_WAIT_SECONDS: int = 30
     AI_REQUEST_TIMEOUT_SECONDS: int = 60
 
     # ---- Celery / Redis (Upstash) ----
@@ -208,7 +217,7 @@ class Settings(BaseSettings):
     RATE_LIMIT_PROFILE_AI: str = "20/hour"   # resume re-parse, title suggestions
 
     # ---- profile & search (P3) ----
-    RESUME_MAX_BYTES: int = 5 * 1024 * 1024
+    RESUME_MAX_BYTES: int = 4 * 1024 * 1024  # Vercel proxies ~4.5 MB bodies (QA1 §1)
     RESUME_MAX_PER_USER: int = 20
     RESUME_PARSE_MAX_CHARS: int = 20000      # resume text sent to the parser model
     SEARCH_PROFILES_MAX_PER_USER: int = 20

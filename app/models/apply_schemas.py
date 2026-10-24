@@ -50,7 +50,8 @@ class PrepPackOut(BaseModel):
     mailto: Optional[str] = Field(None, description="mailto: link with the subject and body filled in")
     dropped: list[str] = Field(default_factory=list,
                                description="Things the AI wrote that are not in your resume, so they were removed")
-    error: Optional[str] = None
+    error: Optional[str] = Field(None, description="Short message for people when part of the pack failed")
+    error_detail: Optional[str] = Field(None, description="Which AI models were tried and why each failed")
     updated_at: datetime
 
 

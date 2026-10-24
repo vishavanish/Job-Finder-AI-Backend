@@ -33,7 +33,7 @@ def _view(db: Session, user) -> dict:
     choices = provider_catalog.user_choices(db, user.id)
     sources = []
     for row in provider_catalog.all_sources(db):
-        ok, reason = provider_catalog.availability(db, user, row, choices=choices)
+        ok, reason = provider_catalog.search_availability(db, user, row, choices=choices)
         sources.append({
             "key": row.key, "name": row.name, "tier": row.tier, "tos_risk": row.tos_risk,
             "requires_key": row.requires_key, "key_scope": row.key_scope, "description": row.description,

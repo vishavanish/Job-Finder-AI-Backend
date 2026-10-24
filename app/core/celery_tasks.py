@@ -785,7 +785,7 @@ def run_job_alert(self, alert_id: str, trigger: str = "schedule") -> dict:
         score_params["previous_search_at"] = pipeline_progress.mark_user_search(user.id)
 
         keywords = search_params["keywords"]
-        run_id = pipeline_progress.create_run(user_id=user.id, total_keywords=len(keywords))
+        run_id = pipeline_progress.create_run(user_id=user.id, total_keywords=len(keywords), kind="alert")
         request_keys = _request_keys(score_params)
         counts = {"run_id": run_id, "raw": 0, "kept": 0, "duplicates": 0, "blocked": 0, "seen": 0, "filtered": 0}
         kept_keys: list[str] = []
