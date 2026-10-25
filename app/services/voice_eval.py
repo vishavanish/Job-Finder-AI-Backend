@@ -35,6 +35,9 @@ logger = logging.getLogger("job_finder_api.voice_eval")
 SCORE_KEYS = ("accuracy", "relevance", "structure", "clarity")
 STAR_KEYS = ("situation", "task", "action", "result")
 LATENCY_KEYS = ("stt_ms", "first_token_ms", "first_word_ms", "reply_ms")
+# Wait before each new evaluation try while every AI model is busy (free models get rate-limited);
+# feedback stays "pending" until the last try fails.
+RETRY_DELAYS = (60, 180, 600)
 
 SYSTEM = (
     "You are an experienced interview coach. Score each answer from a mock interview. Scores are integers 1-5 "
@@ -144,7 +147,7 @@ def _settle(db: Session, row: VoiceSession) -> str:
     return "go"
 
 
-def finalize(db: Session, session_id: str) -> dict:
+def finalize(db: Session, session_id: str, attempt: int = 0) -> dict:
     row = db.get(VoiceSession, session_id)
     if row is None:
         return {"status": "missing"}
@@ -182,6 +185,12 @@ def finalize(db: Session, session_id: str) -> dict:
                                     user_prompt=prompt, json_mode=True, max_tokens=4000, ref=row.id,
                                     validate=lambda t: _parse(t) is not None)
     except ai_router.NoModelAvailable as e:
+        if attempt < len(RETRY_DELAYS):
+            from app.services.voice_socket import schedule_finalize
+            logger.info("voice: no AI model for evaluation, retry %d session=%s: %s", attempt + 1, row.id, e)
+            db.commit()
+            schedule_finalize(row.id, countdown=RETRY_DELAYS[attempt], attempt=attempt + 1)
+            return {"status": "retrying", "attempt": attempt + 1}
         logger.warning("voice: evaluation failed session=%s: %s", row.id, e)
         row.feedback_state = "failed"
         db.commit()

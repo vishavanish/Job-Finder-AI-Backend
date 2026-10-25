@@ -919,15 +919,16 @@ def run_job_alert(self, alert_id: str, trigger: str = "schedule") -> dict:
 
 
 @celery_app.task(name="job_finder.voice_finalize")
-def voice_finalize_task(session_id: str) -> dict:
+def voice_finalize_task(session_id: str, attempt: int = 0) -> dict:
     """After a voice session (P7): ends it if its socket dropped and wasn't
     resumed, then scores the answers. Transcripts are read from the DB here,
-    never sent through the broker."""
+    never sent through the broker. `attempt` counts retries while every AI
+    model is busy (voice_eval.RETRY_DELAYS)."""
     from app.services import voice_eval
 
     db = SessionLocal()
     try:
-        return voice_eval.finalize(db, session_id)
+        return voice_eval.finalize(db, session_id, attempt)
     except Exception:  # noqa: BLE001 — a crash must not leave feedback "pending" forever
         db.rollback()
         logger.exception("voice finalize crashed for session=%s", session_id)

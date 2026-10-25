@@ -257,6 +257,10 @@ class PracticeSession(VoiceSocket):
                 self.answer_end_at = time.monotonic()
                 self.stt_ms = 0
                 await self._answer_done()
+            elif text:
+                await self.error("answer_not_expected",
+                                 "Resume the interview, then send your answer." if self.paused
+                                 else "Wait for the next question, then send your answer.", retryable=True)
         elif kind == "control":
             await self._on_control(str(msg.get("action") or ""))
         elif kind == "auth":

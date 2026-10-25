@@ -545,6 +545,73 @@ def test_finalize_ends_a_dropped_session_after_the_resume_window(client, make_us
         db.close()
 
 
+def test_finalize_retries_while_every_model_is_busy_then_fails(client, make_user, script, monkeypatch, dispatched):
+    _, headers = make_user()
+    sid = _finished_session(client, headers, script)
+    dispatched.clear()
+
+    def busy(db, **kw):
+        raise ai_router.NoModelAvailable("interview_eval", ["test: rate limited"])
+
+    monkeypatch.setattr(ai_router, "complete", busy)
+    db = SessionLocal()
+    try:
+        for attempt, delay in enumerate(voice_eval.RETRY_DELAYS):
+            assert voice_eval.finalize(db, sid, attempt) == {"status": "retrying", "attempt": attempt + 1}
+            db.expire_all()
+            assert db.get(VoiceSession, sid).feedback_state == "pending"
+            call = dispatched[-1]
+            assert call["task"] == "job_finder.voice_finalize" and call["args"] == [sid]
+            assert call["kwargs"] == {"attempt": attempt + 1} and call["options"]["countdown"] == delay
+        assert voice_eval.finalize(db, sid, len(voice_eval.RETRY_DELAYS))["status"] == "failed"
+        db.expire_all()
+        assert db.get(VoiceSession, sid).feedback_state == "failed"
+    finally:
+        db.close()
+    assert len(dispatched) == len(voice_eval.RETRY_DELAYS)
+
+
+def test_failed_feedback_can_be_retried(client, make_user, script, dispatched):
+    _, headers = make_user()
+    sid = _finished_session(client, headers, script)
+    url = f"{API}/voice/sessions/{sid}/feedback/retry"
+    res = client.post(url, headers=headers)
+    assert res.status_code == 409 and res.json()["detail"]["code"] == "feedback_not_failed"  # still pending
+
+    db = SessionLocal()
+    try:
+        db.get(VoiceSession, sid).feedback_state = "failed"
+        db.commit()
+    finally:
+        db.close()
+    dispatched.clear()
+    res = client.post(url, headers=headers)
+    assert res.status_code == 202 and res.json()["state"] == "pending"
+    assert dispatched == [{"task": "job_finder.voice_finalize", "args": [sid], "kwargs": None,
+                           "options": {"queue": dispatched[0]["options"]["queue"]}}]
+
+    _, other = make_user()
+    assert client.post(url, headers=other).status_code == 404
+
+
+def test_typed_answer_while_paused_is_refused_with_a_reason(client, make_user, script):
+    _, headers = make_user()
+    script(["[Q] Why this role?"])
+    created = start(client, headers, length=2)
+    with client.websocket_connect(created["stream_path"]) as ws:
+        auth(ws, created)
+        ws.receive_json()
+        ws.send_text(json.dumps({"type": "control", "action": "start"}))
+        recv_until(ws, "turn.done")
+        ws.send_text(json.dumps({"type": "control", "action": "pause"}))
+        recv_until(ws, "status")
+        ws.send_text(json.dumps({"type": "text", "text": "Because I like the product."}))
+        err, seen = recv_until(ws, "error")
+        assert err["code"] == "answer_not_expected" and err["retryable"] is True
+        assert "Resume" in err["message"]
+        assert not any(m["type"] == "transcript.final" for m in seen)
+
+
 def test_history_delete_and_purge(client, make_user, script):
     user_id, headers = make_user()
     sid = _finished_session(client, headers, script)

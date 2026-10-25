@@ -14,6 +14,7 @@ Voice interview prep (CLAUDE.md 7.10; Practice P7a, Live Copilot P7b):
   - WS     /voice/copilot/{id}/stream    the Live Copilot socket (protocol in app/services/copilot_session.py)
   - GET    /voice/sessions/{id}          session + transcript
   - GET    /voice/sessions/{id}/feedback scores, STAR, delivery, model answers (state "pending" until ready)
+  - POST   /voice/sessions/{id}/feedback/retry   evaluate again after feedback "failed"
   - GET    /voice/history                past sessions
   - GET    /voice/progress               averages per skill area and interview type, weak questions
   - DELETE /voice/sessions/{id}          wipe one session (transcript + feedback)
@@ -43,6 +44,7 @@ from app.services import (
     voice_speech, voice_store,
 )
 from app.services.entitlements import require_feature
+from app.services.voice_socket import schedule_finalize
 
 router = APIRouter(prefix="/voice", tags=["voice"])
 admin_router = APIRouter(prefix="/admin/voice", tags=["admin"])
@@ -179,6 +181,18 @@ def get_session(session_id: str, user=Depends(get_current_user), db: Session = D
 @router.get("/sessions/{session_id}/feedback", response_model=VoiceFeedbackOut)
 def get_feedback(session_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
     return voice_eval.feedback_out(db, voice_store.get_owned(db, user.id, session_id))
+
+
+@router.post("/sessions/{session_id}/feedback/retry", response_model=VoiceFeedbackOut, status_code=202)
+@limiter.limit("10/hour")
+def retry_feedback(request: Request, session_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    row = voice_store.get_owned(db, user.id, session_id)
+    if row.feedback_state != "failed":
+        raise voice_store.api_error(409, "feedback_not_failed", "Feedback can only be retried after it failed.")
+    row.feedback_state = "pending"
+    db.commit()
+    schedule_finalize(row.id)
+    return voice_eval.feedback_out(db, row)
 
 
 @router.get("/history", response_model=VoiceHistoryOut)

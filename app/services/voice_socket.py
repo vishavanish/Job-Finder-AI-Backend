@@ -136,7 +136,9 @@ async def lock_or_reject(ws: WebSocket, user_id: str, session_id: str) -> bool:
     return False
 
 
-def schedule_finalize(session_id: str, countdown: int | None = None) -> None:
+def schedule_finalize(session_id: str, countdown: int | None = None, attempt: int = 0) -> None:
     from app.core.celery_tasks import voice_finalize_task
     opts = {"countdown": countdown} if countdown else {}
+    if attempt:
+        opts["kwargs"] = {"attempt": attempt}
     voice_finalize_task.apply_async(args=[session_id], queue=get_settings().default_queue, **opts)
