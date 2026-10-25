@@ -1,6 +1,6 @@
 # QA4 — Target companies (follow companies, get told first)
 
-Status: **approved and built** (2026-10-25, recommended defaults; Dashboard card still to do). See CLAUDE.md §6.17. Builds on QA3
+Status: **approved and built** (2026-10-25, recommended defaults). See CLAUDE.md §6.17. Builds on QA3
 (`docs/plans/QA3-ats-in-job-search.md`) — do QA3 first.
 
 ## 1. Why

@@ -541,7 +541,7 @@ Plan: `docs/plans/QA4-target-companies.md` (owner approved the recommended defau
 | New roles | ✅ a crawl that adds jobs to a followed company queues `ats_follow_match`: title synonyms (`ats_search.expansions`, no AI) × places → `ats_follow_hits`. Titles/places from `ats_follow_settings`, else the default search profile titles and Profile places + Remote. Hits purged after `ATS_FOLLOW_HIT_RETENTION_DAYS` (with `purge_ats_jobs`). |
 | Alerts | ✅ beat `ats_follow_digest` (every `ATS_FOLLOW_DIGEST_TICK_SECONDS`): `instant` = at most hourly, `daily` (default) = after `ATS_FOLLOW_DIGEST_HOUR` local, `off` = page only. Plain-text email, ≤ 20 roles; closed jobs, disabled users and accounts without `ats_discovery` skipped. |
 | API | ✅ `GET /ats/following`, `PUT/DELETE /ats/companies/{id}/follow`, `DELETE /ats/following/{id}`, `POST /ats/following/by-name`, `GET /ats/following/new`, `POST /ats/following/seen`, `GET /ats/suggestions` (cached a day), `GET/PUT /ats/following/settings`. `followed` on ATS search groups, company jobs and Jobs feed entries. |
-| Frontend | ✅ "ATS targets" → **Target companies** (My companies / Suggested / Browse tabs), Follow on every company, ★ "Company you follow" on Jobs. Not done: Dashboard "New at your companies" card (Dashboard was being redesigned in another session). |
+| Frontend | ✅ "ATS targets" → **Target companies** (My companies / Suggested / Browse tabs), Follow on every company, ★ "Company you follow" on Jobs. Dashboard card "New at your companies" (followed companies with unseen roles, hidden when you follow none). |
 
 **Operational changes introduced in QA4**
 - Migration `0017` (run `alembic upgrade head`). Beat runs `ats_follow_digest`; emails use the OTP/alert email settings.
