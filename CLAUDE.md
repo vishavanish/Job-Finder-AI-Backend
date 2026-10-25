@@ -488,6 +488,7 @@ Plan: `docs/plans/QA1-quick-wins.md` (owner approved the recommended defaults 20
 | "Will run" | ✅ `provider_catalog.search_availability`: Naukri (paste-in) and Naukri via Apify (not used by Jobs searches) no longer say "will run", so `GET /providers` matches `effective_sources`. Key reasons use display names ("needs an Adzuna API key"). |
 | Prep pack errors | ✅ `apply_packs.error` = one short line for people; `error_detail` (migration `0015`) = which models were tried and why. |
 | Resume size | ✅ `RESUME_MAX_BYTES` default 4 MB: the frontend now reaches the API through a Vercel rewrite, which caps bodies at ~4.5 MB. |
+| Health detail | ✅ public `GET /health` returns only `{status}` (503 when unhealthy); the checks (database, queues, AI setup, scheduler) moved to admin-only `GET /api/v1/admin/system/health`. |
 
 **Operational changes introduced in QA1**
 - Migration `0015` (run `alembic upgrade head`).

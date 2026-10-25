@@ -64,3 +64,16 @@ def test_providers_page_only_says_will_run_for_sources_a_search_runs(client, mak
         db.close()
     shown = {k for k, s in view.items() if s["available"]}
     assert shown == set(plan.sources)  # the page's count is what a search really runs
+
+
+# ---------------------------------------------------------------- /health
+
+def test_public_health_shows_only_the_status_and_admins_get_the_detail(client, make_admin, make_user):
+    body = client.get("/health").json()
+    assert set(body) == {"status"} and body["status"] in ("ok", "degraded", "unhealthy")
+
+    _, headers = make_user()
+    assert client.get(f"{API}/admin/system/health", headers=headers).status_code == 403
+    _, admin = make_admin()
+    detail = client.get(f"{API}/admin/system/health", headers=admin).json()
+    assert detail["status"] == body["status"] and "checks" in detail
