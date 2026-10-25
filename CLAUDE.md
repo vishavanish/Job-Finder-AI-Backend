@@ -191,7 +191,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Shared Redis | `core/redis_client.py` | One client per process (`get_redis()`); tests swap in fakeredis. |
 | Frontend | separate repo `Job-Finder-AI-Frontend` | React 18 + Vite + react-router, plain JS (no TypeScript), axios client with hardcoded `API_URL`. Pages: Home, Keywords, Skills, ATS Targets, Providers, Applications, Profile, Login. Deployed on Vercel. |
 
-**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts, `0008`–`0009` apply center, `0010` tracker & Gmail, `0011` ATS discovery, `0012`–`0013` voice, `0014` Gemini 2.5 Flash → 3.8 Flash); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
+**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts, `0008`–`0009` apply center, `0010` tracker & Gmail, `0011` ATS discovery, `0012`–`0013` voice, `0014` Gemini 2.5 Flash → 3.8 Flash, `0015` prep-pack error detail, `0016` ATS resolver probes, `0017` target companies); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
 
 **CI:** `.github/workflows/tests.yml` runs the tests on every push and pull request (no secrets needed).
 
@@ -513,6 +513,39 @@ Plan: `docs/plans/QA2-reliability-speed.md` (owner approved the recommended defa
 **Operational changes introduced in QA2**
 - No migration. New env (all optional): `SCORE_BATCH_SIZE` (5), `ATS_MAX_POSTING_AGE_DAYS` (90).
 - Feed protocol: clients must drop entries with `removed: true` and may render `scoring: true` entries without a score (the frontend from QA2 does).
+
+### 6.16 QA3 — company career pages inside Job Search (branch `dev`)
+
+Plan: `docs/plans/QA3-ats-in-job-search.md` (owner approved the recommended defaults 2026-10-25; the ATS page stays, optional).
+
+| Item | State |
+|------|-------|
+| Window | ✅ `company_ats` jobs in a Job Search go back `max(search window, ATS_SEARCH_MIN_DAYS)` (14) days (`ats_search.search_window_days`); before, a 24 h search saw only jobs first seen that day (246 of 128k in production). Companies found become "hot". |
+| Live top-up | ✅ `celery_tasks._start_ats_topup`: fewer than `ATS_MIN_COMPANIES` index jobs for a keyword → `ats_search.topup` runs in a thread while the other sources are searched (shared 10-minute lock per query with the ATS page); its new jobs go through the same triage/scoring into the same run (`_finish_ats_topup`, timing "Company career pages (live)"). |
+| Real names | ✅ `AtsPlatform.board_name`: Lever, Ashby, Gem, Workable, Workday from the careers page title (`clean_board_name`: "Ramp Jobs" → "Ramp", "CAREERS AT NVIDIA" → "NVIDIA"), Rippling from a job's `companyName`; Greenhouse, Recruitee, SmartRecruiters, Personio, Breezy, Teamtailor already in the list. Looked up once per `ATS_NAME_RETRY_DAYS` for slug-named companies; admin names kept; a 304 for a slug-named company clears the ETag so the next crawl reads the name. |
+| Company resolver | ✅ `services/ats_resolver.py`: company names (+ `company_url` = JobSpy's `company_url_direct`, and non-board apply pages) from every keyword search are queued (`resolve_ats_companies`, maintenance queue; names only, nothing about the user). Website fingerprint (links/iframes to a supported ATS; public hosts only, ≤ 2 redirects, 300 kB) → else up to 3 slugs on 8 guessable platforms through the crawler host slots, accepted only when the board's name matches (filler words dropped, ≥ 0.8 overlap). Outcome in `ats_probes` (migration `0016`); misses retried after `ATS_RESOLVER_RETRY_DAYS`; new companies origin `resolver`. ≤ `ATS_RESOLVER_MAX_NAMES` per search within `ATS_RESOLVER_SECONDS`. |
+| Frontend | ✅ Jobs: "Company site · Greenhouse" badge, "Only company career pages" filter, "Browse by company" link (`/ats-targets?q=`). |
+
+**Operational changes introduced in QA3**
+- Migration `0016` (run `alembic upgrade head`).
+- New env (all optional): `ATS_SEARCH_MIN_DAYS` (14), `ATS_NAME_RETRY_DAYS` (30), `ATS_RESOLVER_ENABLED` (true), `ATS_RESOLVER_MAX_NAMES` (20), `ATS_RESOLVER_SECONDS` (60), `ATS_RESOLVER_RETRY_DAYS` (30).
+- More outbound requests from the maintenance worker (resolver probes, one name lookup per slug-named company). Switch the resolver off with `ATS_RESOLVER_ENABLED=false` if a platform complains.
+
+### 6.17 QA4 — Target companies (branch `dev`)
+
+Plan: `docs/plans/QA4-target-companies.md` (owner approved the recommended defaults 2026-10-25).
+
+| Item | State |
+|------|-------|
+| Follow | ✅ `ats_follows` (company, or a name still being looked up: `searching` / `not_found`), ≤ `TARGET_COMPANIES_MAX_PER_USER`. `ats_companies.follower_count`; followed companies are crawled every `ATS_FOLLOWED_REFRESH_HOURS` (3) and checked soon after the first follow. Follow by name: a known company (resolver answer or a matching registry name) at once, otherwise `ats_follow_lookup` runs the resolver; a name found later by any search attaches its waiting follows (`target_companies.attach_found`). |
+| New roles | ✅ a crawl that adds jobs to a followed company queues `ats_follow_match`: title synonyms (`ats_search.expansions`, no AI) × places → `ats_follow_hits`. Titles/places from `ats_follow_settings`, else the default search profile titles and Profile places + Remote. Hits purged after `ATS_FOLLOW_HIT_RETENTION_DAYS` (with `purge_ats_jobs`). |
+| Alerts | ✅ beat `ats_follow_digest` (every `ATS_FOLLOW_DIGEST_TICK_SECONDS`): `instant` = at most hourly, `daily` (default) = after `ATS_FOLLOW_DIGEST_HOUR` local, `off` = page only. Plain-text email, ≤ 20 roles; closed jobs, disabled users and accounts without `ats_discovery` skipped. |
+| API | ✅ `GET /ats/following`, `PUT/DELETE /ats/companies/{id}/follow`, `DELETE /ats/following/{id}`, `POST /ats/following/by-name`, `GET /ats/following/new`, `POST /ats/following/seen`, `GET /ats/suggestions` (cached a day), `GET/PUT /ats/following/settings`. `followed` on ATS search groups, company jobs and Jobs feed entries. |
+| Frontend | ✅ "ATS targets" → **Target companies** (My companies / Suggested / Browse tabs), Follow on every company, ★ "Company you follow" on Jobs. Not done: Dashboard "New at your companies" card (Dashboard was being redesigned in another session). |
+
+**Operational changes introduced in QA4**
+- Migration `0017` (run `alembic upgrade head`). Beat runs `ats_follow_digest`; emails use the OTP/alert email settings.
+- New env (all optional): `ATS_FOLLOWED_REFRESH_HOURS` (3), `TARGET_COMPANIES_MAX_PER_USER` (50), `ATS_FOLLOW_DIGEST_TICK_SECONDS` (900), `ATS_FOLLOW_HIT_RETENTION_DAYS` (30), `ATS_FOLLOW_DIGEST_HOUR` (9), `RATE_LIMIT_ATS_FOLLOW` (60/hour).
 
 ---
 
@@ -948,6 +981,8 @@ All tables have `id`, `created_at`, `updated_at`. User-owned tables have `user_i
 | `ats_companies` | ref_key (unique), platform, slug, host, site, name, careers_url, origin, active, job_count, etag, last_crawled/ok_at, next_crawl_at, hot_until, fail/gone counts (P6; shared, no user_id) |
 | `ats_jobs` | company_id + external_id (unique), title, title_norm, location, country, remote, department, url, snippet ≤ 300, job_key, posted_at, first/last_seen_at, closed_at, tsv (Postgres only); no embedding yet (P6) |
 | `ats_platforms` | platform, enabled, health (P6) |
+| `ats_probes` | name_norm (pk), name, company_id?, via (website/slug), checked_at — company resolver outcomes (QA3) |
+| `ats_follows` / `ats_follow_hits` / `ats_follow_settings` | user follows a company (or a name being looked up); new matching roles until seen/emailed; alert mode, titles, places, time zone (QA4) |
 | `provider_catalog` | key, name, tier, requires_key, tos_risk, rate_limit, enabled_global, health |
 | `user_provider_settings` | user_id, provider_key, enabled, free_only flag |
 | `ai_models` | see Section 7.9 |
@@ -1006,7 +1041,7 @@ Rules: tasks are idempotent; every task receives `user_id`; secrets are resolved
 
 ## 11. Frontend structure and UX
 
-Navigation: **Dashboard · Jobs · Apply Center · Tracker · ATS Targets · Profile & Resume · Keywords & Skills · Providers · Interview Prep · Settings** (+ **Admin** for admin/manager).
+Navigation: **Dashboard · Jobs · Apply Center · Tracker · Target companies · Profile & Resume · Keywords & Skills · Providers · Interview Prep · Settings** (+ **Admin** for admin/manager).
 
 | Screen | Key behaviour |
 |--------|---------------|
@@ -1014,7 +1049,7 @@ Navigation: **Dashboard · Jobs · Apply Center · Tracker · ATS Targets · Pro
 | Jobs | Live-streaming results from a run; each card has **Auto apply** and **Manual apply**; save/hide; shows score + AI reason; sources badge (LinkedIn kept when duplicates) |
 | Apply Center | Active runs, review queue (needs input / needs review), autopilot level and caps, risk notice |
 | Tracker | Table + kanban, detail timeline, Gmail status, "needs review" email inbox |
-| ATS Targets | One input: job title → grouped company list with platform badges and filters |
+| Target companies | Followed companies with new roles and alert settings; suggestions; browse by job title → grouped company list with platform badges, filters and Follow (QA4) |
 | Profile & Resume | Upload/replace, parsed-profile editor, versions, preferences, answer bank |
 | Keywords & Skills | Single combined editor (Section 7.3) |
 | Providers | Source toggles, **Free tools only** switch, health badges, BYOK keys |

@@ -1,7 +1,7 @@
 # QA3 — Company career pages inside Job Search (no separate ATS step)
 
-Status: **draft for owner approval** (2026-10-25). Decision 5 set by the owner (company page kept as optional).
-Nothing built yet.
+Status: **approved and built** (2026-10-25, recommended defaults; decision 5 set by the owner). Section E
+was then superseded by QA4 (the page became Target companies). See CLAUDE.md §6.16.
 
 ## 1. The owner's question
 
