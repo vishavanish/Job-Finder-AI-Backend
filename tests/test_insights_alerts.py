@@ -111,8 +111,8 @@ def test_pipeline_feed_and_jobs_list_carry_match_and_freshness(client, make_user
            "url": "https://indeed.example/fresh-1", "description": "python fastapi " * 10, "posted": _now_iso(2)}
     monkeypatch.setattr(celery_tasks, "_make_progress_cb", lambda task, name: (lambda msg: None))
     monkeypatch.setattr(celery_tasks.job_sources, "scrape_all", lambda **kw: [dict(job)])
-    monkeypatch.setattr(celery_tasks, "_score_one_job_llm", lambda j, **kw: {
-        **j, "llm_score": 88, "llm_reason": "fit", "llm_seniority": "match", "llm_missing": ["Kafka"]})
+    monkeypatch.setattr(celery_tasks, "_score_batch_llm", celery_tasks.one_by_one(lambda j, **kw: {
+        **j, "llm_score": 88, "llm_reason": "fit", "llm_seniority": "match", "llm_missing": ["Kafka"]}))
     params = {"user_id": user_id, "resume_summary": "x", "skills": ["python", "django"],
               "career_targets": ["Backend Engineer"], "keyword_prefilter_min_pct": 0, "llm_min_score_to_keep": 0,
               "filters": {}, "include_seen": False, "previous_search_at": _now_iso(1)}
@@ -120,7 +120,7 @@ def test_pipeline_feed_and_jobs_list_carry_match_and_freshness(client, make_user
     run_id = pipeline_progress.create_run(user_id=user_id, total_keywords=1)
     celery_tasks.search_and_score_keyword(run_id, "Backend", ["Pune"], ["indeed"], {}, params)
 
-    entry = pipeline_progress.get_jobs(run_id=run_id)[0]
+    entry = pipeline_progress.current_jobs(run_id=run_id)[0]
     assert entry["match"] == {"skills_matched": ["python"], "skills_missing": ["django"], "skills_total": 2,
                               "title_fit": 100, "seniority": "match", "missing_required": ["Kafka"]}
     assert entry["early"] is True and entry["posted_hours_ago"] == 2 and entry["new_since_last_search"] is True
@@ -385,8 +385,8 @@ def test_alert_run_emails_new_matches_once(client, make_user, monkeypatch):
     scores = {jobs[0]["url"]: 92, jobs[1]["url"]: 85, jobs[2]["url"]: 50}
     monkeypatch.setattr(celery_tasks, "_make_progress_cb", lambda task, name: (lambda msg: None))
     monkeypatch.setattr(celery_tasks.job_sources, "scrape_all", lambda **kw: [dict(j) for j in jobs])
-    monkeypatch.setattr(celery_tasks, "_score_one_job_llm",
-                        lambda j, **kw: {**j, "llm_score": scores[j["url"]], "llm_reason": "fit"})
+    monkeypatch.setattr(celery_tasks, "_score_batch_llm", celery_tasks.one_by_one(
+                        lambda j, **kw: {**j, "llm_score": scores[j["url"]], "llm_reason": "fit"}))
     sent = []
 
     class Mailer:

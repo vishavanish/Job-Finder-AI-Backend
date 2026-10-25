@@ -5,7 +5,7 @@ Saved job alerts (P3.2). A user saves up to JOB_ALERTS_MAX_PER_USER alerts
 (search profile + local hour + minimum score). Celery beat ticks every
 JOB_ALERT_TICK_SECONDS; each due alert is claimed with a conditional UPDATE
 on next_run_at (two beats can't run it twice) and run as one task that
-goes through the normal pipeline path (_process_job): filters, seen-skip,
+goes through the normal pipeline path (_process_jobs): filters, seen-skip,
 scoring, the feed. Jobs at or above min_score that the user was never
 shown are stored on the run and emailed as a digest. Because shown jobs
 become "seen", a job is never sent twice.

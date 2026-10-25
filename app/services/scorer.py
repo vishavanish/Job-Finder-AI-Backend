@@ -235,6 +235,39 @@ def score_one_job(
     return job
 
 
+def score_batch(
+    db: Session, jobs: list[dict], *, user_id: str | None, resume_summary: str, career_targets: list[str],
+    request_keys: dict[str, str] | None = None, ref: str | None = None,
+    progress: Callable[[str], None] = NoOpProgress,
+) -> list[dict]:
+    """Scores a few jobs in ONE AI call (QA2 §1: one call per job ran into the
+    free tiers' rate limits). Jobs the reply left out are scored one by one;
+    when no model answers at all, every job gets `llm_failed`. Scores in place
+    and returns `jobs`."""
+    if not jobs:
+        return jobs
+    if len(jobs) == 1:
+        return [score_one_job(db, jobs[0], user_id=user_id, resume_summary=resume_summary,
+                              career_targets=career_targets, request_keys=request_keys, ref=ref)]
+    # Reasoning models spend output tokens thinking first; leave room for every entry.
+    max_tokens = min(SINGLE_JOB_MAX_TOKENS + 600 * (len(jobs) - 1), 8000)
+    engine = _rank_via_router(
+        db, jobs, user_id=user_id, resume_summary=resume_summary, career_targets=career_targets,
+        request_keys=request_keys, ref=ref, max_tokens=max_tokens, progress=progress,
+    )
+    if engine is None:
+        for job in jobs:
+            job["llm_failed"] = True
+            job.setdefault("llm_score", 0)
+            job.setdefault("llm_reason", "LLM scoring unavailable for this job.")
+        return jobs
+    for job in jobs:
+        if "llm_score" not in job:  # the reply skipped this one
+            score_one_job(db, job, user_id=user_id, resume_summary=resume_summary, career_targets=career_targets,
+                          request_keys=request_keys, ref=ref)
+    return jobs
+
+
 def _tag_auto_apply_capability(jobs: list[dict]) -> None:
     from app.services.browser_apply import AUTO_APPLY_CAPABLE_SOURCES
     for job in jobs:

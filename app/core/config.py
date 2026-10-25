@@ -84,6 +84,8 @@ class Settings(BaseSettings):
     # At most this many calls at once per provider (all workers together); 0 = no limit.
     AI_PROVIDER_CONCURRENCY: int = 2
     AI_PROVIDER_SLOT_WAIT_SECONDS: int = 30
+    # Jobs scored per AI call in a search (QA2 §1); 1 = one call per job as before.
+    SCORE_BATCH_SIZE: int = 5
     AI_REQUEST_TIMEOUT_SECONDS: int = 60
 
     # ---- Celery / Redis (Upstash) ----
