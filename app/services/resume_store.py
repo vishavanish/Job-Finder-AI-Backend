@@ -229,6 +229,9 @@ def save_review(db: Session, row: Resume, *, label: str | None, parsed: ParsedRe
         row.parsed = parsed.model_dump()
         row.parse_status = "reviewed"
         row.parse_error = None
+        if row.is_master:
+            from app.services import profile_fill
+            profile_fill.fill_empty(db, row.user_id, parsed)
     return row
 
 
@@ -281,6 +284,12 @@ def parse_resume(db: Session, row: Resume) -> Resume:
     except ai_router.NoModelAvailable as e:
         row.parse_status, row.parse_error = "failed", str(e)[:300]
         return row
-    row.parsed = holder["parsed"].model_dump()
+    from app.services import profile_fill
+    parsed = holder["parsed"]
+    if parsed.total_experience_years is None:  # QA2 §3: the span of the dated jobs instead
+        parsed.total_experience_years = profile_fill.experience_years(parsed)
+    row.parsed = parsed.model_dump()
     row.parse_status, row.parse_error, row.parsed_by = "parsed", None, result.engine[:300]
+    if row.is_master:
+        profile_fill.fill_empty(db, row.user_id, parsed)
     return row
