@@ -76,6 +76,7 @@ def _pack_out(pack: ApplyPack) -> PrepPackOut:
         cover_letter=pack.cover_letter, email_to=pack.email_to, email_subject=pack.email_subject,
         email_body=pack.email_body, mailto=apply_prep.mailto(pack), dropped=list(pack.dropped or []),
         error=pack.error, error_detail=pack.error_detail, updated_at=pack.updated_at,
+        steps=apply_prep.steps(pack.id), typical_seconds=apply_prep.typical_seconds(),
     )
 
 

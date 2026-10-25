@@ -434,3 +434,44 @@ def test_email_apply_is_recorded_as_emailed(client, make_user):
     r = client.post(f"{API}/applications/manual", json={"job_id": job_id, "via": "email"}, headers=headers)
     assert r.status_code == 201 and r.json()["status"] == "emailed"
     assert client.get(f"{API}/jobs?state=applied", headers=headers).json()["total"] == 1
+
+
+def test_prep_pack_writes_resume_and_letter_at_the_same_time(client, make_user, monkeypatch):
+    """QA2 §2: both AI steps run together, each on its own DB session, and the
+    pack reports per-part steps plus a typical duration."""
+    import threading
+
+    user_id, headers = make_user()
+    _resume(client, headers)
+    job_id = _job(company="Parallel Co")
+    both_started = threading.Barrier(2, timeout=5)  # fails unless the two calls overlap
+    sessions = set()
+
+    def complete(db, **kw):
+        sessions.add(id(db))
+        both_started.wait()
+        reply = {"resume_tailor": TAILOR_REPLY, "cover_letter": LETTER}[kw["task"]]
+        assert kw["validate"](reply)
+        return _Result()
+
+    monkeypatch.setattr(ai_router, "complete", complete)
+    for seconds in (10, 20, 30):
+        apply_prep.record_duration(seconds)
+    pack_id = client.post(f"{API}/apply/prep", json={"job_id": job_id}, headers=headers).json()["id"]
+    assert celery_tasks.build_apply_pack_task(pack_id, user_id)["status"] == "ready"
+    assert len(sessions) == 2
+
+    pack = client.get(f"{API}/apply/prep/{pack_id}", headers=headers).json()
+    assert pack["steps"] == {"resume": "done", "cover_letter": "done"}
+    assert pack["typical_seconds"] is not None and pack["cover_letter"]
+
+
+def test_prep_pack_step_shows_which_part_failed(client, make_user, fake_ai):
+    user_id, headers = make_user()
+    _resume(client, headers)
+    job_id = _job(company="Half Co", description="No email here.")
+    fake_ai["state"]["fail"] = {"cover_letter"}
+    pack_id = client.post(f"{API}/apply/prep", json={"job_id": job_id}, headers=headers).json()["id"]
+    celery_tasks.build_apply_pack_task(pack_id, user_id)
+    assert client.get(f"{API}/apply/prep/{pack_id}", headers=headers).json()["steps"] == {
+        "resume": "done", "cover_letter": "failed"}

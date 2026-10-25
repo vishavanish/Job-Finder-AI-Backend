@@ -52,6 +52,9 @@ class PrepPackOut(BaseModel):
                                description="Things the AI wrote that are not in your resume, so they were removed")
     error: Optional[str] = Field(None, description="Short message for people when part of the pack failed")
     error_detail: Optional[str] = Field(None, description="Which AI models were tried and why each failed")
+    steps: dict[str, str] = Field(default_factory=dict,
+                                  description="Per part (resume, cover_letter): running, done, failed or skipped")
+    typical_seconds: Optional[int] = Field(None, description="How long packs usually take (median of the last 20)")
     updated_at: datetime
 
 
