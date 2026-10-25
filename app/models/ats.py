@@ -14,6 +14,9 @@ ATS Discovery (CLAUDE.md 7.6, P6):
     On Postgres a generated `tsv` column + GIN index serve the title search
     (migration 0011); SQLite (dev/tests) searches title_norm instead.
   - AtsPlatform: admin on/off + health per platform (greenhouse, lever, …).
+  - AtsProbe: what the company resolver (QA3 §A) found for a company name seen
+    in search results — the registry company, or nothing (retried after
+    ATS_RESOLVER_RETRY_DAYS).
 """
 from __future__ import annotations
 
@@ -25,7 +28,7 @@ from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, T
 from app.core.db import Base
 from app.models.user import User  # noqa: F401 — see app/models/application.py for why
 
-ORIGINS = ("seed", "pipeline", "user", "admin")
+ORIGINS = ("seed", "pipeline", "user", "admin", "resolver")
 
 
 def _now() -> datetime:
@@ -96,3 +99,13 @@ class AtsPlatformSetting(Base):
     last_success_at = Column(DateTime, nullable=True)
     last_error_at = Column(DateTime, nullable=True)
     last_error = Column(String(300), nullable=True)
+
+
+class AtsProbe(Base):
+    __tablename__ = "ats_probes"
+
+    name_norm = Column(String(255), primary_key=True)   # job_dedupe.normalize_company of the name searched
+    name = Column(String(255), nullable=False)
+    company_id = Column(String(36), ForeignKey("ats_companies.id", ondelete="SET NULL"), nullable=True)
+    via = Column(String(16), nullable=True)               # website | slug (how it was found)
+    checked_at = Column(DateTime, default=_now, nullable=False)

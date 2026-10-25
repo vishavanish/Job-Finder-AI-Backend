@@ -11,11 +11,12 @@ import pytest
 from app.core import celery_tasks
 from app.core.config import get_settings
 from app.core.db import SessionLocal
-from app.models.ats import AtsCompany, AtsJob, AtsPlatformSetting
+from app.core.redis_client import get_redis as get_redis_client
+from app.models.ats import AtsCompany, AtsJob, AtsPlatformSetting, AtsProbe
 from app.providers.ats import platforms
 from app.providers.ats.platforms import AtsRef
 from app.providers.job_sources import base
-from app.services import ats_crawler, ats_registry, ats_search, pipeline_progress
+from app.services import ats_crawler, ats_registry, ats_resolver, ats_search, pipeline_progress
 
 
 @pytest.fixture(autouse=True)
@@ -233,3 +234,108 @@ def test_rippling_name_comes_from_a_job_detail(web):
     impl = platforms.get("rippling")
     assert impl.board_name(AtsRef("rippling", "acme"), [{"external_id": "j1"}]) == "Acme Robotics"
     assert impl.board_name(AtsRef("rippling", "acme"), []) is None
+
+
+# ---------------------------------------------------------------- §A company resolver
+
+
+def gh_board(name: str, jobs: int = 1) -> Resp:
+    return Resp({"jobs": [{"id": i, "title": "Engineer", "company_name": name, "location": {"name": "Bengaluru"},
+                           "absolute_url": f"https://job-boards.greenhouse.io/x/jobs/{i}", "metadata": []}
+                          for i in range(jobs)]})
+
+
+@pytest.fixture
+def clean_probes():
+    s = SessionLocal()
+    s.query(AtsProbe).delete()
+    s.commit()
+    s.close()
+    yield
+
+
+@pytest.mark.parametrize("searched,board,ok", [
+    ("Razorpay Software Pvt Ltd", "Razorpay", True), ("Acme Robotics", "Acme Robotics Inc.", True),
+    ("Apple", "Apple Leisure Group", False), ("Swiggy", None, False), ("Juspay Technologies", "JUSPAY", True),
+])
+def test_names_match(searched, board, ok):
+    assert ats_resolver.names_match(searched, board) is ok
+
+
+def test_slug_candidates():
+    assert ats_resolver.slug_candidates("Acme Technologies Pvt Ltd") == ["acmetechnologies", "acme-technologies",
+                                                                        "acme"]
+    assert ats_resolver.slug_candidates("Swiggy") == ["swiggy"]
+
+
+def test_a_company_name_from_search_results_becomes_a_registry_company(web, db, clean_probes):
+    routes, _ = web
+    routes["boards-api.greenhouse.io/v1/boards/acmerobotics/jobs"] = gh_board("Acme Robotics")
+    counts = ats_resolver.resolve(SessionLocal, [{"company": "Acme Robotics Pvt Ltd", "source": "LinkedIn"}])
+    assert counts["found"] == 1 and counts["added"] == 1
+    row = db.query(AtsCompany).filter(AtsCompany.slug == "acmerobotics").one()
+    assert (row.platform, row.origin, row.name) == ("greenhouse", "resolver", "Acme Robotics")
+    probe_row = db.get(AtsProbe, "acme robotics")
+    assert probe_row.company_id == row.id and probe_row.via == "slug"
+
+
+def test_a_board_with_another_companys_name_is_not_taken(web, db, clean_probes):
+    routes, _ = web
+    routes["boards-api.greenhouse.io/v1/boards/apple/jobs"] = gh_board("Apple Leisure Group")
+    counts = ats_resolver.resolve(SessionLocal, [{"company": "Apple"}])
+    assert counts["found"] == 0 and counts["none"] == 1
+    assert db.query(AtsCompany).count() == 0
+    assert db.get(AtsProbe, "apple").company_id is None
+
+
+def test_a_miss_is_not_tried_again_for_a_month(web, db, clean_probes):
+    _, calls = web
+    ats_resolver.resolve(SessionLocal, [{"company": "Nowhere Corp"}])
+    asked = len(calls)
+    get_redis_client().flushall()  # the 10-minute "resolving" marker is gone too
+    ats_resolver.resolve(SessionLocal, [{"company": "Nowhere Corp"}])
+    assert len(calls) == asked
+
+
+def test_the_company_website_shows_its_career_page(web, db, clean_probes, monkeypatch):
+    routes, _ = web
+    monkeypatch.setattr(platforms, "public_host", lambda host: True)
+    routes["https://www.initech.example/careers"] = Resp(
+        '<iframe src="https://boards.greenhouse.io/embed/job_board?for=initechhq&amp;b=x"></iframe>')
+    routes["boards-api.greenhouse.io/v1/boards/initechhq/jobs"] = gh_board("Initech", jobs=0)
+    counts = ats_resolver.resolve(SessionLocal, [{"company": "Initech",
+                                                  "company_url": "https://www.initech.example/"}])
+    assert counts["found"] == 1
+    assert db.get(AtsProbe, "initech").via == "website"
+    assert db.query(AtsCompany).one().slug == "initechhq"
+
+
+def test_private_addresses_are_never_fetched(web, clean_probes):
+    _, calls = web
+    ats_resolver.resolve(SessionLocal, [{"company": "Evil", "company_url": "http://127.0.0.1/admin"}])
+    assert not [u for u in calls if "127.0.0.1" in u]
+
+
+def test_known_companies_and_board_links_are_skipped(db, clean_probes):
+    seed(db, "ashby", "acme", "Python Developer")
+    items = ats_resolver.candidates(db, [{"company": "Acme"}, {"company": "Globex",
+                                                                "apply_url": "https://www.linkedin.com/jobs/1"}], 10)
+    assert [(i["name"], i["urls"]) for i in items] == [("Globex", [])]
+
+
+def test_switched_off_resolver_does_nothing(web, monkeypatch, clean_probes):
+    _, calls = web
+    monkeypatch.setattr(get_settings(), "ATS_RESOLVER_ENABLED", False)
+    assert ats_resolver.resolve(SessionLocal, [{"company": "Acme"}])["checked"] == 0 and calls == []
+
+
+def test_a_search_queues_the_resolver_with_names_only(pipeline, monkeypatch, dispatched):
+    monkeypatch.setattr(celery_tasks.job_sources, "scrape_all", lambda **kw: [
+        {"source": "LinkedIn", "title": "Python Developer", "company": "Hooli", "location": "Bangalore",
+         "url": "https://www.linkedin.com/jobs/view/1", "description": "python", "company_url": "https://hooli.example"},
+        {"source": "Ashby", "title": "Python Developer", "company": "Initech", "location": "Bangalore",
+         "url": "https://jobs.ashbyhq.com/initech/1", "description": "python"}])
+    run()
+    sent = [c for c in dispatched if c["task"] == "job_finder.resolve_ats_companies"]
+    assert sent and sent[0]["args"][0] == [{"company": "Hooli", "company_url": "https://hooli.example",
+                                            "apply_url": ""}]

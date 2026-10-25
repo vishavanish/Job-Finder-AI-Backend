@@ -135,6 +135,11 @@ class Settings(BaseSettings):
     # a board post is fresh for a day, a career-page post from last week is usually still open.
     ATS_SEARCH_MIN_DAYS: int = 14
     ATS_NAME_RETRY_DAYS: int = 30               # how often a board name is looked up for a slug-named company
+    # Company resolver (QA3 §A): company names in search results -> registry companies, without anyone adding them.
+    ATS_RESOLVER_ENABLED: bool = True
+    ATS_RESOLVER_MAX_NAMES: int = 20            # new names looked up per keyword search
+    ATS_RESOLVER_SECONDS: int = 60
+    ATS_RESOLVER_RETRY_DAYS: int = 30           # a name with no career page found is tried again after this
     ATS_GONE_AFTER: int = 3                     # 404s in a row before a company is switched off
     RATE_LIMIT_ATS_SEARCH: str = "30/minute"
     RATE_LIMIT_ATS_ADD_COMPANY: str = "10/hour"

@@ -41,6 +41,9 @@ from app.core.db import SessionLocal
 from app.services import provider_catalog
 from app.services.scorer import keyword_score
 from app.services.browser_apply import AUTO_APPLY_CAPABLE_SOURCES
+from app.providers.ats.platforms import PLATFORMS as _ATS_PLATFORMS
+
+ATS_SOURCE_NAMES = {p.name for p in _ATS_PLATFORMS.values()}  # index jobs: already in the registry
 logger = logging.getLogger("job_finder_api.tasks")
 
 settings = get_settings()
@@ -180,6 +183,21 @@ def _harvest_ats(db, jobs: list[dict]) -> None:
         logger.exception("ats harvest failed")
 
 
+def _queue_ats_resolver(sources: list[str], jobs: list[dict]) -> None:
+    """QA3 §A: company names from this search's results go to the company resolver (maintenance queue).
+    Only names and websites travel — nothing about the user."""
+    if "company_ats" not in sources or not get_settings().ATS_RESOLVER_ENABLED:
+        return
+    names = [{"company": j.get("company"), "company_url": j.get("company_url") or "",
+              "apply_url": j.get("apply_url") or ""}
+             for j in jobs if j.get("company") and j.get("source") not in ATS_SOURCE_NAMES]
+    if names:
+        try:
+            resolve_ats_companies_task.apply_async(args=[names[:200]], queue=get_settings().maintenance_queue)
+        except Exception:  # noqa: BLE001 — never fail a search for it
+            logger.exception("could not queue the ats resolver")
+
+
 def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str], sources: list[str],
             manual_naukri_jobs: list, progress, timings: dict[str, float] | None = None) -> list[dict]:
     """job_sources.scrape_all with the params a route built, plus source
@@ -235,6 +253,7 @@ def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str
         db.rollback()
         logger.exception("could not record source health")
     _harvest_ats(db, jobs)
+    _queue_ats_resolver(sources, jobs)
     return jobs
 
 
@@ -804,6 +823,14 @@ def ats_expand_title_task(query: str, user_id: str) -> dict:
         return {"titles": ats_search.expand_with_ai(db, query, user_id)}
     finally:
         db.close()
+
+
+@celery_app.task(name="job_finder.resolve_ats_companies")
+def resolve_ats_companies_task(jobs: list[dict]) -> dict:
+    """Finds the career pages of companies seen in search results (QA3 §A)."""
+    from app.services import ats_resolver
+
+    return ats_resolver.resolve(SessionLocal, jobs)
 
 
 @celery_app.task(name="job_finder.purge_ats_jobs")
