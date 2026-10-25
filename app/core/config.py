@@ -129,6 +129,8 @@ class Settings(BaseSettings):
     ATS_CLOSED_RETENTION_DAYS: int = 7
     ATS_MAX_INDEXED_JOBS: int = 300000
     ATS_SEARCH_CACHE_SECONDS: int = 600
+    # Postings older than this are left out of ATS searches unless the user asks for any age (QA2 §4).
+    ATS_MAX_POSTING_AGE_DAYS: int = 90
     ATS_GONE_AFTER: int = 3                     # 404s in a row before a company is switched off
     RATE_LIMIT_ATS_SEARCH: str = "30/minute"
     RATE_LIMIT_ATS_ADD_COMPANY: str = "10/hour"

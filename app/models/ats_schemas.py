@@ -16,6 +16,8 @@ class AtsJobOut(BaseModel):
     posted_at: datetime | None = None
     first_seen_at: datetime | None = None
     applied: bool = False
+    # QA2 §4: the same role posted for other places, shown as "+N locations" on one row
+    more_locations: list[str] = []
 
 
 class AtsJobDetail(AtsJobOut):

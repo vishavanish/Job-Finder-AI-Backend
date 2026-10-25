@@ -64,8 +64,11 @@ def _company(db: Session, company_id: str) -> AtsCompany:
 @router.get("/ats/search", response_model=AtsSearchResult)
 @limiter.limit(settings.RATE_LIMIT_ATS_SEARCH)
 def search(request: Request, q: str = Query(..., min_length=2, max_length=120),
-           platform: list[str] | None = Query(default=None), location: str | None = Query(default=None, max_length=80),
+           platform: list[str] | None = Query(default=None),
+           location: list[str] | None = Query(default=None, description="One or more places (or comma-separated); "
+                                                                         "a job in any of them matches"),
            remote: bool | None = None, posted_within_days: int | None = Query(default=None, ge=1, le=365),
+           any_age: bool = Query(False, description="Include postings older than ATS_MAX_POSTING_AGE_DAYS"),
            hide_applied: bool = False, page: int = Query(default=1, ge=1, le=100),
            user=Depends(entitlements.require_feature("ats_discovery")), db: Session = Depends(get_db)):
     from app.core.celery_tasks import ats_expand_title_task, ats_topup_task
@@ -74,7 +77,8 @@ def search(request: Request, q: str = Query(..., min_length=2, max_length=120),
     if unknown:
         raise HTTPException(422, f"Unknown platform: {', '.join(unknown)}")
     result = ats_search.search(db, user.id, q, platforms_=[p.lower() for p in platform or []] or None,
-                               location=location, remote=remote, posted_within_days=posted_within_days,
+                               location=[loc[:80] for loc in location or []], remote=remote,
+                               posted_within_days=posted_within_days, any_age=any_age,
                                hide_applied=hide_applied, page=page)
     if result["expansion_pending"] and ats_search.topup_lock(f"expand:{q}"):
         ats_expand_title_task.apply_async(args=[q, user.id], queue=settings.default_queue)

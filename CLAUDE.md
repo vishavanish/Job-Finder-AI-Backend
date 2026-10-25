@@ -496,6 +496,24 @@ Plan: `docs/plans/QA1-quick-wins.md` (owner approved the recommended defaults 20
 - New env (all optional): `AI_RATE_LIMIT_PAUSE_SECONDS` (60), `AI_RATE_LIMIT_MAX_PAUSE_SECONDS` (1800), `AI_BROKEN_PAUSE_SECONDS` (3600), `AI_PROVIDER_CONCURRENCY` (2, 0 = off), `AI_PROVIDER_SLOT_WAIT_SECONDS` (30).
 - Admin steps after deploy: switch off "Qwen3 8B (Hugging Face)" (402, no credits) and "Gemini 3.7 Flash"; add a platform key with scope `openrouter` and switch on the OpenRouter fallback row.
 
+### 6.15 QA2 — search speed, prep, profile fill, ATS quality (branch `dev`)
+
+Plan: `docs/plans/QA2-reliability-speed.md` (owner approved the recommended defaults 2026-10-25).
+
+| Item | State |
+|------|-------|
+| Batch scoring | ✅ `scorer.score_batch`: up to `SCORE_BATCH_SIZE` (5) jobs per AI call; jobs the reply skips are scored one by one; no model → `llm_failed` for all. Seam `celery_tasks._score_batch_llm` (tests fake it with `one_by_one`). |
+| Jobs shown while scoring | ✅ `celery_tasks._process_jobs`: triage every copy (dedupe, filters, seen, prefilter) first; jobs that need the AI go into the feed at once with `scoring: true`, then get scored in batches; the score replaces the entry (same id) or `pipeline_progress.remove_recorded` appends `{id, replaces, removed}`. `current_jobs()` folds the feed by id. Job alerts never show early. Cancel between batches takes the waiting jobs back out. |
+| Places searched once | ✅ `job_sources.search_locations`: a place inside another searched place (Mumbai with India; "Berlin, Germany" with Germany) is skipped for JobSpy/keyword APIs; Remote is never skipped. |
+| Run timings | ✅ seconds per source label and for scoring, summed over keyword tasks, in `GET /pipeline/{id}` → `timings` (meta hash fields `t:<label>`). |
+| Prep pack | ✅ tailored resume and cover letter run in parallel (own thread + DB session each); `GET /apply/prep/{id}` adds `steps` (Redis, 1 h) and `typical_seconds` (median of the last 20 ready packs). |
+| Profile from resume | ✅ `services/profile_fill.py`: after a master resume is parsed or reviewed, EMPTY applicant fields are filled (name, email, phone, city, country, links, years); typed values are never overwritten. Missing `total_experience_years` is computed from job dates (overlaps once, half-year steps). `PUT /profile` strips tracking parameters from links. |
+| ATS search | ✅ `location` takes several places (repeat or comma-separated; "remote" also matches remote-flagged jobs); postings older than `ATS_MAX_POSTING_AGE_DAYS` (90) are left out unless `any_age=true`; the same title in one company is one row with `more_locations`. Not done: real company names for slug-named companies ("Openai", "Wk") — needs each platform's board name in the crawler. |
+
+**Operational changes introduced in QA2**
+- No migration. New env (all optional): `SCORE_BATCH_SIZE` (5), `ATS_MAX_POSTING_AGE_DAYS` (90).
+- Feed protocol: clients must drop entries with `removed: true` and may render `scoring: true` entries without a score (the frontend from QA2 does).
+
 ---
 
 ## 7. Modules in detail
