@@ -216,6 +216,22 @@ def fetch(company: AtsCompany) -> ListResult:
     return result
 
 
+def _board_name(company: AtsCompany, jobs: list[dict]) -> str | None:
+    """The board's own name for a company still named after its slug (QA3 §D): one extra request,
+    tried at most once per ATS_NAME_RETRY_DAYS per company. Never fails a crawl."""
+    impl = platforms.get(company.platform)
+    if impl is None:
+        return None
+    if not get_redis().set(f"ats:name_tried:{company.id}", "1", nx=True,
+                           ex=get_settings().ATS_NAME_RETRY_DAYS * 86400):
+        return None
+    try:
+        return impl.board_name(ats_registry.to_ref(company), jobs)
+    except SourceError as e:
+        logger.info("ats board name failed for %s: %s", company.ref_key, e)
+        return None
+
+
 def crawl_company(db: Session, company_id: str) -> dict:
     company = db.get(AtsCompany, company_id)
     if company is None or not company.active:
@@ -255,12 +271,22 @@ def crawl_company(db: Session, company_id: str) -> dict:
     company.last_error = None
     company.next_crawl_at = _next_crawl(company, now)
     counts: dict = {"not_modified": True}
+    named_by_slug = company.origin != "admin" and company.name == ats_registry.display_name(
+        ats_registry.to_ref(company))
     if not result.not_modified:
         company.etag = result.etag
-        if result.company_name and company.origin != "admin" and company.name == ats_registry.display_name(
-                ats_registry.to_ref(company)):
-            company.name = result.company_name.strip()[:255]
+        if named_by_slug:
+            name = result.company_name or _board_name(company, result.jobs)
+            if name:
+                company.name = name.strip()[:255]
         counts = upsert_jobs(db, company, result.jobs, complete=result.complete)
+    elif named_by_slug:
+        if platforms.get(company.platform).name_from_page:
+            name = _board_name(company, [])
+            if name:
+                company.name = name.strip()[:255]
+        else:
+            company.etag = None  # QA3 §D: the next crawl reads the full list, which carries the company name
     _platform_health(db, company.platform, None)
     db.commit()
     return {"company_id": company_id, **counts}

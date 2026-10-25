@@ -2,7 +2,9 @@
 during the search (§C), real board names (§D) and the company resolver (§A)."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -10,7 +12,9 @@ from app.core import celery_tasks
 from app.core.config import get_settings
 from app.core.db import SessionLocal
 from app.models.ats import AtsCompany, AtsJob, AtsPlatformSetting
+from app.providers.ats import platforms
 from app.providers.ats.platforms import AtsRef
+from app.providers.job_sources import base
 from app.services import ats_crawler, ats_registry, ats_search, pipeline_progress
 
 
@@ -142,3 +146,90 @@ def test_no_live_check_when_company_pages_are_not_a_source(pipeline):
     run_id = pipeline_progress.create_run(user_id="u-qa3", total_keywords=1)
     celery_tasks.search_and_score_keyword(run_id, "Python Developer", ["Bangalore"], ["indeed"], SEARCH, PARAMS)
     assert pipeline == []
+
+
+# ---------------------------------------------------------------- §D real board names
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+class Resp:
+    def __init__(self, body, status_code: int = 200, headers: dict | None = None):
+        self.status_code, self.headers = status_code, headers or {}
+        self.text = body if isinstance(body, str) else json.dumps(body)
+        self._body = body
+
+    def json(self):
+        return json.loads(self._body) if isinstance(self._body, str) else self._body
+
+
+@pytest.fixture
+def web(monkeypatch):
+    """URL substring -> response; records every URL asked for."""
+    routes: dict[str, Resp] = {}
+    calls: list[str] = []
+
+    def fake(method, url, **kwargs):
+        calls.append(url)
+        for part in sorted(routes, key=len, reverse=True):
+            if part in url:
+                return routes[part]
+        return Resp({"error": "not routed"}, 404)
+
+    monkeypatch.setattr(base, "request", fake)
+    return routes, calls
+
+
+@pytest.mark.parametrize("title,name", [
+    ("Spotify", "Spotify"), ("Ramp Jobs", "Ramp"), ("CAREERS AT NVIDIA", "NVIDIA"),
+    ("ThoughtWorks - Current Openings", "ThoughtWorks"), ("Jobs at Razorpay", "Razorpay"),
+    ("Careers | Acme", "Acme"), ("Ben &amp; Jerry&#39;s Careers", "Ben & Jerry's"), ("Current Openings", None),
+])
+def test_page_titles_become_company_names(title, name):
+    assert platforms.clean_board_name(title) == name
+
+
+def test_slug_named_company_gets_its_board_name_once(web, db):
+    routes, calls = web
+    routes["api.ashbyhq.com/posting-api/job-board/acmeco"] = Resp(
+        json.loads((FIXTURES / "sources" / "ashby.json").read_text(encoding="utf-8")))
+    routes["jobs.ashbyhq.com/acmeco"] = Resp("<html><head><title>Acme Corp Jobs</title></head></html>")
+    row, _ = ats_registry.get_or_create(db, AtsRef("ashby", "acmeco"), origin="seed")
+    assert row.name == "Acmeco"
+    ats_crawler.crawl_company(db, row.id)
+    db.refresh(row)
+    assert row.name == "Acme Corp"
+    page_calls = [u for u in calls if "jobs.ashbyhq.com" in u]
+    assert len(page_calls) == 1
+    ats_crawler.crawl_company(db, row.id)
+    assert len([u for u in calls if "jobs.ashbyhq.com" in u]) == 1  # named now: no second page request
+
+
+def test_admin_names_are_kept(web, db):
+    routes, calls = web
+    routes["api.ashbyhq.com/posting-api/job-board/acmeco"] = Resp(
+        json.loads((FIXTURES / "sources" / "ashby.json").read_text(encoding="utf-8")))
+    routes["jobs.ashbyhq.com/acmeco"] = Resp("<title>Acme Corp Jobs</title>")
+    row, _ = ats_registry.get_or_create(db, AtsRef("ashby", "acmeco"), origin="admin", name="Acmeco")
+    ats_crawler.crawl_company(db, row.id)
+    db.refresh(row)
+    assert row.name == "Acmeco" and not [u for u in calls if "jobs.ashbyhq.com" in u]
+
+
+def test_a_304_for_a_slug_named_company_asks_for_the_full_list_next_time(web, db):
+    routes, _ = web
+    routes["boards-api.greenhouse.io/v1/boards/wk/jobs"] = Resp("", 304)
+    row, _ = ats_registry.get_or_create(db, AtsRef("greenhouse", "wk"), origin="seed")
+    row.etag = 'W/"v1"'
+    db.commit()
+    ats_crawler.crawl_company(db, row.id)
+    db.refresh(row)
+    assert row.etag is None and row.name == "Wk"
+
+
+def test_rippling_name_comes_from_a_job_detail(web):
+    routes, _ = web
+    routes["ats.rippling.com/api/v2/board/acme/jobs/j1"] = Resp({"companyName": "Acme Robotics"})
+    impl = platforms.get("rippling")
+    assert impl.board_name(AtsRef("rippling", "acme"), [{"external_id": "j1"}]) == "Acme Robotics"
+    assert impl.board_name(AtsRef("rippling", "acme"), []) is None
