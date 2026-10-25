@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import random
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -108,6 +109,63 @@ def _index_lookup(db, sources: list[str], search_params: dict, locations: list[s
                                      max_age_hours=search_params.get("max_age_hours", 24),
                                      limit=search_params.get("results_per_keyword", 25))
     return lookup
+
+
+def _run_ats_topup(keyword: str) -> dict:
+    """The live career-page top-up for one keyword (seam: tests replace it)."""
+    from app.services import ats_search
+    return ats_search.topup(SessionLocal, keyword)
+
+
+def _start_ats_topup(db, keyword: str, sources: list[str], search_params: dict, locations: list[str],
+                     progress) -> threading.Thread | None:
+    """QA3 §C: when the index has fewer than ATS_MIN_COMPANIES jobs for a keyword, check career pages
+    live while the other sources are searched (one top-up per query per 10 minutes, shared with the
+    ATS page). Returns the running thread, or None."""
+    if "company_ats" not in sources:
+        return None
+    from app.services import ats_search
+    cfg = get_settings()
+    try:
+        found = ats_search.index_count(db, keyword, locations=locations,
+                                       country=search_params.get("country_indeed", "India"),
+                                       max_age_hours=search_params.get("max_age_hours", 24),
+                                       limit=cfg.ATS_MIN_COMPANIES)
+        if found >= cfg.ATS_MIN_COMPANIES or not ats_search.topup_lock(keyword):
+            return None
+    except Exception:  # noqa: BLE001 — the top-up is extra; never fail a search for it
+        db.rollback()
+        logger.exception("ats top-up check failed")
+        return None
+    progress(f"Company career pages: {found} stored match(es) — checking career pages live")
+
+    def work() -> None:
+        try:
+            counts = _run_ats_topup(keyword)
+            logger.info("ats top-up for %r: %s", keyword, counts)
+        except Exception:  # noqa: BLE001
+            logger.exception("ats top-up failed")
+
+    thread = threading.Thread(target=work, name="ats-topup", daemon=True)
+    thread.start()
+    return thread
+
+
+def _finish_ats_topup(db, thread: threading.Thread, keyword: str, already: list[dict], search_params: dict,
+                      locations: list[str], progress) -> list[dict]:
+    """Waits for the top-up (at most ATS_TOPUP_SECONDS + 10 s) and returns the index jobs it added for the
+    keyword that this task has not handled yet."""
+    thread.join(timeout=get_settings().ATS_TOPUP_SECONDS + 10)
+    seen = {j.get("url") for j in already}
+    try:
+        fresh = [j for j in _index_lookup(db, ["company_ats"], search_params, locations)(keyword)
+                 if j.get("url") not in seen]
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        logger.exception("ats lookup after top-up failed")
+        return []
+    progress(f"Company career pages: {len(fresh)} more job(s) found live")
+    return fresh
 
 
 def _harvest_ats(db, jobs: list[dict]) -> None:
@@ -422,6 +480,7 @@ def search_and_score_keyword(
     db = SessionLocal()
     try:
         timings: dict[str, float] = {}
+        topup = _start_ats_topup(db, keyword, sources, search_params, locations, progress_cb)
         raw_jobs = _scrape(db, search_params, keywords=[keyword], locations=locations, sources=sources,
                            # manual jobs are added once at the top level, not per keyword
                            manual_naukri_jobs=[], progress=progress_cb, timings=timings)
@@ -431,6 +490,19 @@ def search_and_score_keyword(
         counts, kept_keys = _process_jobs(db, run_id, raw_jobs, score_params=score_params,
                                           request_keys=request_keys, show_early=True, progress=progress_cb)
         timings["Scoring"] = time.monotonic() - started
+        if topup is not None and not pipeline_progress.is_cancelled(run_id):
+            # QA3 §C: jobs the live check added join the same run's feed.
+            started = time.monotonic()
+            extra = _finish_ats_topup(db, topup, keyword, raw_jobs, search_params, locations, progress_cb)
+            timings["Company career pages (live)"] = time.monotonic() - started
+            if extra:
+                started = time.monotonic()
+                more, more_kept = _process_jobs(db, run_id, extra, score_params=score_params,
+                                                request_keys=request_keys, show_early=True, progress=progress_cb)
+                timings["Scoring"] += time.monotonic() - started
+                counts = {k: counts[k] + more[k] for k in counts}
+                kept_keys += more_kept
+                raw_jobs = raw_jobs + extra
         pipeline_progress.add_timings(run_id=run_id, timings=timings)
         if counts["kept"]:
             progress_cb(f"'{keyword}': kept {counts['kept']} job(s)")

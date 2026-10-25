@@ -480,16 +480,20 @@ def _clear_search_cache() -> None:
 
 # ---------------------------------------------------------------- pipeline source
 
-def index_jobs(db: Session, keyword: str, *, locations: list[str], country: str, max_age_hours: int,
-               limit: int, detail_budget: int = 10) -> list[dict]:
-    """Index jobs for one pipeline keyword, in the normal job shape (source = the ATS platform name, so
-    dedupe ranks them "company ATS" and the Apply Center sees Greenhouse / Lever links)."""
+def search_window_days(max_age_hours: int) -> int:
+    """Days of career-page postings a Job Search takes: its own window, but at least ATS_SEARCH_MIN_DAYS (QA3 §B)."""
+    return max(1, -(-max_age_hours // 24), get_settings().ATS_SEARCH_MIN_DAYS)
+
+
+def _index_rows(db: Session, keyword: str, *, locations: list[str], country: str, max_age_hours: int,
+                limit: int) -> list[tuple[AtsJob, AtsCompany]]:
     phrases, _ = expansions(keyword)
     query = _match_query(db, phrases)
     if query is None:
         return []
     query = _filtered(db, query, platforms_=None, location=None, remote=None,
-                      posted_within_days=max(1, -(-max_age_hours // 24)), enabled=ats_registry.enabled_platforms(db))
+                      posted_within_days=search_window_days(max_age_hours),
+                      enabled=ats_registry.enabled_platforms(db))
     places = [p.strip().lower() for p in locations if p.strip()]
     cities = {c for p in places if "remote" not in p and p != (country or "").lower()
               for c in _CITY_ALIASES.get(p.split(",")[0].strip(), (p.split(",")[0].strip(),))}
@@ -508,6 +512,22 @@ def index_jobs(db: Session, keyword: str, *, locations: list[str], country: str,
             out.append((job, company))
             if len(out) >= limit:
                 break
+    return out
+
+
+def index_count(db: Session, keyword: str, *, locations: list[str], country: str, max_age_hours: int,
+                limit: int) -> int:
+    """How many index jobs a keyword finds (up to `limit`), without fetching descriptions."""
+    return len(_index_rows(db, keyword, locations=locations, country=country, max_age_hours=max_age_hours,
+                           limit=limit))
+
+
+def index_jobs(db: Session, keyword: str, *, locations: list[str], country: str, max_age_hours: int,
+               limit: int, detail_budget: int = 10) -> list[dict]:
+    """Index jobs for one pipeline keyword, in the normal job shape (source = the ATS platform name, so
+    dedupe ranks them "company ATS" and the Apply Center sees Greenhouse / Lever links). The companies
+    found become "hot" (refreshed every ATS_HOT_REFRESH_HOURS), as in the ATS search."""
+    out = _index_rows(db, keyword, locations=locations, country=country, max_age_hours=max_age_hours, limit=limit)
     descriptions: dict[str, str] = {}
     top = out[:detail_budget]
     if top:
@@ -524,4 +544,5 @@ def index_jobs(db: Session, keyword: str, *, locations: list[str], country: str,
                      "location": job.location or ("Remote" if job.remote else ""), "url": job.url,
                      "description": descriptions.get(job.id) or job.snippet,
                      "posted": (job.posted_at or job.first_seen_at).isoformat() + "+00:00", "apply_url": job.url})
+    _mark_hot(db, list({company.id for _, company in out}))  # after the rows are read: the commit expires them
     return jobs

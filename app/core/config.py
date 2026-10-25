@@ -131,6 +131,9 @@ class Settings(BaseSettings):
     ATS_SEARCH_CACHE_SECONDS: int = 600
     # Postings older than this are left out of ATS searches unless the user asks for any age (QA2 §4).
     ATS_MAX_POSTING_AGE_DAYS: int = 90
+    # Career-page jobs in a Job Search go back at least this far, whatever the search's own window (QA3 §B):
+    # a board post is fresh for a day, a career-page post from last week is usually still open.
+    ATS_SEARCH_MIN_DAYS: int = 14
     ATS_GONE_AFTER: int = 3                     # 404s in a row before a company is switched off
     RATE_LIMIT_ATS_SEARCH: str = "30/minute"
     RATE_LIMIT_ATS_ADD_COMPANY: str = "10/hour"
