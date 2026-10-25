@@ -40,6 +40,7 @@ class AtsCompanyGroup(BaseModel):
     locations: list[str]
     newest_posted_at: datetime | None = None
     last_refreshed_at: datetime | None = None
+    followed: bool = False            # QA4: the user follows this company
 
 
 class AtsRegistryStats(BaseModel):
@@ -82,6 +83,7 @@ class AtsCompanyOut(BaseModel):
 class AtsCompanyJobs(BaseModel):
     company: AtsCompanyOut
     jobs: list[AtsJobOut]
+    followed: bool = False            # QA4
 
 
 class AtsCompanyIn(BaseModel):
@@ -128,3 +130,89 @@ class AtsHealth(BaseModel):
 
 class AtsTracked(BaseModel):
     job_id: str
+
+
+# ---------------------------------------------------------------- Target companies (QA4)
+
+class FollowedCompany(BaseModel):
+    id: str
+    status: str                       # following | searching | not_found
+    name: str
+    company_id: str | None = None
+    platform: str | None = None
+    platform_name: str | None = None
+    careers_url: str | None = None
+    open_jobs: int = 0
+    open_matching: int = 0
+    new_count: int = 0
+    latest_posted_at: datetime | None = None
+    last_refreshed_at: datetime | None = None
+    followed_at: datetime
+
+
+class FollowSettingsOut(BaseModel):
+    alert_mode: str
+    titles: list[str]
+    places: list[str]
+    timezone: str
+    default_titles: list[str]
+    default_places: list[str]
+
+
+class FollowSettingsIn(BaseModel):
+    alert_mode: str | None = None
+    titles: list[str] | None = Field(default=None, max_length=10)
+    places: list[str] | None = Field(default=None, max_length=10)
+    timezone: str | None = Field(default=None, max_length=64)
+
+
+class FollowingOut(BaseModel):
+    companies: list[FollowedCompany]
+    limit: int
+    settings: FollowSettingsOut
+
+
+class FollowByNameIn(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+
+
+class FollowByNameOut(BaseModel):
+    status: str                       # following | searching
+    follow: FollowedCompany | None = None
+    task_id: str | None = None
+
+
+class NewRole(BaseModel):
+    id: str
+    job_id: str
+    title: str
+    location: str
+    remote: bool
+    url: str
+    company_id: str
+    company: str
+    platform: str
+    posted_at: datetime | None = None
+    found_at: datetime
+    seen: bool
+
+
+class NewRolesOut(BaseModel):
+    roles: list[NewRole]
+
+
+class SeenIn(BaseModel):
+    company_id: str | None = None
+
+
+class SuggestedCompany(BaseModel):
+    company_id: str
+    name: str
+    platform: str
+    platform_name: str
+    open_matching: int
+    reason: str
+
+
+class SuggestionsOut(BaseModel):
+    companies: list[SuggestedCompany]

@@ -17,13 +17,18 @@ ATS Discovery (CLAUDE.md 7.6, P6):
   - AtsProbe: what the company resolver (QA3 §A) found for a company name seen
     in search results — the registry company, or nothing (retried after
     ATS_RESOLVER_RETRY_DAYS).
+  - Target companies (QA4): AtsFollow (a user follows a company, or asked to
+    follow a name we are still looking for), AtsFollowHit (a new matching
+    role at a followed company, until seen / emailed), AtsFollowSettings
+    (alert mode, titles, places per user). `AtsCompany.follower_count`
+    makes followed companies refresh every ATS_FOLLOWED_REFRESH_HOURS.
 """
 from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 
 from app.core.db import Base
 from app.models.user import User  # noqa: F401 — see app/models/application.py for why
@@ -64,6 +69,7 @@ class AtsCompany(Base):
     fail_count = Column(Integer, nullable=False, default=0)
     gone_count = Column(Integer, nullable=False, default=0)
     last_error = Column(String(300), nullable=True)
+    follower_count = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, default=_now, nullable=False)
 
 
@@ -109,3 +115,42 @@ class AtsProbe(Base):
     company_id = Column(String(36), ForeignKey("ats_companies.id", ondelete="SET NULL"), nullable=True)
     via = Column(String(16), nullable=True)               # website | slug (how it was found)
     checked_at = Column(DateTime, default=_now, nullable=False)
+
+
+class AtsFollow(Base):
+    __tablename__ = "ats_follows"
+    __table_args__ = (UniqueConstraint("user_id", "company_id", name="uq_ats_follows_user_company"),)
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    company_id = Column(String(36), ForeignKey("ats_companies.id", ondelete="CASCADE"), nullable=True, index=True)
+    name = Column(String(255), nullable=False)
+    name_norm = Column(String(255), nullable=False, index=True)
+    status = Column(String(16), nullable=False, default="following")   # following | searching | not_found
+    created_at = Column(DateTime, default=_now, nullable=False)
+    last_seen_at = Column(DateTime, default=_now, nullable=False)
+
+
+class AtsFollowHit(Base):
+    __tablename__ = "ats_follow_hits"
+    __table_args__ = (UniqueConstraint("user_id", "ats_job_id", name="uq_ats_follow_hits_user_job"),)
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    company_id = Column(String(36), ForeignKey("ats_companies.id", ondelete="CASCADE"), nullable=False)
+    ats_job_id = Column(String(36), ForeignKey("ats_jobs.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime, default=_now, nullable=False)
+    emailed_at = Column(DateTime, nullable=True)
+    seen_at = Column(DateTime, nullable=True)
+
+
+class AtsFollowSettings(Base):
+    __tablename__ = "ats_follow_settings"
+
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    alert_mode = Column(String(16), nullable=False, default="daily")   # instant | daily | off
+    titles = Column(JSON, nullable=False, default=list)                  # empty = default search profile titles
+    places = Column(JSON, nullable=False, default=list)                  # empty = Profile places + Remote
+    timezone = Column(String(64), nullable=False, default="Asia/Kolkata")
+    last_digest_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=_now, onupdate=_now, nullable=False)

@@ -34,7 +34,7 @@ from app.models.ats_schemas import (
     AtsPlatformUpdate, AtsRegistryStats, AtsSearchResult, AtsTracked,
 )
 from app.providers.ats import platforms
-from app.services import ats_registry, ats_search, audit, entitlements, job_store
+from app.services import ats_registry, ats_search, audit, entitlements, job_store, target_companies
 
 router = APIRouter(tags=["ats"])
 settings = get_settings()
@@ -82,6 +82,9 @@ def search(request: Request, q: str = Query(..., min_length=2, max_length=120),
                                hide_applied=hide_applied, page=page)
     if result["expansion_pending"] and ats_search.topup_lock(f"expand:{q}"):
         ats_expand_title_task.apply_async(args=[q, user.id], queue=settings.default_queue)
+    followed = target_companies.company_followed(db, user.id, [g["company_id"] for g in result["groups"]])
+    for g in result["groups"]:
+        g["followed"] = g["company_id"] in followed
     if page == 1 and result["total_companies"] < settings.ATS_MIN_COMPANIES and ats_search.topup_lock(q):
         result["topup_task_id"] = str(dispatch(ats_topup_task, args=[q, user.id], queue=settings.default_queue,
                                                user_id=user.id).task_id)
@@ -113,7 +116,8 @@ def company_jobs(company_id: str, q: str | None = Query(default=None, max_length
                  user=Depends(get_current_user), db: Session = Depends(get_db)):
     _require_ats(db, user)
     row = _company(db, company_id)
-    return {"company": _company_out(row), "jobs": ats_search.company_jobs(db, user.id, row, q)}
+    return {"company": _company_out(row), "jobs": ats_search.company_jobs(db, user.id, row, q),
+            "followed": bool(target_companies.company_followed(db, user.id, [row.id]))}
 
 
 def _ats_job(db: Session, job_id: str) -> tuple[AtsJob, AtsCompany]:

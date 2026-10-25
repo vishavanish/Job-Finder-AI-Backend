@@ -36,7 +36,7 @@ from app.services import browser_apply, company_ats_sources, job_sources, scorer
 # --- add near the top, alongside existing imports ---
 from celery import group, chord
 from app.services import job_store, pipeline_progress, search_profiles, secret_refs
-from app.services.job_dedupe import job_key
+from app.services.job_dedupe import job_key, normalize_company
 from app.core.db import SessionLocal
 from app.services import provider_catalog
 from app.services.scorer import keyword_score
@@ -349,6 +349,8 @@ def _remember(db, run_id: str, job_id: str, score_params: dict, state: str, kw: 
 def _feed_entry(ctx: dict, job: dict, score_params: dict) -> dict:
     entry = {**job, **job_store.freshness(ctx["canonical"], score_params.get("previous_search_at"))}
     entry["auto_apply_capable"] = entry.get("source") in AUTO_APPLY_CAPABLE_SOURCES
+    # QA4: a ★ on jobs from companies the user follows.
+    entry["followed"] = normalize_company(entry.get("company") or "") in (score_params.get("followed_companies") or ())
     return entry
 
 
@@ -498,6 +500,10 @@ def search_and_score_keyword(
 
     db = SessionLocal()
     try:
+        if score_params.get("user_id"):
+            from app.services import target_companies
+            score_params = {**score_params,
+                            "followed_companies": target_companies.followed_names(db, score_params["user_id"])}
         timings: dict[str, float] = {}
         topup = _start_ats_topup(db, keyword, sources, search_params, locations, progress_cb)
         raw_jobs = _scrape(db, search_params, keywords=[keyword], locations=locations, sources=sources,
@@ -833,14 +839,46 @@ def resolve_ats_companies_task(jobs: list[dict]) -> dict:
     return ats_resolver.resolve(SessionLocal, jobs)
 
 
-@celery_app.task(name="job_finder.purge_ats_jobs")
-def purge_ats_jobs_task() -> dict:
-    """Deletes ATS index jobs closed more than ATS_CLOSED_RETENTION_DAYS ago (P6)."""
-    from app.services import ats_crawler
+@celery_app.task(name="job_finder.ats_follow_match")
+def ats_follow_match_task(company_id: str, job_ids: list[str]) -> dict:
+    """New jobs at a followed company -> new-role hits for its followers (QA4)."""
+    from app.services import target_companies
 
     db = SessionLocal()
     try:
-        return {"deleted": ats_crawler.purge_closed(db)}
+        return {"hits": target_companies.match_new_jobs(db, company_id, job_ids)}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="job_finder.ats_follow_digest")
+def ats_follow_digest_task() -> dict:
+    """Beat (QA4): emails new roles at followed companies (instant at most hourly, or daily)."""
+    from app.services import target_companies
+
+    db = SessionLocal()
+    try:
+        return target_companies.digest(db)
+    finally:
+        db.close()
+
+
+@celery_app.task(name="job_finder.ats_follow_lookup")
+def ats_follow_lookup_task(follow_id: str) -> dict:
+    """Finds the career page for a company someone asked to follow by name (QA4)."""
+    from app.services import target_companies
+
+    return target_companies.lookup_name(SessionLocal, follow_id)
+
+
+@celery_app.task(name="job_finder.purge_ats_jobs")
+def purge_ats_jobs_task() -> dict:
+    """Deletes ATS index jobs closed more than ATS_CLOSED_RETENTION_DAYS ago (P6)."""
+    from app.services import ats_crawler, target_companies
+
+    db = SessionLocal()
+    try:
+        return {"deleted": ats_crawler.purge_closed(db), "hits_deleted": target_companies.purge(db)}
     finally:
         db.close()
 

@@ -140,6 +140,13 @@ class Settings(BaseSettings):
     ATS_RESOLVER_MAX_NAMES: int = 20            # new names looked up per keyword search
     ATS_RESOLVER_SECONDS: int = 60
     ATS_RESOLVER_RETRY_DAYS: int = 30           # a name with no career page found is tried again after this
+    # Target companies (QA4): follow companies, get told when they post a matching role.
+    ATS_FOLLOWED_REFRESH_HOURS: int = 3         # companies someone follows are checked this often
+    TARGET_COMPANIES_MAX_PER_USER: int = 50
+    ATS_FOLLOW_DIGEST_TICK_SECONDS: int = 900
+    ATS_FOLLOW_HIT_RETENTION_DAYS: int = 30
+    ATS_FOLLOW_DIGEST_HOUR: int = 9             # local hour of the daily email
+    RATE_LIMIT_ATS_FOLLOW: str = "60/hour"
     ATS_GONE_AFTER: int = 3                     # 404s in a row before a company is switched off
     RATE_LIMIT_ATS_SEARCH: str = "30/minute"
     RATE_LIMIT_ATS_ADD_COMPANY: str = "10/hour"

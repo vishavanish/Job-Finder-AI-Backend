@@ -103,9 +103,10 @@ def _is_board(url: str) -> bool:
     return any(b in host for b in BOARD_HOSTS)
 
 
-def candidates(db: Session, jobs: list[dict], limit: int) -> list[dict]:
+def candidates(db: Session, jobs: list[dict], limit: int, *, force: bool = False) -> list[dict]:
     """Names (with any company website / own apply page) from search results that are not in the registry
-    and were not tried recently. Each: {name, name_norm, urls}."""
+    and were not tried recently (`force`: a name someone asked to follow — always looked up). Each:
+    {name, name_norm, urls}."""
     cfg = get_settings()
     by_norm: dict[str, dict] = {}
     for job in jobs:
@@ -120,6 +121,8 @@ def candidates(db: Session, jobs: list[dict], limit: int) -> list[dict]:
                 item["urls"].append(url)
     if not by_norm:
         return []
+    if force:
+        return list(by_norm.values())[:limit]
     norms = list(by_norm)
     retry_before = _now() - timedelta(days=cfg.ATS_RESOLVER_RETRY_DAYS)
     tried = {n for (n, company_id, checked) in db.query(AtsProbe.name_norm, AtsProbe.company_id, AtsProbe.checked_at)
@@ -250,21 +253,22 @@ def resolve_one(item: dict, enabled: set[str]) -> tuple[AtsRef | None, str | Non
     return None, None, None, complete
 
 
-def resolve(session_factory: Callable[[], Session], jobs: list[dict], *,
+def resolve(session_factory: Callable[[], Session], jobs: list[dict], *, force: bool = False,
             progress: Callable[[str], None] = lambda m: None) -> dict:
-    """Resolves up to ATS_RESOLVER_MAX_NAMES new company names from `jobs` within ATS_RESOLVER_SECONDS."""
+    """Resolves up to ATS_RESOLVER_MAX_NAMES new company names from `jobs` within ATS_RESOLVER_SECONDS.
+    A company found also picks up follows waiting on that name (QA4)."""
     cfg = get_settings()
     counts = {"checked": 0, "found": 0, "added": 0, "none": 0, "skipped": 0}
     if not cfg.ATS_RESOLVER_ENABLED:
         return counts
     db = session_factory()
     try:
-        items = candidates(db, jobs, cfg.ATS_RESOLVER_MAX_NAMES)
+        items = candidates(db, jobs, cfg.ATS_RESOLVER_MAX_NAMES, force=force)
         enabled = ats_registry.enabled_platforms(db)
     finally:
         db.close()
     r = get_redis()
-    items = [i for i in items if r.set(f"ats:resolving:{i['name_norm']}", "1", nx=True, ex=600)]
+    items = [i for i in items if force or r.set(f"ats:resolving:{i['name_norm']}", "1", nx=True, ex=600)]
     if not items:
         return counts
     progress(f"looking up career pages for {len(items)} companies")
@@ -298,6 +302,9 @@ def resolve(session_factory: Callable[[], Session], jobs: list[dict], *,
             row.company_id, row.via, row.checked_at = company_id, via, _now()
             s.merge(row)
             s.commit()
+            if ref is not None:
+                from app.services import target_companies
+                target_companies.attach_found(s, item["name_norm"], s.get(AtsCompany, company_id))
         except Exception:  # noqa: BLE001
             s.rollback()
             logger.exception("ats resolver could not store %r", item["name"])

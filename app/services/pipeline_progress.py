@@ -181,6 +181,7 @@ def record_scored_job(*, run_id: str, job: dict, replaces: bool = False) -> dict
         "new_since_last_search": job.get("new_since_last_search"),
         "applicants": job.get("applicants"),
         "scoring": bool(job.get("scoring")),
+        "followed": bool(job.get("followed")),  # QA4: a company the user follows
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     if replaces:
