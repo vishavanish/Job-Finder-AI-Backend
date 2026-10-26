@@ -24,7 +24,7 @@ from app.models.schemas import (
     AdminUserCreate, AdminUserList, AdminUserUpdate, AuditEntryOut, AuditList, EntitlementOut,
     EntitlementUpdate, FlagUpdate, UserOut,
 )
-from app.services import audit, entitlements, feature_flags, user_admin
+from app.services import apply_blocks, audit, entitlements, feature_flags, user_admin
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 logger = logging.getLogger("job_finder_api.admin")
@@ -197,8 +197,23 @@ def set_flag(key: str, req: FlagUpdate, request: Request, actor=Depends(admin_on
 @router.get("/system/health")
 def system_health(_admin=Depends(require_role("admin"))):
     """Every health check with its detail: database, Redis queues, AI setup,
-    alerts scheduler. The public GET /health returns only the overall status."""
-    return run_health_check()
+    alerts scheduler. The public GET /health returns only the overall status.
+    `apply_blocked` lists platforms whose Auto apply is paused because they
+    block the server's browser (QA5); it does not change the status."""
+    return {**run_health_check(), "apply_blocked": apply_blocks.active()}
+
+
+@router.delete("/apply/blocks/{platform}")
+def clear_apply_block(platform: str, request: Request, actor=Depends(admin_only), db: Session = Depends(get_db)):
+    """Ends an Auto apply pause on a platform now (e.g. after the site lifted the block)."""
+    removed = apply_blocks.clear(platform)
+    if removed is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "not_paused",
+                                                               "message": "Auto apply isn't paused on that platform."})
+    audit.record(db, actor_id=actor.id, action="apply.block_clear", target_type="apply_platform",
+                 target_id=platform, before=removed, after=None, request=request)
+    db.commit()
+    return {"apply_blocked": apply_blocks.active()}
 
 
 @router.get("/audit", response_model=AuditList)

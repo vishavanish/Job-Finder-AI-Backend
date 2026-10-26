@@ -256,6 +256,8 @@ class Settings(BaseSettings):
     APPLY_HEADLESS: bool = True              # auto runs; Fast apply always opens a visible browser
     APPLY_PAGE_TIMEOUT_SECONDS: int = 45
     RATE_LIMIT_APPLY_RUNS: str = "30/hour"
+    APPLY_BLOCK_PAUSE_HOURS: int = 24        # QA5: a platform that blocks the server's browser pauses Auto apply
+    APPLY_BLOCK_MAX_PAUSE_HOURS: int = 168   # repeat blocks within a week double the pause up to this
     # ---- generic AI apply (P4c) ----
     GENERIC_APPLY_SUBMIT: bool = False       # test mode (prepare + review only) until the owner turns it on
     APPLY_GENERIC_DAILY_CAP: int = 5         # AI form reader submits per user per day (inside APPLY_DAILY_CAP)

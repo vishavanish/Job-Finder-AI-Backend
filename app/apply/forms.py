@@ -129,6 +129,13 @@ _HUMAN_CHECKBOX_SELECTORS = (
 )
 _HUMAN_CHECK_TEXT = re.compile(r"verify (that )?you are (a )?human|are you a robot|complete the captcha|"
                                r"press (and|&) hold", re.I)
+# A site refusing the server itself (QA5): nothing on the page to solve, so it is never worked around.
+_BLOCK_TEXT = re.compile(
+    r"access (is )?(temporarily )?restricted|unusual (activity|traffic) from your (device|network|computer)|"
+    r"automated \(?bot\)? activity|(sorry, )?you have been blocked|request (was |has been )?blocked|"
+    r"access denied.{0,300}reference ?#|attention required.{0,300}cloudflare", re.I | re.S)
+_BLOCK_STATUS = {403, 429}
+_BLOCK_PAGE_MAX_CHARS = 3000  # block pages are short; a long job post that mentions "blocked" is not one
 SUCCESS_TEXT = re.compile(
     r"thank(s| you) for (applying|your application|your interest)|application (has been |was )?(submitted|received)|"
     r"we('ve| have) received your application|your application (has been|was) (sent|submitted|received)|"
@@ -223,6 +230,24 @@ def challenge_visible(page) -> bool:
         return bool(_HUMAN_CHECK_TEXT.search(page.inner_text("body", timeout=2000)))
     except Exception:  # noqa: BLE001
         return False
+
+
+def blocked(page, status: int | None = None) -> str | None:
+    """Why the site refused the browser (a bot / access block page), or None. `status` is the main
+    document's HTTP status when the caller has it."""
+    if status in _BLOCK_STATUS:
+        return f"The site answered HTTP {status}."
+    try:
+        text = page.inner_text("body", timeout=2000)
+    except Exception:  # noqa: BLE001
+        return None
+    if len(text) > _BLOCK_PAGE_MAX_CHARS:
+        return None
+    m = _BLOCK_TEXT.search(text)
+    if m is None:
+        return None
+    said = " ".join(m.group(0).split())[:80]
+    return f'The page says "{said}".'
 
 
 def _match(fields: list[dict], key: str) -> dict | None:

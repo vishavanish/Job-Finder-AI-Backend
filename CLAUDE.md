@@ -567,6 +567,23 @@ Plan: `docs/plans/P4c-generic-ai-apply.md` (owner approved all eight defaults 20
 - New env (all optional): `GENERIC_APPLY_SUBMIT` (false — turn on after ~2 weeks of test-mode runs), `APPLY_GENERIC_DAILY_CAP` (5), `GENERIC_APPLY_STEP_LIMIT` (5), `GENERIC_APPLY_VISION_MAX_STEPS` (12), `GENERIC_APPLY_VISION_MAX_USD` (0.25).
 - The cost cap counts only what the usage ledger prices: set the paid Gemini row's cost per 1k tokens in Admin → AI models, or only the step cap limits the screenshot fallback. Admins can add `form_vision` to any other image-reading model (Claude, an OpenRouter vision model).
 
+### 6.19 QA5 — sites that block the server's apply browser (branch `dev`)
+
+Plan: `docs/plans/QA5-apply-blocked-sites.md` (owner approved the four recommended defaults 2026-10-26). Found live: SmartRecruiters showed the server's browser "Access is temporarily restricted … automated (bot) activity" and the run said "No application form was found".
+
+| Item | State |
+|------|-------|
+| Detect | ✅ `forms.blocked(page, status)`: main document 403/429, or a short page (≤ 3,000 chars) with block-page wording (access restricted, unusual activity from your network, automated (bot) activity, you have been blocked, Akamai "Access denied … Reference #", Cloudflare "Attention required"). Checked when a page opens (`Adapter.open`, `GenericAdapter._page_checks` — also after the Apply click) and when a page has no form (`Adapter.read_form`). Raises `adapters.Blocked` (a `HardStop`). Never worked around. |
+| Run | ✅ `apply_engine._blocked_stop`: `needs_user` with "SmartRecruiters blocked the app's browser — it treats our server as a bot. Apply on the job page in your own browser. Auto apply on SmartRecruiters is paused for 24 h.", stop screenshot, `apply_runs.error` = `Blocked: …`. |
+| Pause | ✅ `services/apply_blocks.py`: Redis hash `apply_blocked` per platform (Greenhouse / Lever by adapter; AI-form-reader sites by host via `sites.GENERIC_HOSTS`, else the job's ATS source, else the site), **server-wide** (the block is on the server IP). `APPLY_BLOCK_PAUSE_HOURS` (24), doubled for a new block within a week, capped at `APPLY_BLOCK_MAX_PAUSE_HOURS` (168). While paused, `apply_options.auto` is unavailable with the reason and `create_run` returns `409 platform_blocked`. A page that opens cleanly after the pause forgets the old block. |
+| Admin | ✅ `GET /admin/system/health` → `apply_blocked` (doesn't change `status`); `DELETE /admin/apply/blocks/{platform}` (audited `apply.block_clear`). Frontend: "Auto apply paused on" list with Clear on Admin → Feature defaults (shown only while something is paused). |
+| Review screen | ✅ "your answers are below to copy" / "Copy all answers" only when the run has answers. |
+| Tests | ✅ `tests/test_apply_blocks.py` (real Chromium on `tests/fixtures/apply/blocked_*.html`: Apply button → block page, Lever block, a long job post using the words is not a block; doubling/cap/expiry, options + 409, admin clear + audit). |
+
+**Operational changes introduced in QA5**
+- No migration. New env (optional): `APPLY_BLOCK_PAUSE_HOURS` (24), `APPLY_BLOCK_MAX_PAUSE_HOURS` (168).
+- Server note: the OCI VM is Oracle Linux 9 (aarch64) — `playwright install --with-deps` fails there (no apt); install Chromium's libraries with `dnf` and run `python -m playwright install chromium` as the worker's user.
+
 ---
 
 ## 7. Modules in detail

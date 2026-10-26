@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from app.apply import forms, vision
-from app.apply.adapters import Adapter, HardStop
+from app.apply.adapters import Adapter, Blocked, HardStop
 from app.apply.sites import GENERIC_HOSTS, host_of, site_of
 
 _SUBMIT = re.compile(r"^(submit|send|complete|finish)( (my|your|the))?( job)?( application)?( now)?$|"
@@ -150,8 +150,11 @@ class GenericAdapter(Adapter):
         if site_of(host_of(url)) not in self.sites:
             raise HardStop(f"The form sent the browser to another website ({host_of(url)}).")
 
-    def _page_checks(self, page) -> None:
+    def _page_checks(self, page, status: int | None = None) -> None:
         self.check_site(page)
+        block = forms.blocked(page, status)
+        if block:
+            raise Blocked(block)
         if forms.login_wall(page):
             raise HardStop("The application page asks you to sign in or create an account.")
         if forms.challenge_visible(page):
@@ -161,9 +164,9 @@ class GenericAdapter(Adapter):
         host = host_of(url)
         if host:
             self.sites.add(site_of(host))
-        page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+        response = page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
         page.wait_for_timeout(1500)
-        self._page_checks(page)
+        self._page_checks(page, getattr(response, "status", None))
         if forms.extract(page, self.container(page)):
             return
         # A job page with an Apply button in front of the form.

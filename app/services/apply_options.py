@@ -27,6 +27,7 @@ from urllib.parse import urlparse
 
 from app.apply.sites import GENERIC_SOURCES, generic_host
 from app.core.config import get_settings
+from app.services import apply_blocks
 
 _EMAIL = re.compile(r"(?<![\w.+-])([A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,24})(?![\w-])")
 # Addresses that never take applications.
@@ -105,8 +106,10 @@ def options(job: dict) -> dict:
 
     if adapter in ("greenhouse", "lever", "generic"):
         # Level, risk notice, the AI form reader opt-in, caps and duplicates are checked when the run starts
-        # (apply_engine.create_run).
-        auto = _opt(True)
+        # (apply_engine.create_run). A platform that blocks the server's browser is paused for everyone (QA5).
+        block = apply_blocks.paused(apply_blocks.platform_of(
+            adapter, job.get("apply_url") or job.get("url"), job.get("source"))[0])
+        auto = _opt(False, apply_blocks.reason(block)) if block else _opt(True)
     elif adapter == "linkedin":
         auto = _opt(False, "LinkedIn jobs are never submitted automatically — use Fast apply.")
     else:

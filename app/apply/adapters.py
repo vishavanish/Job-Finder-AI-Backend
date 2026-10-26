@@ -34,6 +34,11 @@ class HardStop(Exception):
         self.reason = reason
 
 
+class Blocked(HardStop):
+    """The site refused the server's browser (bot / access block, QA5). The engine names the platform and
+    pauses Auto apply on it; the block is never worked around."""
+
+
 class Adapter:
     name = ""
     can_submit = True
@@ -42,8 +47,11 @@ class Adapter:
     submit_selector = 'button[type="submit"], input[type="submit"]'
 
     def open(self, page, url: str, timeout_ms: int) -> None:
-        page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+        response = page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
         page.wait_for_timeout(1500)
+        block = forms.blocked(page, getattr(response, "status", None))
+        if block:
+            raise Blocked(block)
         if forms.login_wall(page):
             raise HardStop("The application page asks you to sign in.")
         if forms.challenge_visible(page):
@@ -64,7 +72,12 @@ class Adapter:
 
     # The engine only calls these (tests swap the adapter, not the browser).
     def read_form(self, page) -> list[dict]:
-        return forms.extract(page, self.container(page))
+        fields = forms.extract(page, self.container(page))
+        if not fields:
+            block = forms.blocked(page)  # e.g. an Apply button that led to a block page
+            if block:
+                raise Blocked(block)
+        return fields
 
     def needs_human(self, page) -> str | None:
         """Why this form can't be submitted for the user, read before anything is filled."""
