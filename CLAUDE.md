@@ -191,7 +191,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Shared Redis | `core/redis_client.py` | One client per process (`get_redis()`); tests swap in fakeredis. |
 | Frontend | separate repo `Job-Finder-AI-Frontend` | React 18 + Vite + react-router, plain JS (no TypeScript), axios client with hardcoded `API_URL`. Pages: Home, Keywords, Skills, ATS Targets, Providers, Applications, Profile, Login. Deployed on Vercel. |
 
-**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts, `0008`–`0009` apply center, `0010` tracker & Gmail, `0011` ATS discovery, `0012`–`0013` voice, `0014` Gemini 2.5 Flash → 3.8 Flash, `0015` prep-pack error detail, `0016` ATS resolver probes, `0017` target companies); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
+**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts, `0008`–`0009` apply center, `0010` tracker & Gmail, `0011` ATS discovery, `0012`–`0013` voice, `0014` Gemini 2.5 Flash → 3.8 Flash, `0015` prep-pack error detail, `0016` ATS resolver probes, `0017` target companies, `0018` generic AI apply); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
 
 **CI:** `.github/workflows/tests.yml` runs the tests on every push and pull request (no secrets needed).
 
@@ -547,6 +547,26 @@ Plan: `docs/plans/QA4-target-companies.md` (owner approved the recommended defau
 - Migration `0017` (run `alembic upgrade head`). Beat runs `ats_follow_digest`; emails use the OTP/alert email settings.
 - New env (all optional): `ATS_FOLLOWED_REFRESH_HOURS` (3), `TARGET_COMPANIES_MAX_PER_USER` (50), `ATS_FOLLOW_DIGEST_TICK_SECONDS` (900), `ATS_FOLLOW_HIT_RETENTION_DAYS` (30), `ATS_FOLLOW_DIGEST_HOUR` (9), `RATE_LIMIT_ATS_FOLLOW` (60/hour).
 
+### 6.18 P4c — Generic AI apply: the AI form reader (branch `dev`)
+
+Plan: `docs/plans/P4c-generic-ai-apply.md` (owner approved all eight defaults 2026-10-26; the owner's Gemini key is now paid, so Gemini — priority 10 — is tried first and the other models stay as fallbacks).
+
+| Item | State |
+|------|-------|
+| Sites | ✅ `app/apply/sites.py`: hosted forms on Ashby, SmartRecruiters, Workable, Recruitee, Personio, Breezy, Teamtailor, Rippling, Gem, Jobvite, JazzHR (applytojob.com), Pinpoint → adapter **`generic`** (`apply_options.detect_adapter`); a company-ATS job whose source is one of those platforms (custom careers host) too. Workday / iCIMS stay out (they need an account). `apply_options.auto` is available for them; the engine checks the opt-in on click. |
+| Tier 1 — text | ✅ `app/apply/generic.py` `GenericAdapter` (`multi_step`): `forms.extract` on the `<form>` with the most controls (a footer newsletter box never wins); Apply / Next / Submit buttons by their text; router task **`form_map`** (text, JSON, `valid_map`) only when that is ambiguous. Sign-in / account pages, captchas and **any other website** (site lock: the apply URL's domain + the hosts above) → `needs_user`. |
+| Pages | ✅ `apply_engine._prepare_steps`: each page is answered (`answer_bank` as before; answers from an earlier pass kept), screenshotted (`apply_proofs.kind = "step"`), filled and left with Next, up to `GENERIC_APPLY_STEP_LIMIT`; the walk stops before the final Submit. A required question nobody can answer → `awaiting_input` with `plan.complete = false`; answering it moves the run to `queued` and `POST /apply/runs/{id}/answer` queues prepare again. `_submit_steps` replays the pages (new required question → `needs_user`) and submits the last one; the outcome rules are P4b's. |
+| Tier 2 — screenshots | ✅ `app/apply/vision.py`, only when tier 1 is stuck (a field it couldn't fill, a page with no button it knows, Next that didn't move): numbered marks on the page (incl. pointer-cursor divs used as options) → router task **`form_vision`** (one screenshot per call) → ONE action: `click` (never a button that sends the application), `fill(key)` / `choose(key)` (stored answers only — the model never writes text; `choose` must match the answer and is never a text box), `upload(key)`, `scroll`, `done`, `give_up`; `point(role)` only when asked which button is Next/Submit. Only this gap's answers go in the prompt; EEO answers and file paths never do. Limits per run: `GENERIC_APPLY_VISION_MAX_STEPS` and `GENERIC_APPLY_VISION_MAX_USD` (usage ledger). Usage + action log (no values) in `apply_runs.plan.vision`, shown as `vision` on the run. |
+| Router | ✅ `ai_router.LISTED_ONLY_TASKS` = speech tasks + `form_vision`: served only by rows that list it; a row listing only `form_vision` still serves every text task. Migration `0018` adds it to the Gemini rows and OpenAI GPT-5 mini; the OpenRouter `gpt-oss-120b:free` row is text only. |
+| Gates | ✅ `apply_settings.allow_generic` (default off; `PUT /apply/settings {allow_generic}`; turning it off cancels its runs), `generic_notice` in the settings; level 2 + risk notice as before; `APPLY_GENERIC_DAILY_CAP` (5, inside `APPLY_DAILY_CAP`); never level 3. **Test mode:** with `GENERIC_APPLY_SUBMIT=false` (default) runs stop at `awaiting_review` saying so, approve returns 409 `generic_test_mode`, and submit refuses. |
+| Tests | ✅ 11 in `tests/test_generic_apply.py` — real Chromium on `tests/fixtures/apply/generic_*.html` (one page with newsletter box + hidden instructions, three pages behind an Apply button with a question half-way, a custom country picker fixed by the screenshot fallback after `form_map` picked the Submit button, a sign-in page) + the fallback's refusals, step/cost limits and site lock. `forms.extract` now clears old marks and skips file inputs in hidden sections (both needed for multi-page forms). |
+| Not in P4c | Frontend (F4.1: "AI form reader · beta" badge, settings toggle with the notice, page gallery on the run); live checks on real Ashby/SmartRecruiters/Workable forms (read-only, like P4b's); the P8 local agent reusing the reader for sign-in sites. |
+
+**Operational changes introduced in P4c**
+- Migration `0018` (run `alembic upgrade head`).
+- New env (all optional): `GENERIC_APPLY_SUBMIT` (false — turn on after ~2 weeks of test-mode runs), `APPLY_GENERIC_DAILY_CAP` (5), `GENERIC_APPLY_STEP_LIMIT` (5), `GENERIC_APPLY_VISION_MAX_STEPS` (12), `GENERIC_APPLY_VISION_MAX_USD` (0.25).
+- The cost cap counts only what the usage ledger prices: set the paid Gemini row's cost per 1k tokens in Admin → AI models, or only the step cap limits the screenshot fallback. Admins can add `form_vision` to any other image-reading model (Claude, an OpenRouter vision model).
+
 ---
 
 ## 7. Modules in detail
@@ -688,7 +708,7 @@ ApplyRequest ──► Preflight ──► Prepare ──► Fill ──► (Rev
 6. **Verify:** detect the confirmation page/message; capture an encrypted screenshot as proof (retention-limited).
 7. **Record:** `record_status()` for every step, with `status_source = apply_engine`.
 
-**Adapter interface** (`app/apply/adapters/`): `can_handle(job)`, `extract_form(page)`, `fill(page, plan)`, `submit(page)`, `detect_outcome(page)`. Existing `AUTO_APPLY_CAPABLE_SOURCES` and `_FILL_DISPATCH` become the adapter registry. Planned adapters: LinkedIn Easy Apply (exists, extend), Greenhouse, Lever, Workday, SmartRecruiters, Recruitee, then a **generic AI form-filler** for unknown career pages (lowest trust level, never full auto).
+**Adapter interface** (`app/apply/adapters/`): `can_handle(job)`, `extract_form(page)`, `fill(page, plan)`, `submit(page)`, `detect_outcome(page)`. Existing `AUTO_APPLY_CAPABLE_SOURCES` and `_FILL_DISPATCH` become the adapter registry. Planned adapters: LinkedIn Easy Apply (exists, extend), Greenhouse, Lever, Workday, SmartRecruiters, Recruitee, then a **generic AI form-filler** for unknown career pages (lowest trust level, never full auto) — built in P4c as the AI form reader (Section 6.18).
 
 **Hard stops that always hand control to the user:** captcha, login wall, OTP/2FA, unusual question types, file formats not supported, any adapter error. Never try to bypass captcha or bot detection.
 
@@ -972,7 +992,7 @@ All tables have `id`, `created_at`, `updated_at`. User-owned tables have `user_i
 | `application_events` | application_id, status, status_source, note, payload, occurred_at |
 | `apply_runs` | user_id, job_id, job_key, company_title, mode (auto/fast), level, adapter, apply_url, state, active_key (unique while active), plan (fields + answers, EEO sealed), resume/pack/application ids, message, approved/submitted_at (P4b) |
 | `apply_proofs` | run_id, kind (confirmation/stopped), confirmation_text, page_url, encrypted PNG; 90-day retention (P4b) |
-| `apply_settings` | user_id, level, risk_accepted_at, hours_start/end, timezone, paused (P4b) |
+| `apply_settings` | user_id, level, risk_accepted_at, hours_start/end, timezone, paused (P4b), allow_generic (P4c) |
 | `answer_bank` | user_id, question_hash, question, answer, field_type, approved, origin (user/ai), uses |
 | `apply_packs` | user_id, job_id, master_resume_id + master_hash, status, tailored_resume_id, cover_letter, email draft, dropped (P4a) |
 | `email_accounts` | user_id, gmail_address, token_sealed, scopes, status (active/needs_reconnect), last_history_id, next_sync_at, failures (P5) |

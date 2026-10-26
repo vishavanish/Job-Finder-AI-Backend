@@ -30,7 +30,10 @@ _EXTRACT_JS = r"""
   const root = document.querySelector(container) || document;
   const clean = (t) => (t || '').replace(/\s+/g, ' ').trim();
   const visible = (el) => {
-    if (el.type === 'file') return true;  // file inputs are often hidden behind a styled button
+    if (el.type === 'file') {  // often hidden behind a styled button; not when its whole section is hidden
+      const p = el.parentElement ? el.parentElement.getBoundingClientRect() : null;
+      return !p || p.width > 0 || p.height > 0;
+    }
     const s = window.getComputedStyle(el);
     if (s.display === 'none' || s.visibility === 'hidden') return false;
     const r = el.getBoundingClientRect();
@@ -75,6 +78,8 @@ _EXTRACT_JS = r"""
   const requiredOf = (el, label) => !!(el.required || el.getAttribute('aria-required') === 'true'
       || /[*✱](\s|$)|\(required\)/i.test(label)
       || (el.closest('.required, [data-required="true"], [aria-required="true"]') !== null));
+  // Marks from an earlier read (a previous page of a multi-page form) would make two controls share one mark.
+  document.querySelectorAll('[data-jf]').forEach(e => e.removeAttribute('data-jf'));
   const out = [];
   const groups = {};
   let n = 0;

@@ -10,8 +10,11 @@ the feed, GET /jobs and the apply routes all give the same answer.
           link): fill the form, the user submits. Needs a browser on the
           user's own PC, so it is off in production until the local agent
           (P8) exists.
-  auto    Greenhouse / Lever pages: the level-2 engine (P4b). The engine's
-          own checks (level, risk notice, caps, duplicates) run on click.
+  auto    Greenhouse / Lever pages: the level-2 engine (P4b). Other hosted
+          career forms (Ashby, SmartRecruiters, Workable, ...): the AI form
+          reader (adapter "generic", P4c), which the user turns on in Apply
+          settings. The engine's own checks (level, risk notice, opt-in,
+          caps, duplicates) run on click.
   email   the job post itself gives an address to apply to.
 
 The adapter is detected from `apply_url` (the company's own page behind a
@@ -22,6 +25,7 @@ from __future__ import annotations
 import re
 from urllib.parse import urlparse
 
+from app.apply.sites import GENERIC_SOURCES, generic_host
 from app.core.config import get_settings
 
 _EMAIL = re.compile(r"(?<![\w.+-])([A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,24})(?![\w-])")
@@ -31,7 +35,7 @@ _NOT_FOR_APPLYING = re.compile(r"^(no-?reply|do-?not-?reply|privacy|abuse|unsubs
 _APPLY_HINT = re.compile(r"\b(apply|application|applications|cv|resume|résumé|send|email|e-mail|mail|"
                          r"hiring|careers?|jobs?|recruit\w*|talent|hr)\b", re.I)
 
-ADAPTER_NAMES = {"greenhouse": "Greenhouse", "lever": "Lever", "linkedin": "LinkedIn"}
+ADAPTER_NAMES = {"greenhouse": "Greenhouse", "lever": "Lever", "linkedin": "LinkedIn", "generic": "AI form reader"}
 
 
 def _host(url: str) -> str:
@@ -42,7 +46,7 @@ def _host(url: str) -> str:
 
 
 def detect_adapter(url: str) -> str | None:
-    """greenhouse | lever | linkedin | None for one URL."""
+    """greenhouse | lever | linkedin | generic | None for one URL."""
     host = _host(url)
     if not host:
         return None
@@ -52,6 +56,8 @@ def detect_adapter(url: str) -> str | None:
         return "lever"
     if host == "linkedin.com" or host.endswith(".linkedin.com"):
         return "linkedin"
+    if generic_host(url):
+        return "generic"
     return None
 
 
@@ -61,6 +67,8 @@ def adapter_for(job: dict) -> str | None:
     direct = detect_adapter(job.get("apply_url") or "")
     if direct:
         return direct
+    if job.get("apply_url") and (job.get("source") or "").lower() in GENERIC_SOURCES:
+        return "generic"  # a career page on a custom host of a platform the AI form reader handles
     found = detect_adapter(job.get("url") or "")
     if found == "linkedin" and job.get("apply_url"):
         return None  # LinkedIn posting that applies on an unknown company site
@@ -95,13 +103,14 @@ def options(job: dict) -> dict:
     else:
         fast = _opt(False, "Fast apply works on LinkedIn Easy Apply jobs.")
 
-    if adapter in ("greenhouse", "lever"):
-        # Level, risk notice, caps and duplicates are checked when the run starts (apply_engine.create_run).
+    if adapter in ("greenhouse", "lever", "generic"):
+        # Level, risk notice, the AI form reader opt-in, caps and duplicates are checked when the run starts
+        # (apply_engine.create_run).
         auto = _opt(True)
     elif adapter == "linkedin":
         auto = _opt(False, "LinkedIn jobs are never submitted automatically — use Fast apply.")
     else:
-        auto = _opt(False, "Auto apply works on Greenhouse and Lever job pages only.")
+        auto = _opt(False, "Auto apply works on Greenhouse, Lever and the career sites the AI form reader knows.")
 
     email = find_apply_email(job.get("description") or "")
     return {

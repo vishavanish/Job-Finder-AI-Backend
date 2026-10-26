@@ -256,6 +256,12 @@ class Settings(BaseSettings):
     APPLY_HEADLESS: bool = True              # auto runs; Fast apply always opens a visible browser
     APPLY_PAGE_TIMEOUT_SECONDS: int = 45
     RATE_LIMIT_APPLY_RUNS: str = "30/hour"
+    # ---- generic AI apply (P4c) ----
+    GENERIC_APPLY_SUBMIT: bool = False       # test mode (prepare + review only) until the owner turns it on
+    APPLY_GENERIC_DAILY_CAP: int = 5         # AI form reader submits per user per day (inside APPLY_DAILY_CAP)
+    GENERIC_APPLY_STEP_LIMIT: int = 5        # form pages per application
+    GENERIC_APPLY_VISION_MAX_STEPS: int = 12  # screenshot-fallback actions per run
+    GENERIC_APPLY_VISION_MAX_USD: float = 0.25  # screenshot-fallback AI spend per run (from the usage ledger)
     # ---- app / infra ----
     APP_NAME: str = "Job Finder API"
     APP_PUBLIC_URL: str = ""  # frontend URL, used in emails (e.g. alert digests)

@@ -52,8 +52,11 @@ logger = logging.getLogger("job_finder_api.ai_router")
 # them only when its `tasks` list names them; `tasks == []` means "every text task".
 TASKS = ("score", "resume_parse", "title_suggest", "resume_tailor", "cover_letter", "form_answer",
          "email_classify", "interview_chat", "interview_eval", "copilot_answer", "copilot_expand",
-         "question_gate", "stt", "tts")
+         "question_gate", "form_map", "form_vision", "stt", "tts")
 SPEECH_TASKS = frozenset({"stt", "tts"})
+# Served only by rows that list them: speech, and form_vision (P4c) — it sends a screenshot, which a
+# text-only model (Groq, HF) would reject.
+LISTED_ONLY_TASKS = SPEECH_TASKS | {"form_vision"}
 # Providers that only do speech (no text adapter in app/providers/llm).
 SPEECH_ONLY_PROVIDERS = frozenset({"browser", "deepgram"})
 
@@ -95,13 +98,16 @@ def _now() -> datetime:
 
 
 def serves(model: AiModel, task: str) -> bool:
-    if task in SPEECH_TASKS:
-        return task in (model.tasks or [])
+    listed = model.tasks or []
+    if task in LISTED_ONLY_TASKS:
+        return task in listed
     if model.provider in SPEECH_ONLY_PROVIDERS:
         return False
-    tasks = [t for t in (model.tasks or []) if t not in SPEECH_TASKS]
-    if model.tasks and not tasks:
-        return False  # a speech-only row (e.g. Whisper) never serves text
+    tasks = [t for t in listed if t not in LISTED_ONLY_TASKS]
+    if listed and not tasks:
+        # A speech-only row (e.g. Whisper) never serves text; a row that only adds form_vision still
+        # serves every text task.
+        return not any(t in SPEECH_TASKS for t in listed)
     return not tasks or task in tasks
 
 

@@ -94,11 +94,11 @@ class ApplyRun(Base):
     company_title = Column(String(800), nullable=False)  # normalised "company|title" for the cooldown check
     mode = Column(String(8), nullable=False)              # auto | fast
     level = Column(Integer, nullable=False)
-    adapter = Column(String(16), nullable=False)          # greenhouse | lever | linkedin
+    adapter = Column(String(16), nullable=False)          # greenhouse | lever | linkedin | generic
     apply_url = Column(Text, nullable=False)
     state = Column(String(16), nullable=False, default="queued")
     active_key = Column(String(800), nullable=True)       # "user|job_key" while active, else NULL
-    plan = Column(JSON, nullable=False, default=dict)     # {fields: [...], files: {...}}
+    plan = Column(JSON, nullable=False, default=dict)     # {fields, files} (+ steps, complete, vision for generic)
     resume_id = Column(String(36), ForeignKey("resumes.id", ondelete="SET NULL"), nullable=True)
     pack_id = Column(String(36), ForeignKey("apply_packs.id", ondelete="SET NULL"), nullable=True)
     application_id = Column(String(36), ForeignKey("applications.id", ondelete="SET NULL"), nullable=True)
@@ -118,7 +118,7 @@ class ApplyProof(Base):
     id = Column(String(36), primary_key=True, default=_uuid)
     run_id = Column(String(36), ForeignKey("apply_runs.id", ondelete="CASCADE"), nullable=False, index=True)
     user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    kind = Column(String(16), nullable=False)             # confirmation | stopped
+    kind = Column(String(16), nullable=False)             # confirmation | stopped | step (a generic form page)
     confirmation_text = Column(Text, nullable=True)
     page_url = Column(Text, nullable=True)
     wrapped_key = Column(Text, nullable=False)
@@ -136,4 +136,5 @@ class ApplySettings(Base):
     hours_end = Column(Integer, nullable=False, default=22)
     timezone = Column(String(64), nullable=False, default="Asia/Kolkata")
     paused = Column(Boolean, nullable=False, default=False)  # the user's own kill switch
+    allow_generic = Column(Boolean, nullable=False, default=False)  # opt-in to the AI form reader (P4c)
     updated_at = Column(DateTime, default=_now, onupdate=_now, nullable=False)
