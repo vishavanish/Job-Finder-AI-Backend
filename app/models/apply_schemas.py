@@ -198,7 +198,8 @@ class RunDone(BaseModel):
 
 class ProofOut(BaseModel):
     id: str
-    kind: Literal["confirmation", "stopped"]
+    kind: Literal["confirmation", "stopped", "step"] = Field(
+        ..., description="step = one page of a form the AI form reader read (confirmation_text says which)")
     confirmation_text: Optional[str] = None
     page_url: Optional[str] = None
     created_at: datetime

@@ -210,6 +210,8 @@ def test_three_page_form_with_a_question_half_way(client, make_user, generic_eng
     run = _step("prepare", run_id)  # reads all three pages with the answer kept
     assert run.state == "awaiting_review", run.message
     assert [s["page"] for s in run.plan["steps"]] == [1, 2, 3] and run.plan["complete"]
+    shots = client.get(f"{API}/apply/runs/{run_id}/proofs", headers=headers).json()
+    assert [p["kind"] for p in shots] == ["step"] * 5 and shots[-1]["confirmation_text"] == "Page 3"
     fields = {f["key"]: f for f in client.get(f"{API}/apply/runs/{run_id}", headers=headers).json()["fields"]}
     assert fields["fn"]["value"] == "Jane" and fields["np"]["value"] == "30 days"
     assert fields["gender"]["value"] == "Female" and fields["why"]["source"] == "user"
