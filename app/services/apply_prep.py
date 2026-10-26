@@ -26,6 +26,10 @@ import io
 import json
 import logging
 import re
+import statistics
+import time
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from urllib.parse import quote
 
 from fastapi import HTTPException
@@ -33,6 +37,8 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core.db import SessionLocal
+from app.core.redis_client import get_redis
 from app.models.apply import ApplyPack
 from app.models.jobs import Job
 from app.models.profile import Profile, Resume
@@ -129,7 +135,7 @@ def request_pack(db: Session, *, user_id: str, job: Job, tailor_resume: bool, co
         db.add(pack)
     pack.master_resume_id, pack.master_hash = master.id, mhash
     pack.want_resume, pack.want_cover_letter = tailor_resume, cover_letter
-    pack.status, pack.error = "pending", None
+    pack.status, pack.error, pack.error_detail = "pending", None, None
     db.flush()
     return pack, True
 
@@ -318,7 +324,7 @@ def _signature(parsed: ParsedResume, applicant: dict) -> tuple[str, list[str]]:
     return name.strip(), contact
 
 
-def _run_tailor(db: Session, *, user_id: str, master: Resume, parsed: ParsedResume, job: Job,
+def _run_tailor(db: Session, *, user_id: str, parsed: ParsedResume, job,
                 allowed: grounding.Allowed, ref: str) -> tuple[ParsedResume, list[str], str]:
     holder: dict[str, _TailorReply] = {}
 
@@ -341,7 +347,7 @@ def _run_tailor(db: Session, *, user_id: str, master: Resume, parsed: ParsedResu
     return tailored, dropped, result.engine
 
 
-def _run_cover_letter(db: Session, *, user_id: str, parsed: ParsedResume, job: Job, allowed: grounding.Allowed,
+def _run_cover_letter(db: Session, *, user_id: str, parsed: ParsedResume, job, allowed: grounding.Allowed,
                       ref: str) -> tuple[str, list[str], str]:
     holder: dict[str, tuple[str, list[str]]] = {}
 
@@ -364,8 +370,55 @@ def _run_cover_letter(db: Session, *, user_id: str, parsed: ParsedResume, job: J
     return body, [f"Cover letter: \"{s[:90]}\"" for s in dropped], result.engine
 
 
+# ---------------------------------------------------------------- live steps (QA2 §2)
+
+STEP_PARTS = ("resume", "cover_letter")
+_DURATIONS_KEY = "prep_durations"
+
+
+def _steps_key(pack_id: str) -> str:
+    return f"prep_steps:{pack_id}"
+
+
+def set_step(pack_id: str, part: str, state: str) -> None:
+    """state: waiting | running | done | failed | skipped. Lives an hour in Redis."""
+    r = get_redis()
+    r.hset(_steps_key(pack_id), part, state)
+    r.expire(_steps_key(pack_id), 3600)
+
+
+def steps(pack_id: str) -> dict[str, str]:
+    raw = get_redis().hgetall(_steps_key(pack_id)) or {}
+    return {(k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
+            for k, v in raw.items()}
+
+
+def record_duration(seconds: float) -> None:
+    r = get_redis()
+    r.lpush(_DURATIONS_KEY, round(seconds, 1))
+    r.ltrim(_DURATIONS_KEY, 0, 19)
+
+
+def typical_seconds() -> int | None:
+    """Median time of the last 20 packs that finished, for "usually takes about N s"."""
+    values = [float(v) for v in get_redis().lrange(_DURATIONS_KEY, 0, -1) or []]
+    return int(round(statistics.median(values))) if len(values) >= 3 else None
+
+
+def _in_own_session(fn, **kwargs):
+    """Runs one AI step on its own DB session: the router writes the usage
+    ledger, and one session can't be shared between threads."""
+    db = SessionLocal()
+    try:
+        return fn(db, **kwargs)
+    finally:
+        db.close()
+
+
 def build_pack(db: Session, pack: ApplyPack) -> ApplyPack:
-    """Worker side. Fills `pack`; the caller commits."""
+    """Worker side. Fills `pack`; the caller commits. The tailored resume and
+    the cover letter are written at the same time (QA2 §2)."""
+    started = time.monotonic()
     job = db.get(Job, pack.job_id)
     master = db.get(Resume, pack.master_resume_id)
     if job is None or master is None or not master.parsed:
@@ -380,13 +433,35 @@ def build_pack(db: Session, pack: ApplyPack) -> ApplyPack:
     dropped: list[str] = []
     engines: list[str] = []
     errors: list[str] = []
+    failed_parts: list[str] = []
 
-    if pack.want_resume:
+    # Plain copies: the AI steps run on other threads and must not touch this session's objects.
+    job_view = SimpleNamespace(title=job.title, company=job.company, location=job.location,
+                               description=job.description)
+    set_step(pack.id, "resume", "running" if pack.want_resume else "skipped")
+    set_step(pack.id, "cover_letter", "running" if pack.want_cover_letter else "skipped")
+
+    def step(part: str, fn, **kwargs):
         try:
-            tailored, lost, engine = _run_tailor(db, user_id=pack.user_id, master=master, parsed=parsed, job=job,
-                                                 allowed=resume_facts, ref=pack.id)
+            result = _in_own_session(fn, **kwargs)
+        except ai_router.NoModelAvailable:
+            set_step(pack.id, part, "failed")
+            raise
+        set_step(pack.id, part, "done")
+        return result
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        tailor_job = pool.submit(step, "resume", _run_tailor, user_id=pack.user_id, parsed=parsed,
+                                 job=job_view, allowed=resume_facts, ref=pack.id) if pack.want_resume else None
+        letter_job = pool.submit(step, "cover_letter", _run_cover_letter, user_id=pack.user_id, parsed=parsed,
+                                 job=job_view, allowed=letter_facts, ref=pack.id) if pack.want_cover_letter else None
+
+    if tailor_job is not None:
+        try:
+            tailored, lost, engine = tailor_job.result()
         except ai_router.NoModelAvailable as e:
             errors.append(f"Tailored resume: {e}")
+            failed_parts.append("tailored resume")
         else:
             old = db.get(Resume, pack.tailored_resume_id) if pack.tailored_resume_id else None
             pack.tailored_resume_id = _store_tailored(db, master=master, parsed=tailored, job=job, engine=engine).id
@@ -396,12 +471,12 @@ def build_pack(db: Session, pack: ApplyPack) -> ApplyPack:
             engines.append(engine)
 
     name, contact = _signature(parsed, applicant)
-    if pack.want_cover_letter:
+    if letter_job is not None:
         try:
-            body, lost, engine = _run_cover_letter(db, user_id=pack.user_id, parsed=parsed, job=job,
-                                                   allowed=letter_facts, ref=pack.id)
+            body, lost, engine = letter_job.result()
         except ai_router.NoModelAvailable as e:
             errors.append(f"Cover letter: {e}")
+            failed_parts.append("cover letter")
         else:
             pack.cover_letter = f"Dear Hiring Team,\n\n{body}\n\nBest regards,\n{name}".strip()
             dropped += lost
@@ -423,5 +498,17 @@ def build_pack(db: Session, pack: ApplyPack) -> ApplyPack:
         pack.status = "failed"
     else:
         pack.status = "ready"
-    pack.error = "; ".join(errors)[:1000] or None
+    pack.error = _failure_message(failed_parts)
+    pack.error_detail = "; ".join(errors)[:2000] or None
+    if pack.status == "ready":
+        record_duration(time.monotonic() - started)
     return pack
+
+
+def _failure_message(parts: list[str]) -> str | None:
+    """One short line for people; the per-model detail goes to error_detail."""
+    if not parts:
+        return None
+    what = " and ".join(parts)
+    verb = "weren't" if len(parts) > 1 else "wasn't"
+    return f"The AI models are busy right now, so the {what} {verb} written. Try again in a few minutes."

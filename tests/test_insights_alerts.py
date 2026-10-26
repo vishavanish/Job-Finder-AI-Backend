@@ -111,8 +111,8 @@ def test_pipeline_feed_and_jobs_list_carry_match_and_freshness(client, make_user
            "url": "https://indeed.example/fresh-1", "description": "python fastapi " * 10, "posted": _now_iso(2)}
     monkeypatch.setattr(celery_tasks, "_make_progress_cb", lambda task, name: (lambda msg: None))
     monkeypatch.setattr(celery_tasks.job_sources, "scrape_all", lambda **kw: [dict(job)])
-    monkeypatch.setattr(celery_tasks, "_score_one_job_llm", lambda j, **kw: {
-        **j, "llm_score": 88, "llm_reason": "fit", "llm_seniority": "match", "llm_missing": ["Kafka"]})
+    monkeypatch.setattr(celery_tasks, "_score_batch_llm", celery_tasks.one_by_one(lambda j, **kw: {
+        **j, "llm_score": 88, "llm_reason": "fit", "llm_seniority": "match", "llm_missing": ["Kafka"]}))
     params = {"user_id": user_id, "resume_summary": "x", "skills": ["python", "django"],
               "career_targets": ["Backend Engineer"], "keyword_prefilter_min_pct": 0, "llm_min_score_to_keep": 0,
               "filters": {}, "include_seen": False, "previous_search_at": _now_iso(1)}
@@ -120,7 +120,7 @@ def test_pipeline_feed_and_jobs_list_carry_match_and_freshness(client, make_user
     run_id = pipeline_progress.create_run(user_id=user_id, total_keywords=1)
     celery_tasks.search_and_score_keyword(run_id, "Backend", ["Pune"], ["indeed"], {}, params)
 
-    entry = pipeline_progress.get_jobs(run_id=run_id)[0]
+    entry = pipeline_progress.current_jobs(run_id=run_id)[0]
     assert entry["match"] == {"skills_matched": ["python"], "skills_missing": ["django"], "skills_total": 2,
                               "title_fit": 100, "seniority": "match", "missing_required": ["Kafka"]}
     assert entry["early"] is True and entry["posted_hours_ago"] == 2 and entry["new_since_last_search"] is True
@@ -385,8 +385,8 @@ def test_alert_run_emails_new_matches_once(client, make_user, monkeypatch):
     scores = {jobs[0]["url"]: 92, jobs[1]["url"]: 85, jobs[2]["url"]: 50}
     monkeypatch.setattr(celery_tasks, "_make_progress_cb", lambda task, name: (lambda msg: None))
     monkeypatch.setattr(celery_tasks.job_sources, "scrape_all", lambda **kw: [dict(j) for j in jobs])
-    monkeypatch.setattr(celery_tasks, "_score_one_job_llm",
-                        lambda j, **kw: {**j, "llm_score": scores[j["url"]], "llm_reason": "fit"})
+    monkeypatch.setattr(celery_tasks, "_score_batch_llm", celery_tasks.one_by_one(
+                        lambda j, **kw: {**j, "llm_score": scores[j["url"]], "llm_reason": "fit"}))
     sent = []
 
     class Mailer:
@@ -428,6 +428,107 @@ def test_alert_run_records_why_it_could_not_run(client, make_user, monkeypatch):
     finally:
         db.close()
     assert celery_tasks.run_job_alert(alert_id, "schedule") == {"skipped": "account disabled"}
+
+
+def _alert_run_setup(client, headers, monkeypatch, scorer_fn) -> tuple[str, list]:
+    """An alert over two fake Indeed jobs; returns its id and the list sent digests land in."""
+    pid = _profile(client, headers)
+    monkeypatch.setattr(search_profiles, "resume_context", lambda db, uid: "Backend engineer with Python.")
+    alert_id = client.post(f"{API}/alerts", json={"name": "Daily", "search_profile_id": pid},
+                           headers=headers).json()["id"]
+    tag = alert_id[:8]
+    jobs = [{"source": "Indeed", "title": "Backend Engineer", "company": f"Co {tag} {i}", "location": "Pune",
+             "url": f"https://indeed.example/{tag}-{i}", "description": "python " * 20, "posted": _now_iso(3)}
+            for i in range(2)]
+    monkeypatch.setattr(celery_tasks, "_make_progress_cb", lambda task, name: (lambda msg: None))
+    monkeypatch.setattr(celery_tasks.job_sources, "scrape_all", lambda **kw: [dict(j) for j in jobs])
+    monkeypatch.setattr(celery_tasks, "_score_batch_llm", celery_tasks.one_by_one(scorer_fn))
+    sent = []
+
+    class Mailer:
+        def send(self, *, to, subject, body):
+            sent.append((to, subject, body))
+
+    monkeypatch.setattr("app.providers.email.get_email_sender", lambda: Mailer())
+    return alert_id, sent
+
+
+def test_alert_run_says_when_no_ai_model_could_score(client, make_user, monkeypatch):
+    _, headers = make_user()
+    alert_id, sent = _alert_run_setup(client, headers, monkeypatch, lambda j, **kw: {**j, "llm_failed": True})
+    assert celery_tasks.run_job_alert(alert_id, "manual")["new_jobs"] == 0 and sent == []
+    run = client.get(f"{API}/alerts/{alert_id}/runs", headers=headers).json()["runs"][0]
+    assert run["status"] == "done" and run["counts"]["unscored"] == 2
+    assert "2 jobs couldn't be scored" in run["error"] and "next run" in run["error"]
+
+    # Next run the AI works: the same jobs are scored and sent (they were never marked seen).
+    monkeypatch.setattr(celery_tasks, "_score_batch_llm", celery_tasks.one_by_one(
+                        lambda j, **kw: {**j, "llm_score": 90, "llm_reason": "fit"}))
+    assert celery_tasks.run_job_alert(alert_id, "schedule")["new_jobs"] == 2 and len(sent) == 1
+    assert client.get(f"{API}/alerts/{alert_id}/runs", headers=headers).json()["runs"][0]["error"] is None
+
+
+def _connect_gmail(user_id: str, address: str) -> None:
+    from app.models.email import EmailAccount
+    db = SessionLocal()
+    try:
+        db.add(EmailAccount(user_id=user_id, gmail_address=address, token_sealed="sealed"))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _remove_gmail(user_id: str) -> None:
+    from app.models.email import EmailAccount
+    db = SessionLocal()
+    try:
+        db.query(EmailAccount).filter(EmailAccount.user_id == user_id).delete()
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_alert_digest_goes_to_a_connected_gmail_or_the_sign_in_email(client, make_user, monkeypatch):
+    from app.models.user import User
+    user_id, headers = make_user()
+    db = SessionLocal()
+    try:
+        login = db.get(User, user_id).email.lower()
+    finally:
+        db.close()
+    alert_id, sent = _alert_run_setup(client, headers, monkeypatch,
+                                      lambda j, **kw: {**j, "llm_score": 90, "llm_reason": "fit"})
+    listed = client.get(f"{API}/alerts", headers=headers).json()
+    assert listed["email_options"] == [login] and listed["alerts"][0]["sends_to"] == login
+    pid = listed["alerts"][0]["search_profile_id"]
+    body = {"name": "Daily", "search_profile_id": pid}
+
+    # Only addresses the user proved they own.
+    r = client.put(f"{API}/alerts/{alert_id}", json={**body, "email_to": "someone@else.com"}, headers=headers)
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "alert_email_not_allowed"
+
+    _connect_gmail(user_id, "Me.Jobs@gmail.com")
+    assert client.get(f"{API}/alerts", headers=headers).json()["email_options"] == [login, "me.jobs@gmail.com"]
+    out = client.put(f"{API}/alerts/{alert_id}", json={**body, "email_to": " ME.jobs@gmail.com"},
+                     headers=headers).json()
+    assert out["email_to"] == "me.jobs@gmail.com" and out["sends_to"] == "me.jobs@gmail.com"
+    celery_tasks.run_job_alert(alert_id, "manual")
+    assert [to for to, _, _ in sent] == ["me.jobs@gmail.com"]
+
+    # Choosing the sign-in email stores "follow the sign-in email".
+    out = client.put(f"{API}/alerts/{alert_id}", json={**body, "email_to": login}, headers=headers).json()
+    assert out["email_to"] is None and out["sends_to"] == login
+
+    # Gmail disconnected later: the digest falls back to the sign-in email.
+    client.put(f"{API}/alerts/{alert_id}", json={**body, "email_to": "me.jobs@gmail.com"}, headers=headers)
+    _remove_gmail(user_id)
+    assert client.get(f"{API}/alerts", headers=headers).json()["alerts"][0]["sends_to"] == login
+    db = SessionLocal()
+    try:
+        alert = db.get(JobAlert, alert_id)
+        assert job_alerts.sends_to(alert, job_alerts.email_options(db, db.get(User, user_id))) == login
+    finally:
+        db.close()
 
 
 def test_run_now_dispatches_for_the_owner_only(client, make_user, dispatched):

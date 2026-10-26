@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import random
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -35,11 +36,14 @@ from app.services import browser_apply, company_ats_sources, job_sources, scorer
 # --- add near the top, alongside existing imports ---
 from celery import group, chord
 from app.services import job_store, pipeline_progress, search_profiles, secret_refs
-from app.services.job_dedupe import job_key
+from app.services.job_dedupe import job_key, normalize_company
 from app.core.db import SessionLocal
 from app.services import provider_catalog
 from app.services.scorer import keyword_score
 from app.services.browser_apply import AUTO_APPLY_CAPABLE_SOURCES
+from app.providers.ats.platforms import PLATFORMS as _ATS_PLATFORMS
+
+ATS_SOURCE_NAMES = {p.name for p in _ATS_PLATFORMS.values()}  # index jobs: already in the registry
 logger = logging.getLogger("job_finder_api.tasks")
 
 settings = get_settings()
@@ -110,6 +114,63 @@ def _index_lookup(db, sources: list[str], search_params: dict, locations: list[s
     return lookup
 
 
+def _run_ats_topup(keyword: str) -> dict:
+    """The live career-page top-up for one keyword (seam: tests replace it)."""
+    from app.services import ats_search
+    return ats_search.topup(SessionLocal, keyword)
+
+
+def _start_ats_topup(db, keyword: str, sources: list[str], search_params: dict, locations: list[str],
+                     progress) -> threading.Thread | None:
+    """QA3 §C: when the index has fewer than ATS_MIN_COMPANIES jobs for a keyword, check career pages
+    live while the other sources are searched (one top-up per query per 10 minutes, shared with the
+    ATS page). Returns the running thread, or None."""
+    if "company_ats" not in sources:
+        return None
+    from app.services import ats_search
+    cfg = get_settings()
+    try:
+        found = ats_search.index_count(db, keyword, locations=locations,
+                                       country=search_params.get("country_indeed", "India"),
+                                       max_age_hours=search_params.get("max_age_hours", 24),
+                                       limit=cfg.ATS_MIN_COMPANIES)
+        if found >= cfg.ATS_MIN_COMPANIES or not ats_search.topup_lock(keyword):
+            return None
+    except Exception:  # noqa: BLE001 — the top-up is extra; never fail a search for it
+        db.rollback()
+        logger.exception("ats top-up check failed")
+        return None
+    progress(f"Company career pages: {found} stored match(es) — checking career pages live")
+
+    def work() -> None:
+        try:
+            counts = _run_ats_topup(keyword)
+            logger.info("ats top-up for %r: %s", keyword, counts)
+        except Exception:  # noqa: BLE001
+            logger.exception("ats top-up failed")
+
+    thread = threading.Thread(target=work, name="ats-topup", daemon=True)
+    thread.start()
+    return thread
+
+
+def _finish_ats_topup(db, thread: threading.Thread, keyword: str, already: list[dict], search_params: dict,
+                      locations: list[str], progress) -> list[dict]:
+    """Waits for the top-up (at most ATS_TOPUP_SECONDS + 10 s) and returns the index jobs it added for the
+    keyword that this task has not handled yet."""
+    thread.join(timeout=get_settings().ATS_TOPUP_SECONDS + 10)
+    seen = {j.get("url") for j in already}
+    try:
+        fresh = [j for j in _index_lookup(db, ["company_ats"], search_params, locations)(keyword)
+                 if j.get("url") not in seen]
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        logger.exception("ats lookup after top-up failed")
+        return []
+    progress(f"Company career pages: {len(fresh)} more job(s) found live")
+    return fresh
+
+
 def _harvest_ats(db, jobs: list[dict]) -> None:
     """Apply links on a supported ATS grow the ATS Discovery registry (P6). Never fails a search."""
     from app.services import ats_registry
@@ -122,8 +183,23 @@ def _harvest_ats(db, jobs: list[dict]) -> None:
         logger.exception("ats harvest failed")
 
 
+def _queue_ats_resolver(sources: list[str], jobs: list[dict]) -> None:
+    """QA3 §A: company names from this search's results go to the company resolver (maintenance queue).
+    Only names and websites travel — nothing about the user."""
+    if "company_ats" not in sources or not get_settings().ATS_RESOLVER_ENABLED:
+        return
+    names = [{"company": j.get("company"), "company_url": j.get("company_url") or "",
+              "apply_url": j.get("apply_url") or ""}
+             for j in jobs if j.get("company") and j.get("source") not in ATS_SOURCE_NAMES]
+    if names:
+        try:
+            resolve_ats_companies_task.apply_async(args=[names[:200]], queue=get_settings().maintenance_queue)
+        except Exception:  # noqa: BLE001 — never fail a search for it
+            logger.exception("could not queue the ats resolver")
+
+
 def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str], sources: list[str],
-            manual_naukri_jobs: list, progress) -> list[dict]:
+            manual_naukri_jobs: list, progress, timings: dict[str, float] | None = None) -> list[dict]:
     """job_sources.scrape_all with the params a route built, plus source
     health: sources that answered are marked healthy, failures counted
     (enough in a row pauses the source — provider_catalog.paused_until).
@@ -167,6 +243,7 @@ def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str
             db, user_id=None if platform_only else user_id, scope=scope),
         on_source_result=on_source_result,
         progress=progress,
+        timings=timings,
     )
     try:
         provider_catalog.mark_success(db, healthy)
@@ -176,6 +253,7 @@ def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str
         db.rollback()
         logger.exception("could not record source health")
     _harvest_ats(db, jobs)
+    _queue_ats_resolver(sources, jobs)
     return jobs
 
 
@@ -204,9 +282,25 @@ def _prefilter_score(job: dict, score_params: dict) -> float:
     return keyword_score(job.get("description", ""), score_params["skills"])
 
 
-def _process_job(db, run_id: str, job: dict, *, score_params: dict, request_keys: dict[str, str]) -> str:
-    """One scraped copy through dedupe -> filters -> seen check -> score ->
-    feed (CLAUDE.md 7.5). Returns what happened to it."""
+def one_by_one(score_one):
+    """A batch scorer made of a per-job one (tests fake scoring per job)."""
+    return lambda jobs, **kw: [score_one(job, **kw) for job in jobs]
+
+
+def _score_batch_llm(jobs: list[dict], *, db, score_params: dict, request_keys: dict[str, str],
+                     ref: str | None) -> list[dict]:
+    """Scores a few jobs in one AI call (QA2 §1). Returns the scored jobs in order."""
+    return scorer.score_batch(
+        db, jobs, user_id=score_params.get("user_id"), resume_summary=score_params["resume_summary"],
+        career_targets=score_params.get("career_targets", []), request_keys=request_keys, ref=ref,
+    )
+
+
+def _triage_job(db, run_id: str, job: dict, *, score_params: dict) -> tuple[str, dict | None]:
+    """One scraped copy through dedupe -> filters -> seen check -> prefilter
+    (CLAUDE.md 7.5). Returns (outcome, context): "duplicates" | "blocked" |
+    "seen" | "filtered" with no context, "reuse" (an earlier score applies)
+    or "score" (needs the AI) with what the next steps need."""
     user_id = score_params.get("user_id")
     key = job_key(job)
     canonical = job_store.upsert_copy(db, job, key)
@@ -215,55 +309,127 @@ def _process_job(db, run_id: str, job: dict, *, score_params: dict, request_keys
     # already have this job. If so, it may still need our better copy.
     if not pipeline_progress.claim_job_key(run_id=run_id, job_key=key):
         _replace_if_better(db, run_id, key, canonical)
-        return "duplicates"
+        return "duplicates", None
 
     best = job_store.as_job(canonical)
     if search_profiles.blocked_reason(best, score_params.get("filters") or {}):
-        return "blocked"
+        return "blocked", None
 
     phash = score_params.get("profile_hash")
     uj = job_store.get_user_job(db, user_id, canonical.id) if user_id else None
     decision = job_store.decide(uj, include_seen=bool(score_params.get("include_seen")), profile_hash=phash)
     if decision == "skip":
-        return "seen"
-
-    def remember(state: str, kw: float | None, llm: float | None, reason: str | None,
-                 breakdown: dict | None = None) -> None:
-        if user_id:
-            job_store.record_user_job(db, user_id=user_id, job_id=canonical.id, state=state, keyword_score=kw,
-                                      llm_score=llm, reason=reason, profile_hash=phash,
-                                      search_profile_id=score_params.get("search_profile_id"), run_id=run_id,
-                                      breakdown=breakdown)
+        return "seen", None
+    ctx = {"key": key, "canonical": canonical, "best": best}
 
     if decision == "reuse":
-        scored = {**best, "keyword_score": uj.keyword_score, "llm_score": uj.llm_score, "llm_reason": uj.reason or "",
-                  "match": uj.breakdown or search_profiles.match_breakdown(best, score_params)}
-    else:
-        best["keyword_score"] = _prefilter_score(best, score_params)
-        if best["keyword_score"] < score_params.get("keyword_prefilter_min_pct", 30):
-            # cheap prefilter still applies — no point burning an LLM call on a clear non-match
-            remember("filtered", best["keyword_score"], None, None)
-            return "filtered"
-        scored = _score_one_job_llm(best, db=db, score_params=score_params, request_keys=request_keys, ref=run_id)
-        if scored.get("llm_failed"):
-            # Not a low score — no model answered. Record nothing so the next run retries it.
-            return "unscored"
-        if scored.get("llm_score", 0) < score_params.get("llm_min_score_to_keep", 70):
-            remember("filtered", scored.get("keyword_score"), scored.get("llm_score"), scored.get("llm_reason"))
-            return "filtered"
-        scored["match"] = {**search_profiles.match_breakdown(best, score_params),
-                           "seniority": scored.get("llm_seniority"),
-                           "missing_required": scored.get("llm_missing")}
+        ctx["scored"] = {**best, "keyword_score": uj.keyword_score, "llm_score": uj.llm_score,
+                         "llm_reason": uj.reason or "",
+                         "match": uj.breakdown or search_profiles.match_breakdown(best, score_params)}
+        return "reuse", ctx
 
-    scored.update(job_store.freshness(canonical, score_params.get("previous_search_at")))
-    scored["auto_apply_capable"] = scored.get("source") in AUTO_APPLY_CAPABLE_SOURCES
-    payload = pipeline_progress.record_scored_job(run_id=run_id, job=scored)
-    pipeline_progress.remember_recorded(run_id=run_id, job_key=key, payload=payload)
-    remember("seen", scored.get("keyword_score"), scored.get("llm_score"), scored.get("llm_reason"),
-             breakdown=scored.get("match"))
+    best["keyword_score"] = _prefilter_score(best, score_params)
+    if best["keyword_score"] < score_params.get("keyword_prefilter_min_pct", 30):
+        # cheap prefilter still applies — no point burning an LLM call on a clear non-match
+        _remember(db, run_id, canonical.id, score_params, "filtered", best["keyword_score"], None, None)
+        return "filtered", None
+    return "score", ctx
+
+
+def _remember(db, run_id: str, job_id: str, score_params: dict, state: str, kw: float | None,
+              llm: float | None, reason: str | None, breakdown: dict | None = None) -> None:
+    user_id = score_params.get("user_id")
+    if user_id:
+        job_store.record_user_job(db, user_id=user_id, job_id=job_id, state=state, keyword_score=kw,
+                                  llm_score=llm, reason=reason, profile_hash=score_params.get("profile_hash"),
+                                  search_profile_id=score_params.get("search_profile_id"), run_id=run_id,
+                                  breakdown=breakdown)
+
+
+def _feed_entry(ctx: dict, job: dict, score_params: dict) -> dict:
+    entry = {**job, **job_store.freshness(ctx["canonical"], score_params.get("previous_search_at"))}
+    entry["auto_apply_capable"] = entry.get("source") in AUTO_APPLY_CAPABLE_SOURCES
+    # QA4: a ★ on jobs from companies the user follows.
+    entry["followed"] = normalize_company(entry.get("company") or "") in (score_params.get("followed_companies") or ())
+    return entry
+
+
+def _show_while_scoring(run_id: str, ctx: dict, score_params: dict) -> None:
+    """QA2 §1: the job is in the feed seconds after a source answered, marked
+    `scoring`; its score replaces it (same id) or it is taken back out."""
+    entry = _feed_entry(ctx, {**ctx["best"], "llm_score": None, "scoring": True,
+                              "match": search_profiles.match_breakdown(ctx["best"], score_params)}, score_params)
+    payload = pipeline_progress.record_scored_job(run_id=run_id, job=entry)
+    pipeline_progress.remember_recorded(run_id=run_id, job_key=ctx["key"], payload=payload)
+
+
+def _keep(db, run_id: str, ctx: dict, scored: dict, score_params: dict, *, shown: bool) -> None:
+    entry = _feed_entry(ctx, {**scored, "scoring": False}, score_params)
+    payload = pipeline_progress.record_scored_job(run_id=run_id, job=entry, replaces=shown)
+    pipeline_progress.remember_recorded(run_id=run_id, job_key=ctx["key"], payload=payload)
+    _remember(db, run_id, ctx["canonical"].id, score_params, "seen", scored.get("keyword_score"),
+              scored.get("llm_score"), scored.get("llm_reason"), breakdown=scored.get("match"))
     # A better copy may have been stored by another task while we scored.
-    _replace_if_better(db, run_id, key, job_store.reload(db, canonical))
+    _replace_if_better(db, run_id, ctx["key"], job_store.reload(db, ctx["canonical"]))
+
+
+def _finish_scored(db, run_id: str, ctx: dict, scored: dict, score_params: dict, *, shown: bool) -> str:
+    if scored.get("llm_failed"):
+        # Not a low score — no model answered. Record nothing so the next run retries it.
+        if shown:
+            pipeline_progress.remove_recorded(run_id=run_id, job_key=ctx["key"])
+        return "unscored"
+    if scored.get("llm_score", 0) < score_params.get("llm_min_score_to_keep", 70):
+        _remember(db, run_id, ctx["canonical"].id, score_params, "filtered", scored.get("keyword_score"),
+                  scored.get("llm_score"), scored.get("llm_reason"))
+        if shown:
+            pipeline_progress.remove_recorded(run_id=run_id, job_key=ctx["key"])
+        return "filtered"
+    scored["match"] = {**search_profiles.match_breakdown(ctx["best"], score_params),
+                       "seniority": scored.get("llm_seniority"), "missing_required": scored.get("llm_missing")}
+    _keep(db, run_id, ctx, scored, score_params, shown=shown)
     return "kept"
+
+
+def _process_jobs(db, run_id: str, jobs: list[dict], *, score_params: dict, request_keys: dict[str, str],
+                  show_early: bool, progress=lambda m: None) -> tuple[dict, list[str]]:
+    """Every scraped copy through triage, then the ones that need the AI in
+    batches of SCORE_BATCH_SIZE (QA2 §1). With `show_early` (searches from
+    Jobs) those are in the feed while they are scored. Returns (counts by
+    outcome, job keys kept)."""
+    counts = {"duplicates": 0, "blocked": 0, "seen": 0, "filtered": 0, "unscored": 0, "kept": 0}
+    kept: list[str] = []
+    pending: list[dict] = []
+    for job in jobs:
+        outcome, ctx = _triage_job(db, run_id, job, score_params=score_params)
+        if outcome == "reuse":
+            _keep(db, run_id, ctx, ctx["scored"], score_params, shown=False)
+            counts["kept"] += 1
+            kept.append(ctx["key"])
+        elif outcome == "score":
+            if show_early:
+                _show_while_scoring(run_id, ctx, score_params)
+            pending.append(ctx)
+        else:
+            counts[outcome] += 1
+
+    size = max(1, settings.SCORE_BATCH_SIZE)
+    for start in range(0, len(pending), size):
+        batch = pending[start:start + size]
+        if pipeline_progress.is_cancelled(run_id):
+            if show_early:
+                for ctx in pending[start:]:
+                    pipeline_progress.remove_recorded(run_id=run_id, job_key=ctx["key"])
+            break
+        progress(f"scoring jobs {start + 1}-{start + len(batch)} of {len(pending)}")
+        scored_list = _score_batch_llm([dict(c["best"]) for c in batch], db=db, score_params=score_params,
+                                       request_keys=request_keys, ref=run_id)
+        for ctx, scored in zip(batch, scored_list):
+            outcome = _finish_scored(db, run_id, ctx, scored, score_params, shown=show_early)
+            counts[outcome] += 1
+            if outcome == "kept":
+                kept.append(ctx["key"])
+    return counts, kept
 
 
 def add_applicant_counts(db, run_id: str | None, keys: list[str], *, progress=lambda m: None,
@@ -334,20 +500,37 @@ def search_and_score_keyword(
 
     db = SessionLocal()
     try:
+        if score_params.get("user_id"):
+            from app.services import target_companies
+            score_params = {**score_params,
+                            "followed_companies": target_companies.followed_names(db, score_params["user_id"])}
+        timings: dict[str, float] = {}
+        topup = _start_ats_topup(db, keyword, sources, search_params, locations, progress_cb)
         raw_jobs = _scrape(db, search_params, keywords=[keyword], locations=locations, sources=sources,
                            # manual jobs are added once at the top level, not per keyword
-                           manual_naukri_jobs=[], progress=progress_cb)
+                           manual_naukri_jobs=[], progress=progress_cb, timings=timings)
 
         request_keys = _request_keys(score_params)
-        counts = {"duplicates": 0, "blocked": 0, "seen": 0, "filtered": 0, "unscored": 0, "kept": 0}
-        kept_keys: list[str] = []
-        for job in raw_jobs:
-            outcome = _process_job(db, run_id, job, score_params=score_params, request_keys=request_keys)
-            if outcome in counts:
-                counts[outcome] += 1
-            if outcome == "kept":
-                kept_keys.append(job_key(job))
-                progress_cb(f"'{keyword}': scored+kept {job.get('title', '')}")
+        started = time.monotonic()
+        counts, kept_keys = _process_jobs(db, run_id, raw_jobs, score_params=score_params,
+                                          request_keys=request_keys, show_early=True, progress=progress_cb)
+        timings["Scoring"] = time.monotonic() - started
+        if topup is not None and not pipeline_progress.is_cancelled(run_id):
+            # QA3 §C: jobs the live check added join the same run's feed.
+            started = time.monotonic()
+            extra = _finish_ats_topup(db, topup, keyword, raw_jobs, search_params, locations, progress_cb)
+            timings["Company career pages (live)"] = time.monotonic() - started
+            if extra:
+                started = time.monotonic()
+                more, more_kept = _process_jobs(db, run_id, extra, score_params=score_params,
+                                                request_keys=request_keys, show_early=True, progress=progress_cb)
+                timings["Scoring"] += time.monotonic() - started
+                counts = {k: counts[k] + more[k] for k in counts}
+                kept_keys += more_kept
+                raw_jobs = raw_jobs + extra
+        pipeline_progress.add_timings(run_id=run_id, timings=timings)
+        if counts["kept"]:
+            progress_cb(f"'{keyword}': kept {counts['kept']} job(s)")
         if "linkedin" in sources:
             add_applicant_counts(db, run_id, kept_keys, progress=progress_cb)
 
@@ -648,14 +831,54 @@ def ats_expand_title_task(query: str, user_id: str) -> dict:
         db.close()
 
 
-@celery_app.task(name="job_finder.purge_ats_jobs")
-def purge_ats_jobs_task() -> dict:
-    """Deletes ATS index jobs closed more than ATS_CLOSED_RETENTION_DAYS ago (P6)."""
-    from app.services import ats_crawler
+@celery_app.task(name="job_finder.resolve_ats_companies")
+def resolve_ats_companies_task(jobs: list[dict]) -> dict:
+    """Finds the career pages of companies seen in search results (QA3 §A)."""
+    from app.services import ats_resolver
+
+    return ats_resolver.resolve(SessionLocal, jobs)
+
+
+@celery_app.task(name="job_finder.ats_follow_match")
+def ats_follow_match_task(company_id: str, job_ids: list[str]) -> dict:
+    """New jobs at a followed company -> new-role hits for its followers (QA4)."""
+    from app.services import target_companies
 
     db = SessionLocal()
     try:
-        return {"deleted": ats_crawler.purge_closed(db)}
+        return {"hits": target_companies.match_new_jobs(db, company_id, job_ids)}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="job_finder.ats_follow_digest")
+def ats_follow_digest_task() -> dict:
+    """Beat (QA4): emails new roles at followed companies (instant at most hourly, or daily)."""
+    from app.services import target_companies
+
+    db = SessionLocal()
+    try:
+        return target_companies.digest(db)
+    finally:
+        db.close()
+
+
+@celery_app.task(name="job_finder.ats_follow_lookup")
+def ats_follow_lookup_task(follow_id: str) -> dict:
+    """Finds the career page for a company someone asked to follow by name (QA4)."""
+    from app.services import target_companies
+
+    return target_companies.lookup_name(SessionLocal, follow_id)
+
+
+@celery_app.task(name="job_finder.purge_ats_jobs")
+def purge_ats_jobs_task() -> dict:
+    """Deletes ATS index jobs closed more than ATS_CLOSED_RETENTION_DAYS ago (P6)."""
+    from app.services import ats_crawler, target_companies
+
+    db = SessionLocal()
+    try:
+        return {"deleted": ats_crawler.purge_closed(db), "hits_deleted": target_companies.purge(db)}
     finally:
         db.close()
 
@@ -785,42 +1008,47 @@ def run_job_alert(self, alert_id: str, trigger: str = "schedule") -> dict:
         score_params["previous_search_at"] = pipeline_progress.mark_user_search(user.id)
 
         keywords = search_params["keywords"]
-        run_id = pipeline_progress.create_run(user_id=user.id, total_keywords=len(keywords))
+        run_id = pipeline_progress.create_run(user_id=user.id, total_keywords=len(keywords), kind="alert")
         request_keys = _request_keys(score_params)
-        counts = {"run_id": run_id, "raw": 0, "kept": 0, "duplicates": 0, "blocked": 0, "seen": 0, "filtered": 0}
+        counts = {"run_id": run_id, "raw": 0, "kept": 0, "duplicates": 0, "blocked": 0, "seen": 0, "filtered": 0,
+                  "unscored": 0}
         kept_keys: list[str] = []
         for keyword in keywords:
             raw_jobs = _scrape(db, search_params, keywords=[keyword], locations=search_params["locations"],
                                sources=search_params["sources"], manual_naukri_jobs=[], progress=progress_cb)
             counts["raw"] += len(raw_jobs)
-            for job in raw_jobs:
-                outcome = _process_job(db, run_id, job, score_params=score_params, request_keys=request_keys)
+            found, keys = _process_jobs(db, run_id, raw_jobs, score_params=score_params,
+                                        request_keys=request_keys, show_early=False)
+            for outcome, n in found.items():
                 if outcome in counts:
-                    counts[outcome] += 1
-                if outcome == "kept":
-                    kept_keys.append(job_key(job))
+                    counts[outcome] += n
+            kept_keys += keys
             pipeline_progress.increment_keyword_completed(run_id=run_id)
         if "linkedin" in search_params["sources"]:
             add_applicant_counts(db, run_id, kept_keys, progress=progress_cb)
 
-        latest: dict[str, dict] = {}
-        for entry in pipeline_progress.get_jobs(run_id=run_id):
-            latest[entry["id"]] = entry  # replacements share the id; keep the newest copy
-        jobs = sorted(latest.values(), key=lambda j: j.get("llm_score") or 0, reverse=True)
+        jobs = sorted(pipeline_progress.current_jobs(run_id=run_id), key=lambda j: j.get("llm_score") or 0,
+                      reverse=True)
         run.job_ids = [j["id"] for j in jobs]
         run.counts = counts
         run.status, run.finished_at = "done", job_alerts.utcnow()
+        if counts["unscored"]:
+            # Without this a run where every AI model failed looks like "no new jobs".
+            n = counts["unscored"]
+            run.error = (f"{n} job{'s' if n != 1 else ''} couldn't be scored because every AI model failed; "
+                         "they will be tried again on the next run")
         alert.last_run_at = run.finished_at
         db.commit()
 
         if jobs and alert.email_digest:
             subject, body = job_alerts.digest_text(alert, jobs)
+            to = job_alerts.sends_to(alert, job_alerts.email_options(db, user))
             try:
-                get_email_sender().send(to=user.email, subject=subject, body=body)
+                get_email_sender().send(to=to, subject=subject, body=body)
                 run.emailed_at = job_alerts.utcnow()
             except Exception as e:  # noqa: BLE001 — the run's results stay in the app
                 logger.warning("alert %s: digest email failed: %s", alert.id, type(e).__name__)
-                run.error = f"digest email failed: {type(e).__name__}"
+                run.error = "; ".join(filter(None, [run.error, f"digest email failed: {type(e).__name__}"]))
             db.commit()
         return {"alert_id": alert.id, "run_id": run_id, "new_jobs": len(jobs)}
     except Exception as e:  # noqa: BLE001
@@ -835,15 +1063,16 @@ def run_job_alert(self, alert_id: str, trigger: str = "schedule") -> dict:
 
 
 @celery_app.task(name="job_finder.voice_finalize")
-def voice_finalize_task(session_id: str) -> dict:
+def voice_finalize_task(session_id: str, attempt: int = 0) -> dict:
     """After a voice session (P7): ends it if its socket dropped and wasn't
     resumed, then scores the answers. Transcripts are read from the DB here,
-    never sent through the broker."""
+    never sent through the broker. `attempt` counts retries while every AI
+    model is busy (voice_eval.RETRY_DELAYS)."""
     from app.services import voice_eval
 
     db = SessionLocal()
     try:
-        return voice_eval.finalize(db, session_id)
+        return voice_eval.finalize(db, session_id, attempt)
     except Exception:  # noqa: BLE001 — a crash must not leave feedback "pending" forever
         db.rollback()
         logger.exception("voice finalize crashed for session=%s", session_id)

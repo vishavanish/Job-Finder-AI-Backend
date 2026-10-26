@@ -75,6 +75,11 @@ celery_app.conf.beat_schedule = {
         "schedule": float(settings.ATS_CRAWL_TICK_SECONDS),
         "options": {"queue": settings.maintenance_queue, "expires": settings.ATS_CRAWL_TICK_SECONDS},
     },
+    "ats-follow-digest": {
+        "task": "job_finder.ats_follow_digest",
+        "schedule": float(settings.ATS_FOLLOW_DIGEST_TICK_SECONDS),
+        "options": {"queue": settings.maintenance_queue, "expires": settings.ATS_FOLLOW_DIGEST_TICK_SECONDS},
+    },
     "purge-ats-jobs": {
         "task": "job_finder.purge_ats_jobs",
         "schedule": 24 * 3600.0,

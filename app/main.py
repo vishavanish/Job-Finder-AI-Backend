@@ -86,8 +86,11 @@ async def log_requests(request: Request, call_next):
 
 @app.get("/health", tags=["meta"])
 async def health():
-    result = run_health_check()
-    if result["status"] == "unhealthy":
+    """Public liveness: only the overall status (503 when unhealthy). The
+    per-check detail (database, queues, AI setup, scheduler) is for admins at
+    GET /api/v1/admin/system/health — it described the setup to anyone (QA1)."""
+    status = run_health_check()["status"]
+    if status == "unhealthy":
         from fastapi.responses import JSONResponse
-        return JSONResponse(status_code=503, content=result)
-    return result
+        return JSONResponse(status_code=503, content={"status": status})
+    return {"status": status}

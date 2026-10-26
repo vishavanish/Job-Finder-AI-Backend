@@ -6,8 +6,10 @@ The apply engine (CLAUDE.md 7.7, P4 plan §3.1, §3.6, §3.7).
     Preflight -> Prepare -> (Answer) -> Review -> Submit -> Verify -> Record
 
 Two modes:
-  auto  Level 2 "review & submit" on Greenhouse / Lever, headless on the
-        apply-queue worker. The run stops at `awaiting_review` (and at
+  auto  Level 2 "review & submit" on Greenhouse / Lever, and on other hosted
+        career forms through the AI form reader (adapter "generic", P4c:
+        opt-in, may be several pages, test mode until GENERIC_APPLY_SUBMIT),
+        headless on the apply-queue worker. The run stops at `awaiting_review` (and at
         `awaiting_input` first when a required answer is missing); nothing
         is submitted until the user approves that run.
   fast  LinkedIn Easy Apply on the user's own PC: a visible browser opens,
@@ -52,7 +54,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.apply import adapters as adapter_registry
+from app.apply import vision
 from app.apply.adapters import HardStop
+from app.apply.generic import MAP_SYSTEM, RunTools, valid_map
 from app.core.config import get_settings
 from app.core.redis_client import get_redis
 from app.models.application import Application
@@ -63,7 +67,8 @@ from app.models.jobs import Job
 from app.models.profile import Resume
 from app.models.user import User
 from app.services import (
-    answer_bank, apply_options, apply_prep, entitlements, feature_flags, job_store, key_store, resume_store,
+    ai_router, answer_bank, apply_options, apply_prep, entitlements, feature_flags, job_store, key_store,
+    resume_store,
 )
 from app.services.applications_store import record_status
 from app.services.job_dedupe import job_key as compute_job_key
@@ -104,7 +109,7 @@ def get_settings_row(db: Session, user_id: str) -> ApplySettings:
 
 def update_settings(db: Session, user: User, *, level: int | None, accept_risk: bool | None,
                     hours_start: int | None, hours_end: int | None, tz: str | None,
-                    paused: bool | None) -> ApplySettings:
+                    paused: bool | None, allow_generic: bool | None = None) -> ApplySettings:
     row = get_settings_row(db, user.id)
     if accept_risk is True and row.risk_accepted_at is None:
         row.risk_accepted_at = _now()
@@ -136,6 +141,12 @@ def update_settings(db: Session, user: User, *, level: int | None, accept_risk: 
         row.paused = paused
         if paused:
             cancel_active_runs(db, user.id, reason="You paused auto apply.")
+    if allow_generic is not None:
+        row.allow_generic = allow_generic
+        if not allow_generic:
+            for run in db.query(ApplyRun).filter(ApplyRun.user_id == user.id, ApplyRun.adapter == "generic",
+                                                 ApplyRun.state.in_(RUN_ACTIVE_STATES)).all():
+                _transition(db, run, "cancelled", "You turned off the AI form reader.", tracker_status="cancelled")
     return row
 
 
@@ -174,6 +185,9 @@ def _check_caps(db: Session, user_id: str, s: ApplySettings, *, mode: str, adapt
         return
     if used["auto_submitted"] >= cfg.APPLY_DAILY_CAP:
         raise _error(429, "daily_cap", f"Auto apply limit reached for today ({cfg.APPLY_DAILY_CAP}/day).")
+    if adapter == "generic" and used["by_platform"].get("generic", 0) >= cfg.APPLY_GENERIC_DAILY_CAP:
+        raise _error(429, "generic_cap",
+                     f"AI form reader limit reached for today ({cfg.APPLY_GENERIC_DAILY_CAP}/day).")
     if used["by_platform"].get(adapter, 0) >= cfg.APPLY_PLATFORM_DAILY_CAP:
         name = apply_options.ADAPTER_NAMES.get(adapter, adapter)
         raise _error(429, "platform_cap",
@@ -286,6 +300,9 @@ def create_run(db: Session, user: User, job: Job, *, mode: str) -> ApplyRun:
             raise _error(409, "risk_notice_required", "Accept the auto-apply risk notice in Apply settings first.")
         if s.level < 2:
             raise _error(409, "level_off", "Turn on level 2 (review & submit) in Apply settings first.")
+        if adapter == "generic" and not s.allow_generic:
+            raise _error(409, "generic_off",
+                         "This job uses the AI form reader (beta). Turn it on in Apply settings first.")
         level = 2
     else:  # fast
         if adapter != "linkedin":
@@ -444,6 +461,71 @@ def _file_plan(fields: list[dict], docs: dict[str, str]) -> tuple[dict[str, str]
     return plan, missing
 
 
+# ---------------------------------------------------------------- plan
+
+def _plan_fields(db: Session, run: ApplyRun, job: Job, fields: list[dict], docs: dict[str, str],
+                 known: dict[str, dict] | None = None) -> tuple[list[dict], dict[str, str], list[str]]:
+    """(plan fields, file plan, required files we can't provide) for the controls on one page. `known`
+    keeps answers from an earlier pass of the same run (a multi-page form read again after the user
+    answered a question)."""
+    known = known or {}
+    fresh = [f for f in fields if f["key"] not in known]
+    answers = {a["id"]: a for a in answer_bank.answer_fields(
+        db, run.user_id, _answerable(fresh), job=job_store.as_job(job))} if fresh else {}
+    db.commit()
+    file_plan, missing_files = _file_plan(fields, docs)
+    plan_fields = []
+    for f in fields:
+        if f["type"] == "file":
+            continue
+        if f["key"] in known:
+            plan_fields.append({**known[f["key"]], "label": f["label"], "type": f["type"],
+                                "options": f.get("options") or [], "required": f["required"]})
+            continue
+        a = answers.get(f["key"], {})
+        plan_fields.append(_store_value(
+            {"key": f["key"], "label": f["label"], "type": f["type"], "options": f.get("options") or [],
+             "required": f["required"], "source": a.get("source", "none"),
+             "approved": a.get("approved", False),
+             "needs_input": bool(a.get("needs_input")) and f["required"]}, a.get("value")))
+    return plan_fields, file_plan, missing_files
+
+
+def _run_tools(db: Session, run: ApplyRun) -> RunTools:
+    """The AI form reader's two AI calls for this run (P4c): form_map (text) and form_vision (screenshot),
+    both through the router, ledgered with the run id."""
+    cfg = get_settings()
+
+    def map_page(prompt: str) -> str | None:
+        try:
+            return ai_router.complete(db, user_id=run.user_id, task="form_map", system=MAP_SYSTEM,
+                                      user_prompt=prompt, json_mode=True, max_tokens=300, ref=run.id,
+                                      validate=valid_map).text
+        except ai_router.NoModelAvailable as e:
+            logger.info("form_map unavailable for run=%s: %s", run.id, e)
+            return None
+
+    def look(png: bytes, prompt: str) -> tuple[str, float]:
+        outcome = ai_router.StreamOutcome()
+        for _ in ai_router.stream(db, user_id=run.user_id, task="form_vision", system=vision.SYSTEM,
+                                  user_prompt=prompt, outcome=outcome, max_tokens=300, ref=run.id,
+                                  images=[("image/png", png)]):
+            pass
+        return outcome.text, outcome.cost_usd
+
+    used = (run.plan or {}).get("vision") or {}
+    return RunTools(map_page=map_page, look=look, max_vision_steps=cfg.GENERIC_APPLY_VISION_MAX_STEPS,
+                    max_vision_usd=cfg.GENERIC_APPLY_VISION_MAX_USD, vision_steps=int(used.get("steps") or 0),
+                    vision_cost=float(used.get("cost_usd") or 0.0), map_calls=int(used.get("map_calls") or 0))
+
+
+def _save_usage(db: Session, run: ApplyRun, adapter) -> None:
+    tools = getattr(adapter, "tools", None)
+    if isinstance(tools, RunTools):
+        run.plan = {**(run.plan or {}), "vision": tools.usage()}
+        db.commit()
+
+
 # ---------------------------------------------------------------- prepare (worker)
 
 def _get_active(db: Session, run_id: str, expected: tuple[str, ...]) -> ApplyRun | None:
@@ -471,7 +553,7 @@ def prepare(db: Session, run_id: str) -> ApplyRun | None:
     if run is None or not _still_allowed(db, run):
         return run
     _transition(db, run, "preparing", "Reading the application form.", tracker_status="preparing")
-    adapter = adapter_registry.get(run.adapter)
+    adapter = adapter_registry.get(run.adapter).for_run(_run_tools(db, run))
     job = db.get(Job, run.job_id)
     cfg = get_settings()
     workdir = Path(tempfile.mkdtemp(prefix="jf-apply-"))
@@ -482,8 +564,14 @@ def prepare(db: Session, run_id: str) -> ApplyRun | None:
                              profile_dir=_profile_dir(run.user_id) if fast else None, keep_open=fast) as page:
             try:
                 adapter.open(page, run.apply_url, cfg.APPLY_PAGE_TIMEOUT_SECONDS * 1000)
+                if adapter.multi_step:
+                    try:
+                        return _prepare_steps(db, run, adapter, page, job, docs)
+                    finally:
+                        _save_usage(db, run, adapter)
                 fields = adapter.read_form(page)
             except HardStop as stop:
+                _save_usage(db, run, adapter)
                 _snap(db, run, adapter, page, kind="stopped", text=stop.reason)
                 _transition(db, run, "needs_user", stop.reason + " Finish this application on the job page.",
                             tracker_status="needs_user")
@@ -494,20 +582,7 @@ def prepare(db: Session, run_id: str) -> ApplyRun | None:
                             tracker_status="needs_user")
                 return run
 
-            answers = {a["id"]: a for a in answer_bank.answer_fields(
-                db, run.user_id, _answerable(fields), job=job_store.as_job(job))}
-            db.commit()
-            file_plan, missing_files = _file_plan(fields, docs)
-            plan_fields = []
-            for f in fields:
-                if f["type"] == "file":
-                    continue
-                a = answers.get(f["key"], {})
-                plan_fields.append(_store_value(
-                    {"key": f["key"], "label": f["label"], "type": f["type"], "options": f.get("options") or [],
-                     "required": f["required"], "source": a.get("source", "none"),
-                     "approved": a.get("approved", False),
-                     "needs_input": bool(a.get("needs_input")) and f["required"]}, a.get("value")))
+            plan_fields, file_plan, missing_files = _plan_fields(db, run, job, fields, docs)
             run.plan = {"fields": plan_fields, "files": file_plan}
             db.commit()
 
@@ -549,6 +624,57 @@ def prepare(db: Session, run_id: str) -> ApplyRun | None:
     return run
 
 
+def _prepare_steps(db: Session, run: ApplyRun, adapter, page, job: Job, docs: dict[str, str]) -> ApplyRun:
+    """The AI form reader's prepare (P4c §3.2): answer each page of the form, fill it, go to the next one, and
+    stop before the final Submit. A required question nobody can answer stops the walk at awaiting_input;
+    answering it queues prepare again, which reads the form from the start with the answers kept."""
+    cfg = get_settings()
+
+    def stop(message: str) -> ApplyRun:
+        _snap(db, run, adapter, page, kind="stopped", text=message)
+        _transition(db, run, "needs_user", message, tracker_status="needs_user")
+        return run
+
+    known = {p["key"]: p for p in (run.plan or {}).get("fields", []) if p.get("source") == "user" or plan_value(p)}
+    steps: list[dict] = []
+    all_fields: list[dict] = []
+    all_files: dict[str, str] = {}
+    for n in range(1, cfg.GENERIC_APPLY_STEP_LIMIT + 1):
+        fields = adapter.read_form(page)
+        if not fields:
+            return stop("No application form was found on the page." if n == 1 else
+                        f"Page {n} of the form has no questions the app can read. Finish it on the job page.")
+        human = adapter.needs_human(page)
+        if human:
+            return stop(human + " Your answers so far are ready below — copy them into the form on the job page.")
+        plan_fields, file_plan, missing_files = _plan_fields(db, run, job, fields, docs, known)
+        seen = {p["key"] for p in all_fields}
+        all_fields += [p for p in plan_fields if p["key"] not in seen]
+        all_files.update(file_plan)
+        steps.append({"page": n, "url": adapter.page_url(page)[:500], "keys": [p["key"] for p in plan_fields],
+                      "files": file_plan})
+        run.plan = {**(run.plan or {}), "fields": all_fields, "files": all_files, "steps": steps, "complete": False}
+        db.commit()
+        _snap(db, run, adapter, page, kind="step", text=f"Page {n}")
+        if missing_files:
+            return stop("The form asks for a file the app can't provide: " + ", ".join(missing_files[:3]))
+        if adapter.is_final(page):
+            run.plan = {**run.plan, "complete": True}
+            db.commit()
+            _after_answers(db, run)
+            return run
+        if any(p["needs_input"] for p in plan_fields):
+            _after_answers(db, run)  # awaiting_input; the next pages are read after the user answers
+            return run
+        values = {p["key"]: plan_value(p) for p in plan_fields if plan_value(p) not in (None, "")}
+        files = {k: docs[v] for k, v in file_plan.items() if v in docs}
+        problems = adapter.fill_form(page, fields, values, files)
+        if problems:
+            return stop(f"Could not fill page {n} of the form: " + "; ".join(problems[:3]))
+        adapter.next_step(page)
+    return stop(f"This form has more than {cfg.GENERIC_APPLY_STEP_LIMIT} pages — finish it on the job page.")
+
+
 def _answerable(fields: list[dict]) -> list[dict]:
     from app.apply.forms import for_answering
     return for_answering(fields)
@@ -560,9 +686,16 @@ def _after_answers(db: Session, run: ApplyRun) -> None:
         _transition(db, run, "awaiting_input",
                     f"{len(missing)} required question(s) need your answer: " + "; ".join(m[:60] for m in missing[:5]),
                     tracker_status="awaiting_input")
+    elif run.plan.get("steps") and not run.plan.get("complete"):
+        # A multi-page form stopped at a question: read the rest now (the route queues prepare again).
+        _transition(db, run, "queued", "Your answers are saved — reading the next page of the form.",
+                    tracker_status="")
     else:
         drafts = sum(1 for p in run.plan.get("fields", []) if p["source"] == "ai" and plan_value(p))
         note = f" {drafts} answer(s) were drafted by AI — check them." if drafts else ""
+        if run.adapter == "generic" and not get_settings().GENERIC_APPLY_SUBMIT:
+            note += (" The AI form reader is in test mode: check the answers here, then submit them yourself "
+                     "on the job page.")
         _transition(db, run, "awaiting_review", "Ready for your review." + note, tracker_status="awaiting_review")
 
 
@@ -600,6 +733,9 @@ def approve(db: Session, user: User, run: ApplyRun) -> tuple[ApplyRun, int]:
     a pacing gap. Returns (run, countdown seconds)."""
     if run.state != "awaiting_review":
         raise _error(409, "run_not_ready", "This run is not waiting for your review.")
+    if run.adapter == "generic" and not get_settings().GENERIC_APPLY_SUBMIT:
+        raise _error(409, "generic_test_mode", "The AI form reader is in test mode — submit this application "
+                                               "yourself on the job page, then mark it done.")
     s = get_settings_row(db, user.id)
     _check_switches(db, user, s)
     if not within_hours(s):
@@ -678,6 +814,11 @@ def submit(db: Session, run_id: str) -> ApplyRun | None:
         _transition(db, run, "needs_user", "This platform is never submitted automatically.",
                     tracker_status="needs_user")
         return run
+    if run.adapter == "generic" and not get_settings().GENERIC_APPLY_SUBMIT:
+        _transition(db, run, "needs_user", "The AI form reader is in test mode — submit this application yourself "
+                                           "on the job page.", tracker_status="needs_user")
+        return run
+    adapter = adapter.for_run(_run_tools(db, run))
     s = get_settings_row(db, run.user_id)
     try:
         _check_caps(db, run.user_id, s, mode="auto", adapter=run.adapter)
@@ -693,6 +834,11 @@ def submit(db: Session, run_id: str) -> ApplyRun | None:
         with browser_session(headless=cfg.APPLY_HEADLESS) as page:
             try:
                 adapter.open(page, run.apply_url, cfg.APPLY_PAGE_TIMEOUT_SECONDS * 1000)
+                if adapter.multi_step:
+                    try:
+                        return _submit_steps(db, run, adapter, page, docs)
+                    finally:
+                        _save_usage(db, run, adapter)
                 fields = adapter.read_form(page)
             except HardStop as stop:
                 _snap(db, run, adapter, page, kind="stopped", text=stop.reason)
@@ -727,21 +873,7 @@ def submit(db: Session, run_id: str) -> ApplyRun | None:
                 _transition(db, run, "needs_user", "Could not fill the form: " + detail, tracker_status="needs_user")
                 return run
 
-            result = adapter.submit_and_wait(page, wait_ms=15000)
-            if result.state == "submitted":
-                _snap(db, run, adapter, page, kind="confirmation", text=result.text)
-                run.submitted_at = _now()
-                _transition(db, run, "submitted", "Submitted. " + (result.text[:200] if result.text else ""),
-                            tracker_status="submitted")
-                job_store.set_state(db, user_id=run.user_id, job_id=run.job_id, state="applied")
-                db.commit()
-                return run
-            _snap(db, run, adapter, page, kind="stopped", text=result.text)
-            reasons = {"captcha": "A captcha appeared — finish and submit this application yourself.",
-                       "invalid": "The form reported an error: " + result.text,
-                       "unknown": "We couldn't confirm the application went through — check the job page."}
-            _transition(db, run, "needs_user", reasons.get(result.state, result.text), tracker_status="needs_user")
-            return run
+            return _finish_submit(db, run, adapter, page)
     except Exception as e:  # noqa: BLE001
         logger.exception("submit failed for run=%s", run.id)
         db.rollback()
@@ -751,6 +883,66 @@ def submit(db: Session, run_id: str) -> ApplyRun | None:
         return run
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _finish_submit(db: Session, run: ApplyRun, adapter, page) -> ApplyRun:
+    result = adapter.submit_and_wait(page, wait_ms=15000)
+    if result.state == "submitted":
+        _snap(db, run, adapter, page, kind="confirmation", text=result.text)
+        run.submitted_at = _now()
+        _transition(db, run, "submitted", "Submitted. " + (result.text[:200] if result.text else ""),
+                    tracker_status="submitted")
+        job_store.set_state(db, user_id=run.user_id, job_id=run.job_id, state="applied")
+        db.commit()
+        return run
+    _snap(db, run, adapter, page, kind="stopped", text=result.text)
+    reasons = {"captcha": "A captcha appeared — finish and submit this application yourself.",
+               "invalid": "The form reported an error: " + result.text,
+               "unknown": "We couldn't confirm the application went through — check the job page."}
+    _transition(db, run, "needs_user", reasons.get(result.state, result.text), tracker_status="needs_user")
+    return run
+
+
+def _submit_steps(db: Session, run: ApplyRun, adapter, page, docs: dict[str, str]) -> ApplyRun:
+    """Replays the reviewed pages of a multi-page form (P4c): each page is read again and must still match
+    the plan; the last one is submitted."""
+    def stop(message: str) -> ApplyRun:
+        _snap(db, run, adapter, page, kind="stopped", text=message)
+        _transition(db, run, "needs_user", message, tracker_status="needs_user")
+        return run
+
+    plan = run.plan or {}
+    steps = plan.get("steps") or []
+    by_key = {p["key"]: p for p in plan.get("fields", [])}
+    if not steps or not plan.get("complete"):
+        return stop("This run was never fully prepared — finish it on the job page.")
+    for i, step in enumerate(steps):
+        fields = adapter.read_form(page)
+        human = adapter.needs_human(page)
+        if human:
+            return stop(human + " Finish this application on the job page.")
+        on_page = {f["key"] for f in fields}
+        new_required = [f["label"] or f["key"] for f in fields
+                        if f["required"] and f["type"] != "file" and f["key"] not in by_key]
+        if new_required:
+            return stop("The form changed since you reviewed it (new required questions: "
+                        + "; ".join(x[:60] for x in new_required[:3]) + ").")
+        values = {k: plan_value(by_key[k]) for k in step["keys"]
+                  if k in on_page and k in by_key and plan_value(by_key[k]) not in (None, "")}
+        files = {k: docs[v] for k, v in (step.get("files") or {}).items() if v in docs and k in on_page}
+        problems = adapter.fill_form(page, fields, values, files)
+        empty = [f["label"] or f["key"] for f in fields
+                 if f["required"] and f["key"] not in set(values) | set(files)]
+        if problems or empty:
+            detail = "; ".join((problems + [f"'{e[:60]}' is empty" for e in empty])[:4])
+            return stop(f"Could not fill page {i + 1} of the form: " + detail)
+        if i < len(steps) - 1:
+            adapter.next_step(page)
+            continue
+        if not adapter.is_final(page):
+            return stop("The last page of the form has no Submit button the app can find.")
+        return _finish_submit(db, run, adapter, page)
+    return run
 
 
 def proofs(db: Session, run: ApplyRun) -> list[ApplyProof]:

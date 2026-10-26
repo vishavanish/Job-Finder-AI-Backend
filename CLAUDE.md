@@ -191,7 +191,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Shared Redis | `core/redis_client.py` | One client per process (`get_redis()`); tests swap in fakeredis. |
 | Frontend | separate repo `Job-Finder-AI-Frontend` | React 18 + Vite + react-router, plain JS (no TypeScript), axios client with hardcoded `API_URL`. Pages: Home, Keywords, Skills, ATS Targets, Providers, Applications, Profile, Login. Deployed on Vercel. |
 
-**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts, `0008`–`0009` apply center, `0010` tracker & Gmail, `0011` ATS discovery, `0012`–`0013` voice, `0014` Gemini 2.5 Flash → 3.8 Flash); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
+**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts, `0008`–`0009` apply center, `0010` tracker & Gmail, `0011` ATS discovery, `0012`–`0013` voice, `0014` Gemini 2.5 Flash → 3.8 Flash, `0015` prep-pack error detail, `0016` ATS resolver probes, `0017` target companies, `0018` generic AI apply, `0019` job-alert digest address); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
 
 **CI:** `.github/workflows/tests.yml` runs the tests on every push and pull request (no secrets needed).
 
@@ -300,7 +300,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 - Migration `0005` (run `alembic upgrade head`).
 - New dependencies: `pypdf`, `python-docx` (+ `lxml`) — `pip install -r requirements.txt` on deploy.
 - The worker must run for resume parsing (default queue).
-- New env (all optional): `RESUME_MAX_BYTES` (5 MB), `RESUME_MAX_PER_USER` (20), `RESUME_PARSE_MAX_CHARS` (20000), `SEARCH_PROFILES_MAX_PER_USER` (20), `RATE_LIMIT_RESUME_UPLOAD` (10/hour), `RATE_LIMIT_PROFILE_AI` (20/hour).
+- New env (all optional): `RESUME_MAX_BYTES` (4 MB since QA1 — Vercel proxies ~4.5 MB bodies), `RESUME_MAX_PER_USER` (20), `RESUME_PARSE_MAX_CHARS` (20000), `SEARCH_PROFILES_MAX_PER_USER` (20), `RATE_LIMIT_RESUME_UPLOAD` (10/hour), `RATE_LIMIT_PROFILE_AI` (20/hour).
 - Stored resumes, like stored keys, depend on `SECRETS_MASTER_KEY`.
 
 ### 6.7 Phase 3.1 status — free job sources (branch `dev`)
@@ -342,7 +342,7 @@ Plan: `docs/plans/P3.2-match-insights-alerts.md` (all ten owner decisions approv
 | The Muse | ✅ sends the platform's `themuse` key when saved; stays off by default (403 to non-browser clients). |
 | Paid-only | ✅ Naukri via Apify unchanged (paid); free Naukri path = alert emails in P5. Serper.dev (no jobs endpoint), Scrappa, DataForSEO not built. |
 | Profile | ✅ `applicant_info.willing_to_relocate`, `relocation_locations`, `requires_sponsorship`; `eeo` answers (default `prefer_not_to_say`) sealed in `profiles.eeo_encrypted` (`key_store.seal`), returned only to the owner, never logged or sent to AI. Omitting `eeo` keeps saved answers. |
-| Job alerts | ✅ `/alerts` CRUD (≤ `JOB_ALERTS_MAX_PER_USER`), `run-now`, runs, run jobs. Beat tick (`job_finder.alerts_tick`, maintenance queue) claims due alerts with a conditional UPDATE; `job_finder.run_job_alert` runs the profile through `_process_job` (seen jobs never re-scored or re-sent), stores `job_alert_runs`, emails a plain-text digest. Entitlement `job_alerts` (on, 5 runs/day). Disabled users and accounts without search/scoring are skipped with a reason. |
+| Job alerts | ✅ `/alerts` CRUD (≤ `JOB_ALERTS_MAX_PER_USER`), `run-now`, runs, run jobs. Beat tick (`job_finder.alerts_tick`, maintenance queue) claims due alerts with a conditional UPDATE; `job_finder.run_job_alert` runs the profile through `_process_job` (seen jobs never re-scored or re-sent), stores `job_alert_runs`, emails a plain-text digest. Entitlement `job_alerts` (on, 5 runs/day). Disabled users and accounts without search/scoring are skipped with a reason. **2026-10-26 (migration `0019`):** the digest goes to the sign-in email (`email_to` NULL) or one of the user's connected Gmail addresses (`GET /alerts` → `email_options`; any other address → 422 `alert_email_not_allowed`; a Gmail disconnected later falls back to the sign-in email; `sends_to` on each alert). Jobs no AI model could score are counted (`counts.unscored`) and explained in the run's `error` (run still `done`); they are not marked seen, so the next run retries them. |
 | Tests | ✅ 202 total (29 for P3.2). |
 | Not in P3.2 | In-app notification centre (runs are listed per alert), HTML email, per-alert source choice, Bright Data verified with a real key, applicant counts for non-LinkedIn sources (none publish them). |
 
@@ -458,7 +458,7 @@ Plan: `docs/plans/P7-voice-prep.md` (owner approved all defaults 2026-10-20, plu
 | Registry seeds | ✅ Migration `0012`: Groq **Whisper Large v3 Turbo** (`stt`, on) and **Browser voice** (`tts`, on, no key); **OpenRouter** `openai/gpt-oss-120b:free` as the last fallback for every text task (priority 900, **off** until a platform key with scope `openrouter` is stored and the row switched on); **OpenAI** `gpt-5-mini`, `gpt-4o-mini-transcribe`, `gpt-4o-mini-tts` (**off**, need an `openai` key — check names/prices before switching on). Admin "Test" works for speech rows. |
 | Speech | ✅ `providers/voice/`: VAD (`webrtcvad`, energy fallback) cuts 16 kHz PCM16 into utterances (end after `VOICE_END_OF_TURN_MS`), OpenAI-compatible `/audio/transcriptions` STT (Groq, OpenAI) and `/audio/speech` TTS, browser TTS. `services/voice_speech.py` picks them through the registry with failover; usage ledgered (STT seconds / TTS characters in `tokens_in`). P7b adds **Deepgram Nova-3 streaming** (`providers/voice/deepgram.py`: partials, endpointing + UtteranceEnd, diarization for mic-only, KeepAlive, one reconnect; migration `0013` seeds it **paid, priority 5, needs a `deepgram` key**) — used for the copilot's interviewer channel; the user's own channel uses the cheaper per-utterance model. Deepgram Aura / ElevenLabs voices are not built (browser / OpenAI voices cover Practice). |
 | Practice socket | ✅ `POST /voice/sessions` → single-use stream token (60 s, jti in Redis) → `WS /voice/sessions/{id}/stream`, first message `{"type":"auth"}` (close 4401). Gates: `voice_prep`, owner, live session, one live voice session per user (Redis lock; 4409). Binary frames (channel, ms, PCM; > 100 ms → 1009). Interviewer streams sentence by sentence (`interviewer.delta`; `[Q]/[F]/[END]` tags pick question / follow-up / closing; ≤ 1 follow-up per question); typed answers (`{"type":"text"}`); pause/resume/repeat/skip/end; speech before the reply starts cancels it, speech while it speaks is a barge-in (turn `interrupted`); idle 30 s → paused, 60 s → ended; max 45 min; cost cap $0.50 → free models only, then end (4402); reconnect within 60 s resumes (`session.resumed`). Latency per turn (`stt_ms`, `first_token_ms`, `first_word_ms`). |
-| Feedback | ✅ Celery `voice_finalize` (default queue; also ends dropped sessions after the resume window): one `interview_eval` call → per-answer scores 1–5 (accuracy, relevance, structure, clarity) + delivery from pace/fillers, STAR parts, strengths, improvements, model answer **grounded** in resume + approved stories + the user's own answers; session summary, weak questions, latency p50/p95. `GET /voice/sessions/{id}/feedback`, `/voice/history`, `/voice/progress`. |
+| Feedback | ✅ Celery `voice_finalize` (default queue; also ends dropped sessions after the resume window): one `interview_eval` call → per-answer scores 1–5 (accuracy, relevance, structure, clarity) + delivery from pace/fillers, STAR parts, strengths, improvements, model answer **grounded** in resume + approved stories + the user's own answers; session summary, weak questions, latency p50/p95. `GET /voice/sessions/{id}/feedback`, `/voice/history`, `/voice/progress`. When every AI model is busy the evaluation is retried after 60 / 180 / 600 s (feedback stays `pending`), then `failed`; `POST /voice/sessions/{id}/feedback/retry` (failed only, 10/hour) starts it again. A typed answer the socket can't take (paused, or no question waiting) gets `error answer_not_expected` instead of being dropped. |
 | Story bank | ✅ `GET/POST /story-bank`, `PUT/DELETE /story-bank/{id}`, `POST /story-bank/{id}/approve`, `POST /story-bank/draft-from-resume` (Celery `story_bank_draft`, grounded, drafts unapproved). |
 | Privacy | ✅ No audio stored anywhere (utterances dropped after STT); every transcript/model-answer text sealed; `DELETE /voice/sessions/{id}`, `DELETE /voice/history`; daily `purge_voice_data` after `VOICE_TRANSCRIPT_RETENTION_DAYS` (90). `GET/PUT /voice/settings` carries the Live Copilot acknowledgement text + version (enforcement is P7b). Kill switch flag `live_copilot_enabled`; `live_copilot` entitlement stays off by default. |
 | Copilot gates (P7b) | ✅ `POST /voice/copilot/acknowledge {version}` (current `COPILOT_ACK_VERSION` only, audited; a new version asks again). Copilot sessions need the `live_copilot` entitlement (**off by default**), the global flag `live_copilot_enabled` (503 when off) and the current acknowledgement — checked on session create, token refresh and again when the socket opens (4403 `feature_disabled` / `copilot_ack_required`). No hide/stealth/evasion option exists (a test checks the settings schema). |
@@ -475,6 +475,97 @@ Plan: `docs/plans/P7-voice-prep.md` (owner approved all defaults 2026-10-20, plu
 - Live Copilot for a user: Admin → Users → entitlements → turn on `live_copilot`; the user accepts the notice on first use. Fast copilot speech recognition: add a platform (or BYOK) key with scope `deepgram`; the row is paid, so the user also needs `premium_models` or their own key.
 - To use OpenRouter as fallback: Admin → Platform keys → add scope `openrouter`, then switch on "GPT-OSS 120B (OpenRouter, fallback)" in Admin → AI models. ChatGPT: add scope `openai`, check the model names, switch the OpenAI rows on.
 - New env (all optional): `RATE_LIMIT_VOICE_SESSIONS` (20/day), `VOICE_PRACTICE_MAX_MINUTES` (45), `VOICE_COPILOT_MAX_MINUTES` (90), `VOICE_PRACTICE_COST_CAP_USD` (0.50), `VOICE_COPILOT_COST_CAP_USD` (1.00), `VOICE_TRANSCRIPT_RETENTION_DAYS` (90), `VOICE_RESUME_SECONDS` (60), `VOICE_IDLE_PAUSE_SECONDS` (30), `VOICE_END_OF_TURN_MS` (700), `VOICE_MIN_SPEECH_MS` (300), `VOICE_MAX_UTTERANCE_SECONDS` (60), `VOICE_SPECULATIVE_GRACE_MS` (400), `VOICE_FIRST_TOKEN_TIMEOUT_MS` (2500), `VOICE_STT_TIMEOUT_SECONDS` (15), `VOICE_MAX_FRAME_MS` (100), `VOICE_AUDIO_QUEUE_MS` (2000), `VOICE_STREAM_TOKEN_SECONDS` (60), `VOICE_VAD_AGGRESSIVENESS` (2), `VOICE_GROUNDING_MIN` (0.15), `COPILOT_ACK_VERSION` (2026-10), `STORY_BANK_MAX_PER_USER` (100).
+
+### 6.14 QA1 — quick wins from the live QA pass (branch `dev`)
+
+Plan: `docs/plans/QA1-quick-wins.md` (owner approved the recommended defaults 2026-10-25).
+
+| Item | State |
+|------|-------|
+| AI failures by kind | ✅ `ai_router.failure_kind`: rate limit (429/quota) pauses only that model for `AI_RATE_LIMIT_PAUSE_SECONDS`, doubling while it repeats (cap `AI_RATE_LIMIT_MAX_PAUSE_SECONDS`); broken setup (401/402/403/404, retired model, missing package) → `AI_BROKEN_PAUSE_SECONDS`; an unusable reply never pauses a model; other errors use the breaker. The pause reason is the `ai_open:` value and shows as `pause_reason` in `GET /models` and admin health. When every model is paused for a passing reason, the one back soonest is still tried once. |
+| Provider slots | ✅ at most `AI_PROVIDER_CONCURRENCY` calls per provider at once (Redis sorted set, stale slots expire); waits up to `AI_PROVIDER_SLOT_WAIT_SECONDS`, then calls anyway. Streams (voice) are not slotted. |
+| Latest search | ✅ `GET /pipeline/runs/latest` (newest run started from Jobs while Redis holds it, 6 h; job-alert runs have `kind: "alert"` and are left out) with `keywords`, `skipped_sources`, `created_at`. |
+| "Will run" | ✅ `provider_catalog.search_availability`: Naukri (paste-in) and Naukri via Apify (not used by Jobs searches) no longer say "will run", so `GET /providers` matches `effective_sources`. Key reasons use display names ("needs an Adzuna API key"). |
+| Prep pack errors | ✅ `apply_packs.error` = one short line for people; `error_detail` (migration `0015`) = which models were tried and why. |
+| Resume size | ✅ `RESUME_MAX_BYTES` default 4 MB: the frontend now reaches the API through a Vercel rewrite, which caps bodies at ~4.5 MB. |
+| Health detail | ✅ public `GET /health` returns only `{status}` (503 when unhealthy); the checks (database, queues, AI setup, scheduler) moved to admin-only `GET /api/v1/admin/system/health`. |
+
+**Operational changes introduced in QA1**
+- Migration `0015` (run `alembic upgrade head`).
+- The frontend calls the API through its own origin (`vercel.json` rewrite `/api/*` → this server), so the refresh cookie is first-party. The API now sees Vercel's IPs: per-IP rate limits are shared across users until a custom domain replaces the rewrite. Voice WebSockets still go straight to this server (`VITE_WS_ORIGIN`).
+- New env (all optional): `AI_RATE_LIMIT_PAUSE_SECONDS` (60), `AI_RATE_LIMIT_MAX_PAUSE_SECONDS` (1800), `AI_BROKEN_PAUSE_SECONDS` (3600), `AI_PROVIDER_CONCURRENCY` (2, 0 = off), `AI_PROVIDER_SLOT_WAIT_SECONDS` (30).
+- Admin steps after deploy: switch off "Qwen3 8B (Hugging Face)" (402, no credits) and "Gemini 3.7 Flash"; add a platform key with scope `openrouter` and switch on the OpenRouter fallback row.
+
+### 6.15 QA2 — search speed, prep, profile fill, ATS quality (branch `dev`)
+
+Plan: `docs/plans/QA2-reliability-speed.md` (owner approved the recommended defaults 2026-10-25).
+
+| Item | State |
+|------|-------|
+| Batch scoring | ✅ `scorer.score_batch`: up to `SCORE_BATCH_SIZE` (5) jobs per AI call; jobs the reply skips are scored one by one; no model → `llm_failed` for all. Seam `celery_tasks._score_batch_llm` (tests fake it with `one_by_one`). |
+| Jobs shown while scoring | ✅ `celery_tasks._process_jobs`: triage every copy (dedupe, filters, seen, prefilter) first; jobs that need the AI go into the feed at once with `scoring: true`, then get scored in batches; the score replaces the entry (same id) or `pipeline_progress.remove_recorded` appends `{id, replaces, removed}`. `current_jobs()` folds the feed by id. Job alerts never show early. Cancel between batches takes the waiting jobs back out. |
+| Places searched once | ✅ `job_sources.search_locations`: a place inside another searched place (Mumbai with India; "Berlin, Germany" with Germany) is skipped for JobSpy/keyword APIs; Remote is never skipped. |
+| Run timings | ✅ seconds per source label and for scoring, summed over keyword tasks, in `GET /pipeline/{id}` → `timings` (meta hash fields `t:<label>`). |
+| Prep pack | ✅ tailored resume and cover letter run in parallel (own thread + DB session each); `GET /apply/prep/{id}` adds `steps` (Redis, 1 h) and `typical_seconds` (median of the last 20 ready packs). |
+| Profile from resume | ✅ `services/profile_fill.py`: after a master resume is parsed or reviewed, EMPTY applicant fields are filled (name, email, phone, city, country, links, years); typed values are never overwritten. Missing `total_experience_years` is computed from job dates (overlaps once, half-year steps). `PUT /profile` strips tracking parameters from links. |
+| ATS search | ✅ `location` takes several places (repeat or comma-separated; "remote" also matches remote-flagged jobs); postings older than `ATS_MAX_POSTING_AGE_DAYS` (90) are left out unless `any_age=true`; the same title in one company is one row with `more_locations`. Not done: real company names for slug-named companies ("Openai", "Wk") — needs each platform's board name in the crawler. |
+
+**Operational changes introduced in QA2**
+- No migration. New env (all optional): `SCORE_BATCH_SIZE` (5), `ATS_MAX_POSTING_AGE_DAYS` (90).
+- Feed protocol: clients must drop entries with `removed: true` and may render `scoring: true` entries without a score (the frontend from QA2 does).
+
+### 6.16 QA3 — company career pages inside Job Search (branch `dev`)
+
+Plan: `docs/plans/QA3-ats-in-job-search.md` (owner approved the recommended defaults 2026-10-25; the ATS page stays, optional).
+
+| Item | State |
+|------|-------|
+| Window | ✅ `company_ats` jobs in a Job Search go back `max(search window, ATS_SEARCH_MIN_DAYS)` (14) days (`ats_search.search_window_days`); before, a 24 h search saw only jobs first seen that day (246 of 128k in production). Companies found become "hot". |
+| Live top-up | ✅ `celery_tasks._start_ats_topup`: fewer than `ATS_MIN_COMPANIES` index jobs for a keyword → `ats_search.topup` runs in a thread while the other sources are searched (shared 10-minute lock per query with the ATS page); its new jobs go through the same triage/scoring into the same run (`_finish_ats_topup`, timing "Company career pages (live)"). |
+| Real names | ✅ `AtsPlatform.board_name`: Lever, Ashby, Gem, Workable, Workday from the careers page title (`clean_board_name`: "Ramp Jobs" → "Ramp", "CAREERS AT NVIDIA" → "NVIDIA"), Rippling from a job's `companyName`; Greenhouse, Recruitee, SmartRecruiters, Personio, Breezy, Teamtailor already in the list. Looked up once per `ATS_NAME_RETRY_DAYS` for slug-named companies; admin names kept; a 304 for a slug-named company clears the ETag so the next crawl reads the name. |
+| Company resolver | ✅ `services/ats_resolver.py`: company names (+ `company_url` = JobSpy's `company_url_direct`, and non-board apply pages) from every keyword search are queued (`resolve_ats_companies`, maintenance queue; names only, nothing about the user). Website fingerprint (links/iframes to a supported ATS; public hosts only, ≤ 2 redirects, 300 kB) → else up to 3 slugs on 8 guessable platforms through the crawler host slots, accepted only when the board's name matches (filler words dropped, ≥ 0.8 overlap). Outcome in `ats_probes` (migration `0016`); misses retried after `ATS_RESOLVER_RETRY_DAYS`; new companies origin `resolver`. ≤ `ATS_RESOLVER_MAX_NAMES` per search within `ATS_RESOLVER_SECONDS`. |
+| Frontend | ✅ Jobs: "Company site · Greenhouse" badge, "Only company career pages" filter, "Browse by company" link (`/ats-targets?q=`). |
+
+**Operational changes introduced in QA3**
+- Migration `0016` (run `alembic upgrade head`).
+- New env (all optional): `ATS_SEARCH_MIN_DAYS` (14), `ATS_NAME_RETRY_DAYS` (30), `ATS_RESOLVER_ENABLED` (true), `ATS_RESOLVER_MAX_NAMES` (20), `ATS_RESOLVER_SECONDS` (60), `ATS_RESOLVER_RETRY_DAYS` (30).
+- More outbound requests from the maintenance worker (resolver probes, one name lookup per slug-named company). Switch the resolver off with `ATS_RESOLVER_ENABLED=false` if a platform complains.
+
+### 6.17 QA4 — Target companies (branch `dev`)
+
+Plan: `docs/plans/QA4-target-companies.md` (owner approved the recommended defaults 2026-10-25).
+
+| Item | State |
+|------|-------|
+| Follow | ✅ `ats_follows` (company, or a name still being looked up: `searching` / `not_found`), ≤ `TARGET_COMPANIES_MAX_PER_USER`. `ats_companies.follower_count`; followed companies are crawled every `ATS_FOLLOWED_REFRESH_HOURS` (3) and checked soon after the first follow. Follow by name: a known company (resolver answer or a matching registry name) at once, otherwise `ats_follow_lookup` runs the resolver; a name found later by any search attaches its waiting follows (`target_companies.attach_found`). |
+| New roles | ✅ a crawl that adds jobs to a followed company queues `ats_follow_match`: title synonyms (`ats_search.expansions`, no AI) × places → `ats_follow_hits`. Titles/places from `ats_follow_settings`, else the default search profile titles and Profile places + Remote. Hits purged after `ATS_FOLLOW_HIT_RETENTION_DAYS` (with `purge_ats_jobs`). |
+| Alerts | ✅ beat `ats_follow_digest` (every `ATS_FOLLOW_DIGEST_TICK_SECONDS`): `instant` = at most hourly, `daily` (default) = after `ATS_FOLLOW_DIGEST_HOUR` local, `off` = page only. Plain-text email, ≤ 20 roles; closed jobs, disabled users and accounts without `ats_discovery` skipped. |
+| API | ✅ `GET /ats/following`, `PUT/DELETE /ats/companies/{id}/follow`, `DELETE /ats/following/{id}`, `POST /ats/following/by-name`, `GET /ats/following/new`, `POST /ats/following/seen`, `GET /ats/suggestions` (cached a day), `GET/PUT /ats/following/settings`. `followed` on ATS search groups, company jobs and Jobs feed entries. |
+| Frontend | ✅ "ATS targets" → **Target companies** (My companies / Suggested / Browse tabs), Follow on every company, ★ "Company you follow" on Jobs. Dashboard card "New at your companies" (followed companies with unseen roles, hidden when you follow none). |
+
+**Operational changes introduced in QA4**
+- Migration `0017` (run `alembic upgrade head`). Beat runs `ats_follow_digest`; emails use the OTP/alert email settings.
+- New env (all optional): `ATS_FOLLOWED_REFRESH_HOURS` (3), `TARGET_COMPANIES_MAX_PER_USER` (50), `ATS_FOLLOW_DIGEST_TICK_SECONDS` (900), `ATS_FOLLOW_HIT_RETENTION_DAYS` (30), `ATS_FOLLOW_DIGEST_HOUR` (9), `RATE_LIMIT_ATS_FOLLOW` (60/hour).
+
+### 6.18 P4c — Generic AI apply: the AI form reader (branch `dev`)
+
+Plan: `docs/plans/P4c-generic-ai-apply.md` (owner approved all eight defaults 2026-10-26; the owner's Gemini key is now paid, so Gemini — priority 10 — is tried first and the other models stay as fallbacks).
+
+| Item | State |
+|------|-------|
+| Sites | ✅ `app/apply/sites.py`: hosted forms on Ashby, SmartRecruiters, Workable, Recruitee, Personio, Breezy, Teamtailor, Rippling, Gem, Jobvite, JazzHR (applytojob.com), Pinpoint → adapter **`generic`** (`apply_options.detect_adapter`); a company-ATS job whose source is one of those platforms (custom careers host) too. Workday / iCIMS stay out (they need an account). `apply_options.auto` is available for them; the engine checks the opt-in on click. |
+| Tier 1 — text | ✅ `app/apply/generic.py` `GenericAdapter` (`multi_step`): `forms.extract` on the `<form>` with the most controls (a footer newsletter box never wins); Apply / Next / Submit buttons by their text; router task **`form_map`** (text, JSON, `valid_map`) only when that is ambiguous. Sign-in / account pages, captchas and **any other website** (site lock: the apply URL's domain + the hosts above) → `needs_user`. |
+| Pages | ✅ `apply_engine._prepare_steps`: each page is answered (`answer_bank` as before; answers from an earlier pass kept), screenshotted (`apply_proofs.kind = "step"`), filled and left with Next, up to `GENERIC_APPLY_STEP_LIMIT`; the walk stops before the final Submit. A required question nobody can answer → `awaiting_input` with `plan.complete = false`; answering it moves the run to `queued` and `POST /apply/runs/{id}/answer` queues prepare again. `_submit_steps` replays the pages (new required question → `needs_user`) and submits the last one; the outcome rules are P4b's. |
+| Tier 2 — screenshots | ✅ `app/apply/vision.py`, only when tier 1 is stuck (a field it couldn't fill, a page with no button it knows, Next that didn't move): numbered marks on the page (incl. pointer-cursor divs used as options) → router task **`form_vision`** (one screenshot per call) → ONE action: `click` (never a button that sends the application), `fill(key)` / `choose(key)` (stored answers only — the model never writes text; `choose` must match the answer and is never a text box), `upload(key)`, `scroll`, `done`, `give_up`; `point(role)` only when asked which button is Next/Submit. Only this gap's answers go in the prompt; EEO answers and file paths never do. Limits per run: `GENERIC_APPLY_VISION_MAX_STEPS` and `GENERIC_APPLY_VISION_MAX_USD` (usage ledger). Usage + action log (no values) in `apply_runs.plan.vision`, shown as `vision` on the run. |
+| Router | ✅ `ai_router.LISTED_ONLY_TASKS` = speech tasks + `form_vision`: served only by rows that list it; a row listing only `form_vision` still serves every text task. Migration `0018` adds it to the Gemini rows and OpenAI GPT-5 mini; the OpenRouter `gpt-oss-120b:free` row is text only. |
+| Gates | ✅ `apply_settings.allow_generic` (default off; `PUT /apply/settings {allow_generic}`; turning it off cancels its runs), `generic_notice` in the settings; level 2 + risk notice as before; `APPLY_GENERIC_DAILY_CAP` (5, inside `APPLY_DAILY_CAP`); never level 3. **Test mode:** with `GENERIC_APPLY_SUBMIT=false` (default) runs stop at `awaiting_review` saying so, approve returns 409 `generic_test_mode`, and submit refuses. |
+| Tests | ✅ 11 in `tests/test_generic_apply.py` — real Chromium on `tests/fixtures/apply/generic_*.html` (one page with newsletter box + hidden instructions, three pages behind an Apply button with a question half-way, a custom country picker fixed by the screenshot fallback after `form_map` picked the Submit button, a sign-in page) + the fallback's refusals, step/cost limits and site lock. `forms.extract` now clears old marks and skips file inputs in hidden sections (both needed for multi-page forms). |
+| Not in P4c | Frontend (F4.1: "AI form reader · beta" badge, settings toggle with the notice, page gallery on the run); live checks on real Ashby/SmartRecruiters/Workable forms (read-only, like P4b's); the P8 local agent reusing the reader for sign-in sites. |
+
+**Operational changes introduced in P4c**
+- Migration `0018` (run `alembic upgrade head`).
+- New env (all optional): `GENERIC_APPLY_SUBMIT` (false — turn on after ~2 weeks of test-mode runs), `APPLY_GENERIC_DAILY_CAP` (5), `GENERIC_APPLY_STEP_LIMIT` (5), `GENERIC_APPLY_VISION_MAX_STEPS` (12), `GENERIC_APPLY_VISION_MAX_USD` (0.25).
+- The cost cap counts only what the usage ledger prices: set the paid Gemini row's cost per 1k tokens in Admin → AI models, or only the step cap limits the screenshot fallback. Admins can add `form_vision` to any other image-reading model (Claude, an OpenRouter vision model).
 
 ---
 
@@ -617,7 +708,7 @@ ApplyRequest ──► Preflight ──► Prepare ──► Fill ──► (Rev
 6. **Verify:** detect the confirmation page/message; capture an encrypted screenshot as proof (retention-limited).
 7. **Record:** `record_status()` for every step, with `status_source = apply_engine`.
 
-**Adapter interface** (`app/apply/adapters/`): `can_handle(job)`, `extract_form(page)`, `fill(page, plan)`, `submit(page)`, `detect_outcome(page)`. Existing `AUTO_APPLY_CAPABLE_SOURCES` and `_FILL_DISPATCH` become the adapter registry. Planned adapters: LinkedIn Easy Apply (exists, extend), Greenhouse, Lever, Workday, SmartRecruiters, Recruitee, then a **generic AI form-filler** for unknown career pages (lowest trust level, never full auto).
+**Adapter interface** (`app/apply/adapters/`): `can_handle(job)`, `extract_form(page)`, `fill(page, plan)`, `submit(page)`, `detect_outcome(page)`. Existing `AUTO_APPLY_CAPABLE_SOURCES` and `_FILL_DISPATCH` become the adapter registry. Planned adapters: LinkedIn Easy Apply (exists, extend), Greenhouse, Lever, Workday, SmartRecruiters, Recruitee, then a **generic AI form-filler** for unknown career pages (lowest trust level, never full auto) — built in P4c as the AI form reader (Section 6.18).
 
 **Hard stops that always hand control to the user:** captcha, login wall, OTP/2FA, unusual question types, file formats not supported, any adapter error. Never try to bypass captcha or bot detection.
 
@@ -901,7 +992,7 @@ All tables have `id`, `created_at`, `updated_at`. User-owned tables have `user_i
 | `application_events` | application_id, status, status_source, note, payload, occurred_at |
 | `apply_runs` | user_id, job_id, job_key, company_title, mode (auto/fast), level, adapter, apply_url, state, active_key (unique while active), plan (fields + answers, EEO sealed), resume/pack/application ids, message, approved/submitted_at (P4b) |
 | `apply_proofs` | run_id, kind (confirmation/stopped), confirmation_text, page_url, encrypted PNG; 90-day retention (P4b) |
-| `apply_settings` | user_id, level, risk_accepted_at, hours_start/end, timezone, paused (P4b) |
+| `apply_settings` | user_id, level, risk_accepted_at, hours_start/end, timezone, paused (P4b), allow_generic (P4c) |
 | `answer_bank` | user_id, question_hash, question, answer, field_type, approved, origin (user/ai), uses |
 | `apply_packs` | user_id, job_id, master_resume_id + master_hash, status, tailored_resume_id, cover_letter, email draft, dropped (P4a) |
 | `email_accounts` | user_id, gmail_address, token_sealed, scopes, status (active/needs_reconnect), last_history_id, next_sync_at, failures (P5) |
@@ -910,6 +1001,8 @@ All tables have `id`, `created_at`, `updated_at`. User-owned tables have `user_i
 | `ats_companies` | ref_key (unique), platform, slug, host, site, name, careers_url, origin, active, job_count, etag, last_crawled/ok_at, next_crawl_at, hot_until, fail/gone counts (P6; shared, no user_id) |
 | `ats_jobs` | company_id + external_id (unique), title, title_norm, location, country, remote, department, url, snippet ≤ 300, job_key, posted_at, first/last_seen_at, closed_at, tsv (Postgres only); no embedding yet (P6) |
 | `ats_platforms` | platform, enabled, health (P6) |
+| `ats_probes` | name_norm (pk), name, company_id?, via (website/slug), checked_at — company resolver outcomes (QA3) |
+| `ats_follows` / `ats_follow_hits` / `ats_follow_settings` | user follows a company (or a name being looked up); new matching roles until seen/emailed; alert mode, titles, places, time zone (QA4) |
 | `provider_catalog` | key, name, tier, requires_key, tos_risk, rate_limit, enabled_global, health |
 | `user_provider_settings` | user_id, provider_key, enabled, free_only flag |
 | `ai_models` | see Section 7.9 |
@@ -968,7 +1061,7 @@ Rules: tasks are idempotent; every task receives `user_id`; secrets are resolved
 
 ## 11. Frontend structure and UX
 
-Navigation: **Dashboard · Jobs · Apply Center · Tracker · ATS Targets · Profile & Resume · Keywords & Skills · Providers · Interview Prep · Settings** (+ **Admin** for admin/manager).
+Navigation: **Dashboard · Jobs · Apply Center · Tracker · Target companies · Profile & Resume · Keywords & Skills · Providers · Interview Prep · Settings** (+ **Admin** for admin/manager).
 
 | Screen | Key behaviour |
 |--------|---------------|
@@ -976,7 +1069,7 @@ Navigation: **Dashboard · Jobs · Apply Center · Tracker · ATS Targets · Pro
 | Jobs | Live-streaming results from a run; each card has **Auto apply** and **Manual apply**; save/hide; shows score + AI reason; sources badge (LinkedIn kept when duplicates) |
 | Apply Center | Active runs, review queue (needs input / needs review), autopilot level and caps, risk notice |
 | Tracker | Table + kanban, detail timeline, Gmail status, "needs review" email inbox |
-| ATS Targets | One input: job title → grouped company list with platform badges and filters |
+| Target companies | Followed companies with new roles and alert settings; suggestions; browse by job title → grouped company list with platform badges, filters and Follow (QA4) |
 | Profile & Resume | Upload/replace, parsed-profile editor, versions, preferences, answer bank |
 | Keywords & Skills | Single combined editor (Section 7.3) |
 | Providers | Source toggles, **Free tools only** switch, health badges, BYOK keys |

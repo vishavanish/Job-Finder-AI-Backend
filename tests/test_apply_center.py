@@ -285,13 +285,21 @@ def test_prep_pack_partial_and_total_failure(client, make_user, fake_ai):
     celery_tasks.build_apply_pack_task(pack_id, user_id)
     pack = client.get(f"{API}/apply/prep/{pack_id}", headers=headers).json()
     assert pack["status"] == "ready" and pack["tailored_resume_id"] and pack["cover_letter"] is None
-    assert "Cover letter" in pack["error"] and pack["email_to"] is None and pack["mailto"] is None
+    # QA1 §7: a short message for people; the model-by-model detail kept apart.
+    assert pack["error"] == ("The AI models are busy right now, so the cover letter wasn't written. "
+                             "Try again in a few minutes.")
+    assert pack["error_detail"].startswith("Cover letter: No AI model could run 'cover_letter'")
+    assert pack["email_to"] is None and pack["mailto"] is None
     assert "I would like to apply for the Backend Engineer role at Fail Co" in pack["email_body"]
 
     fake_ai["state"]["fail"] = {"cover_letter", "resume_tailor"}
     client.post(f"{API}/apply/prep", json={"job_id": job_id, "regenerate": True}, headers=headers)
+    assert client.get(f"{API}/apply/prep/{pack_id}", headers=headers).json()["error_detail"] is None  # reset
     celery_tasks.build_apply_pack_task(pack_id, user_id)
-    assert client.get(f"{API}/apply/prep/{pack_id}", headers=headers).json()["status"] == "failed"
+    pack = client.get(f"{API}/apply/prep/{pack_id}", headers=headers).json()
+    assert pack["status"] == "failed"
+    assert "tailored resume and cover letter weren't written" in pack["error"]
+    assert "Tailored resume:" in pack["error_detail"] and "Cover letter:" in pack["error_detail"]
 
 
 def test_cover_letter_validation_rejects_placeholders_and_inventions():
@@ -426,3 +434,44 @@ def test_email_apply_is_recorded_as_emailed(client, make_user):
     r = client.post(f"{API}/applications/manual", json={"job_id": job_id, "via": "email"}, headers=headers)
     assert r.status_code == 201 and r.json()["status"] == "emailed"
     assert client.get(f"{API}/jobs?state=applied", headers=headers).json()["total"] == 1
+
+
+def test_prep_pack_writes_resume_and_letter_at_the_same_time(client, make_user, monkeypatch):
+    """QA2 §2: both AI steps run together, each on its own DB session, and the
+    pack reports per-part steps plus a typical duration."""
+    import threading
+
+    user_id, headers = make_user()
+    _resume(client, headers)
+    job_id = _job(company="Parallel Co")
+    both_started = threading.Barrier(2, timeout=5)  # fails unless the two calls overlap
+    sessions = set()
+
+    def complete(db, **kw):
+        sessions.add(id(db))
+        both_started.wait()
+        reply = {"resume_tailor": TAILOR_REPLY, "cover_letter": LETTER}[kw["task"]]
+        assert kw["validate"](reply)
+        return _Result()
+
+    monkeypatch.setattr(ai_router, "complete", complete)
+    for seconds in (10, 20, 30):
+        apply_prep.record_duration(seconds)
+    pack_id = client.post(f"{API}/apply/prep", json={"job_id": job_id}, headers=headers).json()["id"]
+    assert celery_tasks.build_apply_pack_task(pack_id, user_id)["status"] == "ready"
+    assert len(sessions) == 2
+
+    pack = client.get(f"{API}/apply/prep/{pack_id}", headers=headers).json()
+    assert pack["steps"] == {"resume": "done", "cover_letter": "done"}
+    assert pack["typical_seconds"] is not None and pack["cover_letter"]
+
+
+def test_prep_pack_step_shows_which_part_failed(client, make_user, fake_ai):
+    user_id, headers = make_user()
+    _resume(client, headers)
+    job_id = _job(company="Half Co", description="No email here.")
+    fake_ai["state"]["fail"] = {"cover_letter"}
+    pack_id = client.post(f"{API}/apply/prep", json={"job_id": job_id}, headers=headers).json()["id"]
+    celery_tasks.build_apply_pack_task(pack_id, user_id)
+    assert client.get(f"{API}/apply/prep/{pack_id}", headers=headers).json()["steps"] == {
+        "resume": "done", "cover_letter": "failed"}

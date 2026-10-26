@@ -3,7 +3,8 @@ app/models/alerts.py
 ----------------------
 Saved job alerts (P3.2): a search profile run once a day at the user's
 chosen local hour; new matches above `min_score` are kept in a run row and
-emailed as a digest. `next_run_at` is UTC and doubles as the claim — the
+emailed as a digest (to the sign-in email or a connected Gmail address,
+`email_to`). `next_run_at` is UTC and doubles as the claim — the
 scheduler only runs an alert whose next_run_at it managed to move forward.
 """
 from __future__ import annotations
@@ -37,6 +38,7 @@ class JobAlert(Base):
     timezone = Column(String(64), nullable=False, default="Asia/Kolkata")
     min_score = Column(Integer, nullable=False, default=75)
     email_digest = Column(Boolean, nullable=False, default=True)
+    email_to = Column(String(255), nullable=True)  # NULL = sign-in email; else a connected Gmail address
     enabled = Column(Boolean, nullable=False, default=True)
     last_run_at = Column(DateTime, nullable=True)
     next_run_at = Column(DateTime, nullable=True)

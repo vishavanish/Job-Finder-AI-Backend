@@ -72,7 +72,7 @@ def dispatched(monkeypatch):
     calls: list[dict] = []
 
     def fake_apply_async(self, args=None, kwargs=None, **options):
-        calls.append({"task": self.name, "args": args, "options": options})
+        calls.append({"task": self.name, "args": args, "kwargs": kwargs, "options": options})
 
     monkeypatch.setattr(Task, "apply_async", fake_apply_async)
     return calls

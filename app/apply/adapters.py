@@ -11,6 +11,8 @@ filling the form is shared (app/apply/forms.py).
   lever       jobs.lever.co/{company}/{id} -> its /apply form.
   linkedin    Easy Apply: fill only, NEVER submits (LinkedIn's terms; the
               user clicks Submit in the visible browser on their own PC).
+  generic     the AI form reader for other hosted career forms, possibly
+              several pages long (app/apply/generic.py, P4c).
 
 Adding a platform = a new class here + an entry in ADAPTERS (and in
 apply_options.detect_adapter). Nothing in the engine changes.
@@ -35,6 +37,7 @@ class HardStop(Exception):
 class Adapter:
     name = ""
     can_submit = True
+    multi_step = False  # True: the engine walks the form page by page (is_final / next_step)
     form_selector = "form"
     submit_selector = 'button[type="submit"], input[type="submit"]'
 
@@ -54,6 +57,10 @@ class Adapter:
         if button.count() == 0:
             raise HardStop("Could not find the Submit button.")
         button.click()
+
+    def for_run(self, tools) -> "Adapter":
+        """The adapter one run uses. Stateless adapters are shared; the generic one gets the run's AI tools."""
+        return self
 
     # The engine only calls these (tests swap the adapter, not the browser).
     def read_form(self, page) -> list[dict]:
@@ -151,7 +158,10 @@ class LinkedInAdapter(Adapter):
         raise HardStop("LinkedIn applications are submitted by you, not by the app.")
 
 
-ADAPTERS: dict[str, Adapter] = {a.name: a for a in (GreenhouseAdapter(), LeverAdapter(), LinkedInAdapter())}
+from app.apply.generic import GenericAdapter  # noqa: E402 — it subclasses Adapter
+
+ADAPTERS: dict[str, Adapter] = {a.name: a for a in (GreenhouseAdapter(), LeverAdapter(), LinkedInAdapter(),
+                                                    GenericAdapter())}
 
 
 def get(name: str) -> Adapter | None:

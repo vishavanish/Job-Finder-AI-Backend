@@ -1,0 +1,60 @@
+<!doctype html>
+<!-- Local stand-in for a three-page hosted application form behind an "Apply for this job" button
+     (SmartRecruiters / Workable style). Next checks the page's required fields and shows an error
+     instead of moving on. Submitting only changes this page. -->
+<html>
+<head><meta charset="utf-8"><title>Platform Engineer - Nimbus</title></head>
+<body>
+<h1>Platform Engineer</h1>
+<p>Remote · India</p>
+<button id="open" type="button">Apply for this job</button>
+<form id="app" style="display:none">
+  <section data-step="1">
+    <h2>Your details</h2>
+    <div><label for="fn">First name *</label><input id="fn" name="first_name" required></div>
+    <div><label for="ln">Last name *</label><input id="ln" name="last_name" required></div>
+    <div><label for="em">Email address *</label><input id="em" name="email" type="email" required></div>
+    <button type="button" class="next">Next</button>
+  </section>
+  <section data-step="2" style="display:none">
+    <h2>Experience</h2>
+    <div><label for="cv">Upload your resume *</label><input id="cv" name="cv" type="file" required></div>
+    <div><label for="np">What is your notice period? *</label><input id="np" name="notice" required></div>
+    <div><label for="why">Why Nimbus? *</label><textarea id="why" name="why" required></textarea></div>
+    <button type="button" class="back">Back</button>
+    <button type="button" class="next">Continue</button>
+  </section>
+  <section data-step="3" style="display:none">
+    <h2>Voluntary questions</h2>
+    <div><label for="gender">Gender</label>
+      <select id="gender" name="gender"><option value="">Select ...</option><option>Male</option><option>Female</option><option>Prefer not to say</option></select></div>
+    <div><label for="src">How did you hear about us?</label>
+      <select id="src" name="source"><option value="">Select ...</option><option>LinkedIn</option><option>Friend</option></select></div>
+    <button type="button" class="back">Back</button>
+    <button type="submit">Submit application</button>
+  </section>
+  <p class="error" id="err" style="display:none;color:red">This field is required</p>
+</form>
+<script>
+  const form = document.getElementById('app');
+  const show = (n) => form.querySelectorAll('section').forEach(s => s.style.display = s.dataset.step == n ? '' : 'none');
+  document.getElementById('open').addEventListener('click', () => {
+    document.getElementById('open').style.display = 'none'; form.style.display = ''; show(1);
+  });
+  form.querySelectorAll('.next').forEach(b => b.addEventListener('click', () => {
+    const sec = b.closest('section');
+    const empty = [...sec.querySelectorAll('[required]')].filter(i => !i.value);
+    const err = document.getElementById('err');
+    if (empty.length) { err.style.display = ''; empty.forEach(i => i.setAttribute('aria-invalid', 'true')); return; }
+    err.style.display = 'none';
+    show(Number(sec.dataset.step) + 1);
+  }));
+  form.querySelectorAll('.back').forEach(b => b.addEventListener('click', () => show(Number(b.closest('section').dataset.step) - 1)));
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    window.__submitted = Object.fromEntries([...new FormData(form)].map(([k, v]) => [k, v instanceof File ? v.name : v]));
+    document.body.innerHTML = '<h2>Application submitted</h2><p>Thank you for your application.</p>';
+  });
+</script>
+</body>
+</html>

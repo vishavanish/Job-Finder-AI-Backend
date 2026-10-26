@@ -75,6 +75,17 @@ class Settings(BaseSettings):
     # ---- AI router (CLAUDE.md 7.9) ----
     AI_BREAKER_FAILURES: int = 3          # consecutive failures before a model is skipped
     AI_BREAKER_COOLDOWN_SECONDS: int = 300
+    # Rate limits (429) pause only the model that hit them, for this long; a model that keeps
+    # hitting them waits twice as long each time, up to the max (QA1 §3).
+    AI_RATE_LIMIT_PAUSE_SECONDS: int = 60
+    AI_RATE_LIMIT_MAX_PAUSE_SECONDS: int = 1800
+    # A model that is set up wrong (bad key, no credits, retired model) is paused this long.
+    AI_BROKEN_PAUSE_SECONDS: int = 3600
+    # At most this many calls at once per provider (all workers together); 0 = no limit.
+    AI_PROVIDER_CONCURRENCY: int = 2
+    AI_PROVIDER_SLOT_WAIT_SECONDS: int = 30
+    # Jobs scored per AI call in a search (QA2 §1); 1 = one call per job as before.
+    SCORE_BATCH_SIZE: int = 5
     AI_REQUEST_TIMEOUT_SECONDS: int = 60
 
     # ---- Celery / Redis (Upstash) ----
@@ -118,6 +129,24 @@ class Settings(BaseSettings):
     ATS_CLOSED_RETENTION_DAYS: int = 7
     ATS_MAX_INDEXED_JOBS: int = 300000
     ATS_SEARCH_CACHE_SECONDS: int = 600
+    # Postings older than this are left out of ATS searches unless the user asks for any age (QA2 §4).
+    ATS_MAX_POSTING_AGE_DAYS: int = 90
+    # Career-page jobs in a Job Search go back at least this far, whatever the search's own window (QA3 §B):
+    # a board post is fresh for a day, a career-page post from last week is usually still open.
+    ATS_SEARCH_MIN_DAYS: int = 14
+    ATS_NAME_RETRY_DAYS: int = 30               # how often a board name is looked up for a slug-named company
+    # Company resolver (QA3 §A): company names in search results -> registry companies, without anyone adding them.
+    ATS_RESOLVER_ENABLED: bool = True
+    ATS_RESOLVER_MAX_NAMES: int = 20            # new names looked up per keyword search
+    ATS_RESOLVER_SECONDS: int = 60
+    ATS_RESOLVER_RETRY_DAYS: int = 30           # a name with no career page found is tried again after this
+    # Target companies (QA4): follow companies, get told when they post a matching role.
+    ATS_FOLLOWED_REFRESH_HOURS: int = 3         # companies someone follows are checked this often
+    TARGET_COMPANIES_MAX_PER_USER: int = 50
+    ATS_FOLLOW_DIGEST_TICK_SECONDS: int = 900
+    ATS_FOLLOW_HIT_RETENTION_DAYS: int = 30
+    ATS_FOLLOW_DIGEST_HOUR: int = 9             # local hour of the daily email
+    RATE_LIMIT_ATS_FOLLOW: str = "60/hour"
     ATS_GONE_AFTER: int = 3                     # 404s in a row before a company is switched off
     RATE_LIMIT_ATS_SEARCH: str = "30/minute"
     RATE_LIMIT_ATS_ADD_COMPANY: str = "10/hour"
@@ -208,7 +237,7 @@ class Settings(BaseSettings):
     RATE_LIMIT_PROFILE_AI: str = "20/hour"   # resume re-parse, title suggestions
 
     # ---- profile & search (P3) ----
-    RESUME_MAX_BYTES: int = 5 * 1024 * 1024
+    RESUME_MAX_BYTES: int = 4 * 1024 * 1024  # Vercel proxies ~4.5 MB bodies (QA1 §1)
     RESUME_MAX_PER_USER: int = 20
     RESUME_PARSE_MAX_CHARS: int = 20000      # resume text sent to the parser model
     SEARCH_PROFILES_MAX_PER_USER: int = 20
@@ -227,6 +256,12 @@ class Settings(BaseSettings):
     APPLY_HEADLESS: bool = True              # auto runs; Fast apply always opens a visible browser
     APPLY_PAGE_TIMEOUT_SECONDS: int = 45
     RATE_LIMIT_APPLY_RUNS: str = "30/hour"
+    # ---- generic AI apply (P4c) ----
+    GENERIC_APPLY_SUBMIT: bool = False       # test mode (prepare + review only) until the owner turns it on
+    APPLY_GENERIC_DAILY_CAP: int = 5         # AI form reader submits per user per day (inside APPLY_DAILY_CAP)
+    GENERIC_APPLY_STEP_LIMIT: int = 5        # form pages per application
+    GENERIC_APPLY_VISION_MAX_STEPS: int = 12  # screenshot-fallback actions per run
+    GENERIC_APPLY_VISION_MAX_USD: float = 0.25  # screenshot-fallback AI spend per run (from the usage ledger)
     # ---- app / infra ----
     APP_NAME: str = "Job Finder API"
     APP_PUBLIC_URL: str = ""  # frontend URL, used in emails (e.g. alert digests)

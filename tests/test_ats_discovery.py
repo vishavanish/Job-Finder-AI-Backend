@@ -521,3 +521,68 @@ def test_postgres_search_under_three_seconds_on_300k_jobs():
                                 hide_applied=False, page=1)
     elapsed = time.perf_counter() - start
     assert result["total_companies"] > 100 and elapsed < 3.0, elapsed
+
+
+# ---------------------------------------------------------------- QA2 §4
+
+def _seed_company(db, platform: str, slug: str, jobs: list[dict]):
+    c = company(db, AtsRef(platform, slug), name=slug.title())
+    rows = [{"external_id": f"{slug}-{i}", "title": j["title"], "location": j.get("location", ""),
+             "department": "", "url": f"https://jobs.example/{slug}/{i}", "posted": j.get("posted", ""),
+             "remote": j.get("remote", False), "country": "", "description": "Build things"}
+            for i, j in enumerate(jobs)]
+    ats_crawler.upsert_jobs(db, c, rows, complete=False, close=False)
+    c.last_ok_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.commit()
+
+
+def test_same_role_in_many_places_is_one_row_with_more_locations(db, make_user):
+    user_id, _ = make_user()
+    _seed_company(db, "ashby", "bjak", [
+        {"title": "Machine Learning Engineer, Applied AI", "location": "Germany (Remote)"},
+        {"title": "Machine Learning Engineer, Applied AI", "location": "Ireland (Remote)"},
+        {"title": "machine learning engineer, applied ai", "location": "China (Remote)"},
+        {"title": "Senior Machine Learning Engineer", "location": "Germany (Remote)"},
+    ])
+    group = ats_search.search(db, user_id, "machine learning engineer")["groups"][0]
+    rows = {j["title"]: j for j in group["top_jobs"]}
+    assert len(group["top_jobs"]) == 2
+    applied_ai = rows["Machine Learning Engineer, Applied AI"]
+    assert sorted([applied_ai["location"], *applied_ai["more_locations"]]) == [
+        "China (Remote)", "Germany (Remote)", "Ireland (Remote)"]
+
+
+def test_several_locations_and_remote_match_any_of_them(db, make_user):
+    user_id, _ = make_user()
+    seed_index(db, [
+        ("greenhouse", "acme", "Data Engineer", {"location": "Mumbai, India"}),
+        ("lever", "globex", "Data Engineer", {"remote": True, "location": "Anywhere"}),
+        ("ashby", "hooli", "Data Engineer", {"location": "Berlin, Germany"}),
+    ])
+    names = lambda **kw: {g["name"] for g in ats_search.search(db, user_id, "data engineer", **kw)["groups"]}  # noqa: E731
+    assert names(location=["Mumbai", "Remote"]) == {"Acme", "Globex"}
+    assert names(location="India, Remote") == {"Acme", "Globex"}
+    assert names(location=["berlin"]) == {"Hooli"}
+
+
+def test_old_postings_are_left_out_unless_any_age(db, make_user):
+    user_id, _ = make_user()
+    stale = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+    seed_index(db, [
+        ("greenhouse", "acme", "Platform Engineer", {"posted": stale}),
+        ("lever", "globex", "Platform Engineer", {}),
+    ])
+    names = lambda **kw: {g["name"] for g in ats_search.search(db, user_id, "platform engineer", **kw)["groups"]}  # noqa: E731
+    assert names() == {"Globex"}
+    assert names(any_age=True) == {"Acme", "Globex"}
+
+
+def test_search_api_takes_several_locations_and_any_age(client, make_user, db):
+    _, headers = make_user()
+    seed_index(db, [("greenhouse", "acme", "Site Reliability Engineer", {"location": "Pune, India"})])
+    r = client.get("/api/v1/ats/search", headers=headers,
+                   params=[("q", "site reliability engineer"), ("location", "Pune"), ("location", "Remote"),
+                           ("any_age", "true")])
+    assert r.status_code == 200, r.text
+    assert [g["name"] for g in r.json()["groups"]] == ["Acme"]
+    assert r.json()["groups"][0]["top_jobs"][0]["more_locations"] == []

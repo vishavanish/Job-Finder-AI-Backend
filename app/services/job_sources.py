@@ -144,6 +144,9 @@ def _normalize(df: pd.DataFrame) -> list[dict]:
         # The company's own apply page behind a board posting (often Greenhouse/Lever) — P4a adapters need it.
         direct = _pick(record, "job_url_direct")
         apply_url = direct if direct.startswith(("http://", "https://")) and direct != url else ""
+        # The company's own website (LinkedIn/Indeed give it): the company resolver looks for its career page there.
+        site = _pick(record, "company_url_direct")
+        company_url = site if site.startswith(("http://", "https://")) else ""
 
         jobs.append({
             "source": source,
@@ -154,6 +157,7 @@ def _normalize(df: pd.DataFrame) -> list[dict]:
             "description": _pick(record, "description", "DESCRIPTION"),
             "posted": _pick(record, "date_posted", "DATE_POSTED", "posted"),
             "apply_url": apply_url,
+            "company_url": company_url,
         })
     return jobs
 
@@ -285,6 +289,31 @@ def _run_feed(key: str, keywords: list[str], *, country: str, max_age_hours: int
     return matched[:limit]
 
 
+# Countries a location string may name on its own (a search for one covers its cities).
+_COUNTRIES = {"india", "united states", "usa", "us", "united kingdom", "uk", "canada", "germany", "australia",
+              "singapore", "united arab emirates", "uae", "netherlands", "ireland", "france"}
+
+
+def search_locations(locations: list[str], country: str) -> tuple[list[str], list[str]]:
+    """(places to search, places skipped because a wider one covers them).
+    QA2 §1.3: with "India" and "Mumbai" both chosen, searching Mumbai again
+    only repeats India's results and doubles the slow scraping. A place is
+    covered when its country (its last comma part, else the search country)
+    is also in the list. "Remote" is never skipped."""
+    countries = {c for c in (loc.strip().lower() for loc in locations) if c in _COUNTRIES | {country.lower()}}
+    keep: list[str] = []
+    skipped: list[str] = []
+    for loc in locations:
+        low = loc.strip().lower()
+        if low in countries or "remote" in low:
+            keep.append(loc)
+            continue
+        last = low.rsplit(",", 1)[-1].strip()
+        home = last if last in _COUNTRIES else country.lower()
+        (skipped if home in countries else keep).append(loc)
+    return keep, skipped
+
+
 def scrape_all(
     keywords: list[str],
     locations: list[str],
@@ -310,9 +339,15 @@ def scrape_all(
     key_lookup: Callable[[str], Any] | None = None,
     on_source_result: Callable[[str, str | None], None] | None = None,
     progress: Callable[[str], None] = NoOpProgress,
+    timings: dict[str, float] | None = None,
 ) -> list[dict]:
+    """`timings`, when given, is filled with seconds spent per source (QA2 §1.4)."""
     sources = [s.strip().lower() for s in sources if s]
     locations = [loc.strip() for loc in locations if loc.strip()] or ["India"]
+    timings = timings if timings is not None else {}
+
+    def timed(label: str, started: float) -> None:
+        timings[label] = round(timings.get(label, 0.0) + time.monotonic() - started, 1)
     if enable_naukri_auto:
         # Deprecated: JobSpy's Naukri search now always gets "recaptcha required" (tested 2026-10-16).
         progress("automatic Naukri search is no longer available (Naukri requires a captcha) — "
@@ -324,12 +359,17 @@ def scrape_all(
     outcomes = _Outcomes()
 
     all_jobs: list[dict] = []
-    total_searches = len(keywords) * len(locations)
+    places, covered = search_locations(locations, country_indeed)
+    if covered and (jobspy_sites or keyword_apis):
+        progress(f"not searching {', '.join(covered)} separately — {', '.join(places)} already covers it")
+    jobspy_label = " + ".join(registry.by_jobspy_site(site).name for site in jobspy_sites)
+    total_searches = len(keywords) * len(places)
     search_num = 0
     for keyword in keywords:
-        for location in locations:
+        for location in places:
             search_num += 1
             if jobspy_sites:
+                started = time.monotonic()
                 df, error = _run_jobspy(
                     keyword, location, jobspy_sites,
                     results_per_keyword=results_per_keyword,
@@ -348,21 +388,28 @@ def scrape_all(
                     elif error:
                         outcomes.failure(key, error)
                 all_jobs.extend(rows)
+                timed(jobspy_label, started)
             query = SourceQuery(keyword=keyword, location=location, country=country_indeed,
                                 max_age_hours=max_age_hours, results_wanted=results_per_keyword,
                                 client_ip=client_ip, client_user_agent=client_user_agent)
             for key in keyword_apis:
+                started = time.monotonic()
                 all_jobs.extend(_run_keyword_api(key, query, user_id=user_id, key_lookup=key_lookup,
                                                  outcomes=outcomes, progress=progress))
+                timed(registry.get(key).name, started)
             if jobspy_sites and search_num < total_searches:
                 delay = search_delay_sec + random.uniform(0, 3)
                 progress(f"pausing {delay:.0f}s before next search")
+                started = time.monotonic()
                 time.sleep(delay)
+                timed(jobspy_label, started)  # the pause is part of what these sources cost
 
     for key in feed_keys:
+        started = time.monotonic()
         all_jobs.extend(_run_feed(key, keywords, country=country_indeed, max_age_hours=max_age_hours,
                                   limit=results_per_keyword * max(1, len(keywords)),
                                   outcomes=outcomes, progress=progress, key_lookup=key_lookup))
+        timed(registry.get(key).name, started)
 
     if "naukri" in sources and manual_naukri_jobs:
         all_jobs.extend(manual_naukri_jobs)
@@ -379,6 +426,7 @@ def scrape_all(
     if "company_ats" in sources and index_jobs:
         # P6: our index of company career pages, matched per keyword in the DB (the caller's lookup).
         found = 0
+        started = time.monotonic()
         try:
             for keyword in keywords:
                 picked = index_jobs(keyword)
@@ -386,6 +434,7 @@ def scrape_all(
                 all_jobs.extend(picked)
             progress(f"Company career pages: {found} matching jobs from the index")
             outcomes.success("company_ats")
+            timed("Company career pages", started)
         except Exception as e:  # noqa: BLE001 — the index failing must not fail the search
             outcomes.failure("company_ats", f"Company career pages: {type(e).__name__}")
             progress(f"Company career pages failed: {type(e).__name__}")

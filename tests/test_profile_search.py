@@ -43,7 +43,7 @@ def fake_pipeline(monkeypatch):
             state["during_llm"]()
         return {**job, "llm_score": 90, "llm_reason": "fit"}
 
-    monkeypatch.setattr(celery_tasks, "_score_one_job_llm", fake_llm)
+    monkeypatch.setattr(celery_tasks, "_score_batch_llm", celery_tasks.one_by_one(fake_llm))
     return state
 
 
@@ -56,11 +56,8 @@ def _run(state, keywords_to_jobs: dict, params: dict) -> str:
 
 
 def _feed(run_id: str) -> list[dict]:
-    """What a client sees after upserting entries by id."""
-    by_id: dict[str, dict] = {}
-    for entry in pipeline_progress.get_jobs(run_id=run_id):
-        by_id[entry["id"]] = entry
-    return list(by_id.values())
+    """What a client sees after upserting entries by id (removed ones dropped)."""
+    return pipeline_progress.current_jobs(run_id=run_id)
 
 
 # ---------------------------------------------------------------- acceptance: unique jobs, LinkedIn kept
@@ -74,7 +71,9 @@ def test_indeed_first_then_linkedin_in_another_keyword_task_shows_linkedin_once(
     assert feed[0]["source"] == "LinkedIn" and feed[0]["url"] == LINKEDIN["url"]
     assert feed[0]["llm_score"] == 90 and feed[0]["auto_apply_capable"] is True
     raw = pipeline_progress.get_jobs(run_id=run_id)
-    assert [e.get("replaces", False) for e in raw] == [False, True]
+    # shown while scoring (QA2), its score, then the LinkedIn copy — one id throughout
+    assert [e.get("replaces", False) for e in raw] == [False, True, True]
+    assert raw[0]["scoring"] is True and raw[0]["llm_score"] is None and len({e["id"] for e in raw}) == 1
 
     db = SessionLocal()
     try:
@@ -89,8 +88,9 @@ def test_linkedin_first_is_never_replaced_by_indeed(fake_pipeline):
     li = {**LINKEDIN, "company": "Zeta Labs", "url": "https://linkedin.example/2"}
     ind = {**INDEED, "company": "Zeta Labs Inc", "url": "https://indeed.example/2"}
     run_id = _run(fake_pipeline, {"a": [li], "b": [ind]}, _params())
-    raw = pipeline_progress.get_jobs(run_id=run_id)
-    assert len(raw) == 1 and raw[0]["source"] == "LinkedIn"
+    feed = _feed(run_id)
+    assert len(feed) == 1 and feed[0]["source"] == "LinkedIn"
+    assert all(e["source"] == "LinkedIn" for e in pipeline_progress.get_jobs(run_id=run_id))
 
 
 def test_linkedin_copy_stored_while_indeed_copy_is_being_scored_still_wins(fake_pipeline):
@@ -169,16 +169,16 @@ def test_filtered_job_is_rescored_only_when_the_profile_changes(fake_pipeline, m
 def test_job_is_retried_when_every_ai_model_failed(fake_pipeline, make_user, monkeypatch):
     user_id, _ = make_user()
     job = {**LINKEDIN, "company": "Retry Co", "url": "https://linkedin.example/retry"}
-    real_llm = celery_tasks._score_one_job_llm
-    monkeypatch.setattr(celery_tasks, "_score_one_job_llm", lambda j, **kw: {
-        **j, "llm_failed": True, "llm_score": 0, "llm_reason": "LLM scoring unavailable for this job."})
+    fixture_scorer = celery_tasks._score_batch_llm
+    monkeypatch.setattr(celery_tasks, "_score_batch_llm", celery_tasks.one_by_one(lambda j, **kw: {
+        **j, "llm_failed": True, "llm_score": 0, "llm_reason": "LLM scoring unavailable for this job."}))
     assert _feed(_run(fake_pipeline, {"a": [job]}, _params(user_id, llm_min_score_to_keep=70))) == []
     db = SessionLocal()
     try:
         assert db.query(UserJob).filter_by(user_id=user_id).count() == 0  # not stored as filtered
     finally:
         db.close()
-    monkeypatch.setattr(celery_tasks, "_score_one_job_llm", real_llm)
+    monkeypatch.setattr(celery_tasks, "_score_batch_llm", fixture_scorer)
     assert len(_feed(_run(fake_pipeline, {"a": [job]}, _params(user_id, llm_min_score_to_keep=70)))) == 1
 
 

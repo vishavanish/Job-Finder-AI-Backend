@@ -137,7 +137,8 @@ def index_full(db: Session) -> bool:
     return size >= get_settings().ATS_MAX_INDEXED_JOBS
 
 
-def upsert_jobs(db: Session, company: AtsCompany, jobs: list[dict], *, complete: bool, close: bool = True) -> dict:
+def upsert_jobs(db: Session, company: AtsCompany, jobs: list[dict], *, complete: bool, close: bool = True,
+                new_rows: list | None = None) -> dict:
     """Writes one crawl's jobs; returns counts. complete=False never closes jobs it didn't see this time;
     close=False (a live text search, not a crawl) closes nothing.
     When the index is full (ATS_MAX_INDEXED_JOBS) known jobs are still refreshed but no new ones added."""
@@ -156,8 +157,10 @@ def upsert_jobs(db: Session, company: AtsCompany, jobs: list[dict], *, complete:
         if row is None:
             if not allow_new:
                 continue
-            db.add(AtsJob(company_id=company.id, external_id=ext[:128], first_seen_at=now, last_seen_at=now,
-                          **fields))
+            row = AtsJob(company_id=company.id, external_id=ext[:128], first_seen_at=now, last_seen_at=now, **fields)
+            db.add(row)
+            if new_rows is not None:
+                new_rows.append(row)
             added += 1
             continue
         row.last_seen_at = now
@@ -189,6 +192,8 @@ def upsert_jobs(db: Session, company: AtsCompany, jobs: list[dict], *, complete:
 def _next_crawl(company: AtsCompany, now: datetime) -> datetime:
     cfg = get_settings()
     hours = cfg.ATS_HOT_REFRESH_HOURS if company.hot_until and company.hot_until > now else cfg.ATS_COLD_REFRESH_HOURS
+    if company.follower_count:
+        hours = min(hours, cfg.ATS_FOLLOWED_REFRESH_HOURS)  # QA4: followed companies are checked more often
     return now + timedelta(hours=hours) + timedelta(minutes=random.uniform(-0.1, 0.1) * hours * 60)
 
 
@@ -214,6 +219,22 @@ def fetch(company: AtsCompany) -> ListResult:
         jobs, complete = cap_jobs(result.jobs, max_jobs, cfg.ats_markets)
         result.jobs, result.complete = jobs, result.complete and complete
     return result
+
+
+def _board_name(company: AtsCompany, jobs: list[dict]) -> str | None:
+    """The board's own name for a company still named after its slug (QA3 §D): one extra request,
+    tried at most once per ATS_NAME_RETRY_DAYS per company. Never fails a crawl."""
+    impl = platforms.get(company.platform)
+    if impl is None:
+        return None
+    if not get_redis().set(f"ats:name_tried:{company.id}", "1", nx=True,
+                           ex=get_settings().ATS_NAME_RETRY_DAYS * 86400):
+        return None
+    try:
+        return impl.board_name(ats_registry.to_ref(company), jobs)
+    except SourceError as e:
+        logger.info("ats board name failed for %s: %s", company.ref_key, e)
+        return None
 
 
 def crawl_company(db: Session, company_id: str) -> dict:
@@ -255,15 +276,38 @@ def crawl_company(db: Session, company_id: str) -> dict:
     company.last_error = None
     company.next_crawl_at = _next_crawl(company, now)
     counts: dict = {"not_modified": True}
+    added_rows: list[AtsJob] = []
+    named_by_slug = company.origin != "admin" and company.name == ats_registry.display_name(
+        ats_registry.to_ref(company))
     if not result.not_modified:
         company.etag = result.etag
-        if result.company_name and company.origin != "admin" and company.name == ats_registry.display_name(
-                ats_registry.to_ref(company)):
-            company.name = result.company_name.strip()[:255]
-        counts = upsert_jobs(db, company, result.jobs, complete=result.complete)
+        if named_by_slug:
+            name = result.company_name or _board_name(company, result.jobs)
+            if name:
+                company.name = name.strip()[:255]
+        counts = upsert_jobs(db, company, result.jobs, complete=result.complete, new_rows=added_rows)
+    elif named_by_slug:
+        if platforms.get(company.platform).name_from_page:
+            name = _board_name(company, [])
+            if name:
+                company.name = name.strip()[:255]
+        else:
+            company.etag = None  # QA3 §D: the next crawl reads the full list, which carries the company name
     _platform_health(db, company.platform, None)
     db.commit()
+    if company.follower_count and added_rows:
+        _queue_follow_match(company.id, [r.id for r in added_rows])
     return {"company_id": company_id, **counts}
+
+
+def _queue_follow_match(company_id: str, job_ids: list[str]) -> None:
+    """QA4: new jobs at a followed company are matched against its followers on the maintenance queue."""
+    from app.core.celery_tasks import ats_follow_match_task
+
+    try:
+        ats_follow_match_task.apply_async(args=[company_id, job_ids], queue=get_settings().maintenance_queue)
+    except Exception:  # noqa: BLE001 — never fail a crawl for it
+        logger.exception("could not queue the follow match for %s", company_id)
 
 
 def _failed(db: Session, company: AtsCompany, error: str) -> dict:

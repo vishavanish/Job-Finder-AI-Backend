@@ -43,10 +43,24 @@ async def run_pipeline_stream(
     score_params["previous_search_at"] = pipeline_progress.mark_user_search(user.id)
     keywords = search_params["keywords"]
 
-    run_id = pipeline_progress.create_run(user_id=user.id, total_keywords=len(keywords))
+    run_id = pipeline_progress.create_run(user_id=user.id, total_keywords=len(keywords), keywords=keywords,
+                                          skipped_sources=search_params["skipped_sources"])
     dispatch_pipeline_group.apply_async(args=[run_id, search_params, score_params], queue=settings.default_queue)
     logger.info("[run=%s] dispatched %d-keyword group for user=%s", run_id, len(keywords), user.id)
     return {"run_id": run_id, "keywords": keywords, "skipped_sources": search_params["skipped_sources"]}
+
+
+@router.get("/runs/latest")
+async def get_latest_pipeline_run(user=Depends(get_current_user)):
+    """The newest search you started on Jobs, while the server still holds
+    its results (6 h): run meta plus `created_at`, `keywords` and
+    `skipped_sources`. Load its jobs with GET /pipeline/{run_id}/jobs?offset=0.
+    404 when there is none. Job-alert runs are not included."""
+    run = pipeline_progress.latest_search_run(user.id)
+    if run is None:
+        raise HTTPException(404, "no recent search")
+    return run
+
 
 @router.get("/{run_id}")
 async def get_pipeline_run(run_id: str, user=Depends(get_current_user)):

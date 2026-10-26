@@ -22,14 +22,14 @@ def test_job_found_by_two_keywords_is_scored_once(monkeypatch):
         llm_calls.append(job["url"])
         return {**job, "llm_score": 90, "llm_reason": "fit"}
 
-    monkeypatch.setattr(celery_tasks, "_score_one_job_llm", fake_llm)
+    monkeypatch.setattr(celery_tasks, "_score_batch_llm", celery_tasks.one_by_one(fake_llm))
 
     run_id = pipeline_progress.create_run(user_id="u1", total_keywords=2)
     for keyword in ("AI Engineer", "LLM Developer"):
         celery_tasks.search_and_score_keyword(run_id, keyword, ["Pune"], ["linkedin"], {}, SCORE_PARAMS)
 
     assert llm_calls == [DUPLICATE_JOB["url"]]
-    assert len(pipeline_progress.get_jobs(run_id=run_id)) == 1
+    assert len(pipeline_progress.current_jobs(run_id=run_id)) == 1
     assert pipeline_progress.get_run_meta(run_id=run_id)["status"] == "completed"
 
 

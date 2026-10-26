@@ -75,7 +75,8 @@ def _pack_out(pack: ApplyPack) -> PrepPackOut:
         id=pack.id, job_id=pack.job_id, status=pack.status, tailored_resume_id=pack.tailored_resume_id,
         cover_letter=pack.cover_letter, email_to=pack.email_to, email_subject=pack.email_subject,
         email_body=pack.email_body, mailto=apply_prep.mailto(pack), dropped=list(pack.dropped or []),
-        error=pack.error, updated_at=pack.updated_at,
+        error=pack.error, error_detail=pack.error_detail, updated_at=pack.updated_at,
+        steps=apply_prep.steps(pack.id), typical_seconds=apply_prep.typical_seconds(),
     )
 
 
@@ -115,7 +116,8 @@ def get_prep(pack_id: str, user=Depends(get_current_user), db: Session = Depends
 # ---------------------------------------------------------------- P4b: apply engine
 #
 #   GET/PUT /apply/settings                level, risk notice, apply hours, pause; today's usage and caps
-#   POST    /apply/runs                    start a run: mode auto (Greenhouse/Lever, level 2) or fast (LinkedIn)
+#   POST    /apply/runs                    start a run: mode auto (Greenhouse/Lever/AI form reader, level 2)
+#                                          or fast (LinkedIn)
 #   GET     /apply/runs?state=waiting      the review queue (waiting = awaiting_input/_review + needs_user)
 #   GET     /apply/runs/{id}
 #   POST    /apply/runs/{id}/answer        answer required questions ({answers: {key: value}})
@@ -143,6 +145,7 @@ def _run_out(db: Session, run: ApplyRun) -> RunOut:
         mode=run.mode, level=run.level, adapter=run.adapter, apply_url=run.apply_url, state=run.state,
         message=run.message, fields=fields, files=plan.get("files") or {}, resume_id=run.resume_id,
         pack_id=run.pack_id, application_id=run.application_id, proofs=len(apply_engine.proofs(db, run)),
+        steps=plan.get("steps") or [], vision=plan.get("vision"),
         approved_at=run.approved_at, submitted_at=run.submitted_at, created_at=run.created_at,
         updated_at=run.updated_at,
     )
@@ -155,8 +158,10 @@ def _settings_out(db: Session, user) -> ApplySettingsOut:
         level=s.level, max_level=entitlements.effective(db, user.id, "auto_apply").max_level or 1,
         risk_accepted_at=s.risk_accepted_at, hours_start=s.hours_start, hours_end=s.hours_end, timezone=s.timezone,
         paused=s.paused, usage_today=apply_engine.usage_today(db, user.id, s),
+        allow_generic=s.allow_generic, generic_submit_enabled=cfg.GENERIC_APPLY_SUBMIT,
         caps={"auto_per_day": cfg.APPLY_DAILY_CAP, "per_platform_per_day": cfg.APPLY_PLATFORM_DAILY_CAP,
-              "fast_per_day": cfg.FAST_APPLY_DAILY_CAP, "company_cooldown_days": cfg.APPLY_COMPANY_COOLDOWN_DAYS},
+              "fast_per_day": cfg.FAST_APPLY_DAILY_CAP, "company_cooldown_days": cfg.APPLY_COMPANY_COOLDOWN_DAYS,
+              "generic_per_day": cfg.APPLY_GENERIC_DAILY_CAP},
     )
 
 
@@ -171,7 +176,7 @@ def get_apply_settings(user=Depends(get_current_user), db: Session = Depends(get
 def put_apply_settings(req: ApplySettingsIn, user=Depends(get_current_user), db: Session = Depends(get_db)):
     apply_engine.update_settings(db, user, level=req.level, accept_risk=req.accept_risk_notice,
                                  hours_start=req.hours_start, hours_end=req.hours_end, tz=req.timezone,
-                                 paused=req.paused)
+                                 paused=req.paused, allow_generic=req.allow_generic)
     db.commit()
     return _settings_out(db, user)
 
@@ -213,6 +218,9 @@ def get_run(run_id: str, user=Depends(get_current_user), db: Session = Depends(g
 @router.post("/runs/{run_id}/answer", response_model=RunOut)
 def answer_run(run_id: str, body: RunAnswers, user=Depends(get_current_user), db: Session = Depends(get_db)):
     run = apply_engine.answer(db, apply_engine.get_owned(db, user.id, run_id), body.answers)
+    if run.state == "queued":  # a multi-page form (AI form reader): read the pages after this answer
+        from app.core.celery_tasks import apply_prepare_task
+        apply_prepare_task.apply_async(args=[run.id], queue=settings.apply_queue)
     return _run_out(db, run)
 
 

@@ -190,17 +190,37 @@ def _match_query(db: Session, phrases: list[str]):
         or_(*conds)).order_by(func.coalesce(AtsJob.posted_at, AtsJob.first_seen_at).desc())
 
 
-def _filtered(db: Session, query, *, platforms_: list[str] | None, location: str | None, remote: bool | None,
-              posted_within_days: int | None, enabled: set[str]):
+def split_locations(location: str | list[str] | None) -> list[str]:
+    """"Mumbai, India, Remote" or ["Mumbai", "India"] -> each place once, lower case."""
+    raw = [location] if isinstance(location, str) else list(location or [])
+    out: list[str] = []
+    for value in raw:
+        for part in (value or "").split(","):
+            part = part.strip().lower()
+            if part and part not in out:
+                out.append(part)
+    return out
+
+
+def _filtered(db: Session, query, *, platforms_: list[str] | None, location: str | list[str] | None,
+              remote: bool | None, posted_within_days: int | None, enabled: set[str]):
     allowed = [p for p in (platforms_ or enabled) if p in enabled]
     query = query.filter(AtsCompany.platform.in_(allowed or ["-"]))
     if remote is True:
         query = query.filter(AtsJob.remote.is_(True))
     elif remote is False:
         query = query.filter(AtsJob.remote.is_(False))
-    if location:
-        like = f"%{location.strip().lower()}%"
-        query = query.filter(or_(func.lower(AtsJob.location).like(like), func.lower(AtsJob.country).like(like)))
+    places = split_locations(location)
+    if places:
+        # Any of the places (QA2 §4: the user's locations from Profile by default); "Remote" also
+        # matches jobs the platform marks remote.
+        conds = []
+        for place in places:
+            like = f"%{place}%"
+            conds += [func.lower(AtsJob.location).like(like), func.lower(AtsJob.country).like(like)]
+            if place == "remote":
+                conds.append(AtsJob.remote.is_(True))
+        query = query.filter(or_(*conds))
     if posted_within_days:
         cutoff = _now() - timedelta(days=posted_within_days)
         query = query.filter(func.coalesce(AtsJob.posted_at, AtsJob.first_seen_at) >= cutoff)
@@ -210,7 +230,7 @@ def _filtered(db: Session, query, *, platforms_: list[str] | None, location: str
 def job_out(job: AtsJob, applied: bool = False) -> dict:
     return {"id": job.id, "title": job.title, "location": job.location, "remote": job.remote,
             "department": job.department, "url": job.url, "posted_at": job.posted_at,
-            "first_seen_at": job.first_seen_at, "applied": applied}
+            "first_seen_at": job.first_seen_at, "applied": applied, "more_locations": []}
 
 
 def registry_stats(db: Session) -> dict:
@@ -231,12 +251,17 @@ def registry_stats(db: Session) -> dict:
     return data
 
 
-def search(db: Session, user_id: str, q: str, *, platforms_: list[str] | None = None, location: str | None = None,
-           remote: bool | None = None, posted_within_days: int | None = None, hide_applied: bool = False,
+def search(db: Session, user_id: str, q: str, *, platforms_: list[str] | None = None,
+           location: str | list[str] | None = None, remote: bool | None = None,
+           posted_within_days: int | None = None, any_age: bool = False, hide_applied: bool = False,
            page: int = 1) -> dict:
+    """`any_age` keeps postings older than ATS_MAX_POSTING_AGE_DAYS, which are left out by default."""
     cfg = get_settings()
     phrases, known = expansions(q)
-    filters = {"p": sorted(platforms_ or []), "l": (location or "").strip().lower(), "r": remote,
+    if not posted_within_days and not any_age:
+        posted_within_days = cfg.ATS_MAX_POSTING_AGE_DAYS or None
+    location = split_locations(location)
+    filters = {"p": sorted(platforms_ or []), "l": location, "r": remote,
                "d": posted_within_days, "h": hide_applied, "page": page}
     key = "ats:search:" + hashlib.sha256(json.dumps(
         [phrases, filters, user_id if hide_applied else ""], default=str).encode()).hexdigest()[:32]
@@ -288,7 +313,13 @@ def _search(db: Session, user_id: str, phrases: list[str], *, filters: dict, pla
                 "newest_posted_at": None, "last_refreshed_at": company.last_ok_at}
             order.append(company.id)
         g["matching_jobs"] += 1
-        if len(g["top_jobs"]) < 3:
+        # QA2 §4: one row per role — the same title posted for other places adds a location to it.
+        same = next((t for t in g["top_jobs"] if t["title"].strip().lower() == job.title.strip().lower()), None)
+        if same is not None:
+            place = job.location or ("Remote" if job.remote else "")
+            if place and place != same["location"] and place not in same["more_locations"]:
+                same["more_locations"].append(place)
+        elif len(g["top_jobs"]) < 3:
             g["top_jobs"].append(job_out(job))
         if job.location and job.location not in g["locations"] and len(g["locations"]) < 5:
             g["locations"].append(job.location)
@@ -449,16 +480,20 @@ def _clear_search_cache() -> None:
 
 # ---------------------------------------------------------------- pipeline source
 
-def index_jobs(db: Session, keyword: str, *, locations: list[str], country: str, max_age_hours: int,
-               limit: int, detail_budget: int = 10) -> list[dict]:
-    """Index jobs for one pipeline keyword, in the normal job shape (source = the ATS platform name, so
-    dedupe ranks them "company ATS" and the Apply Center sees Greenhouse / Lever links)."""
+def search_window_days(max_age_hours: int) -> int:
+    """Days of career-page postings a Job Search takes: its own window, but at least ATS_SEARCH_MIN_DAYS (QA3 §B)."""
+    return max(1, -(-max_age_hours // 24), get_settings().ATS_SEARCH_MIN_DAYS)
+
+
+def _index_rows(db: Session, keyword: str, *, locations: list[str], country: str, max_age_hours: int,
+                limit: int) -> list[tuple[AtsJob, AtsCompany]]:
     phrases, _ = expansions(keyword)
     query = _match_query(db, phrases)
     if query is None:
         return []
     query = _filtered(db, query, platforms_=None, location=None, remote=None,
-                      posted_within_days=max(1, -(-max_age_hours // 24)), enabled=ats_registry.enabled_platforms(db))
+                      posted_within_days=search_window_days(max_age_hours),
+                      enabled=ats_registry.enabled_platforms(db))
     places = [p.strip().lower() for p in locations if p.strip()]
     cities = {c for p in places if "remote" not in p and p != (country or "").lower()
               for c in _CITY_ALIASES.get(p.split(",")[0].strip(), (p.split(",")[0].strip(),))}
@@ -477,6 +512,22 @@ def index_jobs(db: Session, keyword: str, *, locations: list[str], country: str,
             out.append((job, company))
             if len(out) >= limit:
                 break
+    return out
+
+
+def index_count(db: Session, keyword: str, *, locations: list[str], country: str, max_age_hours: int,
+                limit: int) -> int:
+    """How many index jobs a keyword finds (up to `limit`), without fetching descriptions."""
+    return len(_index_rows(db, keyword, locations=locations, country=country, max_age_hours=max_age_hours,
+                           limit=limit))
+
+
+def index_jobs(db: Session, keyword: str, *, locations: list[str], country: str, max_age_hours: int,
+               limit: int, detail_budget: int = 10) -> list[dict]:
+    """Index jobs for one pipeline keyword, in the normal job shape (source = the ATS platform name, so
+    dedupe ranks them "company ATS" and the Apply Center sees Greenhouse / Lever links). The companies
+    found become "hot" (refreshed every ATS_HOT_REFRESH_HOURS), as in the ATS search."""
+    out = _index_rows(db, keyword, locations=locations, country=country, max_age_hours=max_age_hours, limit=limit)
     descriptions: dict[str, str] = {}
     top = out[:detail_budget]
     if top:
@@ -493,4 +544,5 @@ def index_jobs(db: Session, keyword: str, *, locations: list[str], country: str,
                      "location": job.location or ("Remote" if job.remote else ""), "url": job.url,
                      "description": descriptions.get(job.id) or job.snippet,
                      "posted": (job.posted_at or job.first_seen_at).isoformat() + "+00:00", "apply_url": job.url})
+    _mark_hot(db, list({company.id for _, company in out}))  # after the rows are read: the commit expires them
     return jobs

@@ -1,0 +1,45 @@
+<!doctype html>
+<!-- Local stand-in for a form with a custom country picker the text pass can't fill (its options are plain
+     divs, not role="option"; the real value lives in a hidden input) and buttons whose texts don't say which
+     one sends the form. ?login=1 shows a sign-in form instead. Submitting only changes this page. -->
+<html>
+<head><meta charset="utf-8"><title>Data Engineer - Kite</title>
+<style>.list{border:1px solid #999;width:220px}.opt{padding:6px;cursor:pointer}.opt:hover{background:#eee}</style></head>
+<body>
+<h1>Data Engineer</h1>
+<form id="app">
+  <div><label for="name">Full name *</label><input id="name" name="name" required></div>
+  <div><label for="mail">Email *</label><input id="mail" name="email" type="email" required></div>
+  <div><label for="country">Country *</label>
+    <input id="country" role="combobox" aria-required="true" aria-controls="country-list" placeholder="Select country" autocomplete="off">
+    <input type="hidden" name="country" id="country-code">
+    <div id="country-list" class="list" style="display:none">
+      <div class="opt" data-code="DE">Germany</div><div class="opt" data-code="IN">India</div><div class="opt" data-code="US">United States</div>
+    </div>
+  </div>
+  <button type="button" id="back">Back to jobs</button>
+  <button type="button" id="send">Send it</button>
+  <p id="err" style="display:none;color:red">Please select a country — this field is required</p>
+</form>
+<script>
+  if (new URLSearchParams(location.search).get('login')) {
+    document.body.innerHTML = '<h2>Sign in to apply</h2><form><label>Email<input name="u"></label>'
+      + '<label>Password<input type="password" name="p"></label><button>Sign in</button></form>';
+  } else {
+    const input = document.getElementById('country'), list = document.getElementById('country-list');
+    input.addEventListener('click', () => { list.style.display = ''; });
+    input.addEventListener('keydown', (e) => { if (e.key === 'Escape') list.style.display = 'none'; });
+    list.querySelectorAll('.opt').forEach(o => o.addEventListener('click', () => {
+      input.value = o.textContent; document.getElementById('country-code').value = o.dataset.code; list.style.display = 'none';
+    }));
+    document.getElementById('send').addEventListener('click', () => document.getElementById('app').requestSubmit());
+    document.getElementById('app').addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (!document.getElementById('country-code').value) { document.getElementById('err').style.display = ''; return; }
+      window.__submitted = Object.fromEntries([...new FormData(e.target)]);
+      document.body.innerHTML = '<h2>Thank you for applying</h2>';
+    });
+  }
+</script>
+</body>
+</html>

@@ -344,7 +344,7 @@ def test_apify_without_any_key_is_skipped(client, make_user, dispatched):
     assert client.post("/api/v1/search", json=body, headers=headers).status_code == 202
     params = dispatched[-1]["args"][0]
     assert params["enable_naukri_apify"] is False
-    assert any("apify API key" in note for note in params["skipped_sources"])
+    assert any("apify api key" in note.lower() for note in params["skipped_sources"])
 
 
 # ---------------------------------------------------------------- admin rules

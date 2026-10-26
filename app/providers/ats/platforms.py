@@ -30,6 +30,7 @@ for any company name; per-company feeds use unguessable URLs).
 """
 from __future__ import annotations
 
+import html
 import ipaddress
 import re
 import socket
@@ -156,12 +157,44 @@ def _xml(ref: AtsRef, text: str) -> ET.Element:
         raise SourceError(f"{ref.platform} '{ref.slug}': feed was not valid XML") from e
 
 
+_TITLE = re.compile(r"<title[^>]*>([^<]{1,200})</title>", re.I)
+_OG_TITLE = re.compile(r"""<meta[^>]+property=["']og:(?:site_name|title)["'][^>]+content=["']([^"']{1,200})""", re.I)
+_NAME_NOISE = re.compile(
+    r"^\s*(careers?|jobs?|open positions|work)\s+(at|@|with)\s+"
+    r"|^\s*(careers?|jobs?|current openings)\s*[-|–—:]\s*"
+    r"|\s*[-|–—:]\s*(current openings|careers?|jobs?|job board|open (positions|roles)).*$"
+    r"|\s+(careers?|jobs?|job board)\s*$", re.I)
+_GENERIC_NAMES = {"", "careers", "career", "jobs", "job board", "current openings", "open positions", "home"}
+
+
+def clean_board_name(text: str | None) -> str | None:
+    """A careers page title -> the company name ("Ramp Jobs" -> "Ramp", "CAREERS AT NVIDIA" -> "NVIDIA",
+    "ThoughtWorks - Current Openings" -> "ThoughtWorks"); None when only generic words are left."""
+    name = re.sub(r"\s+", " ", html.unescape(text or "")).strip()
+    for _ in range(2):
+        name = _NAME_NOISE.sub("", name).strip(" -|")
+    if name.lower() in _GENERIC_NAMES or len(name) > 120:
+        return None
+    return name
+
+
+def page_title_name(html_text: str) -> str | None:
+    """The company name from a careers page: <title> first, og:title / og:site_name when that is empty."""
+    for pattern in (_TITLE, _OG_TITLE):
+        for m in pattern.finditer(html_text[:200_000]):
+            name = clean_board_name(m.group(1))
+            if name:
+                return name
+    return None
+
+
 class AtsPlatform:
     key: str = ""
     name: str = ""
     host_suffix: str = ""          # hostname suffix that identifies this platform in a URL
     has_search: bool = False
     has_detail: bool = False
+    name_from_page: bool = False   # the list API has no company name; the careers page title has it (QA3 §D)
 
     def parse_url(self, url: str) -> AtsRef | None:
         raise NotImplementedError
@@ -178,6 +211,13 @@ class AtsPlatform:
 
     def job_detail(self, ref: AtsRef, external_id: str) -> str:
         return ""
+
+    def board_name(self, ref: AtsRef, jobs: list[dict]) -> str | None:
+        """The company's own name when the job list has none (one extra request; None when not found)."""
+        if not self.name_from_page:
+            return None
+        text, _, _ = _get(ref, "GET", self.careers_url(ref), as_text=True, accept="text/html")
+        return page_title_name(text or "")
 
     def valid(self, ref: AtsRef) -> bool:
         return valid_subdomain(ref.slug)
@@ -238,7 +278,7 @@ class Greenhouse(AtsPlatform):
 # ---------------------------------------------------------------- Lever
 
 class Lever(AtsPlatform):
-    key, name, has_detail = "lever", "Lever", True
+    key, name, has_detail, name_from_page = "lever", "Lever", True, True
 
     def parse_url(self, url):
         host, parts = _parts(url)
@@ -305,7 +345,7 @@ class Recruitee(AtsPlatform):
 # ---------------------------------------------------------------- Ashby
 
 class Ashby(AtsPlatform):
-    key, name = "ashby", "Ashby"
+    key, name, name_from_page = "ashby", "Ashby", True
 
     def parse_url(self, url):
         host, parts = _parts(url)
@@ -416,6 +456,7 @@ class SmartRecruiters(AtsPlatform):
 
 class Workday(AtsPlatform):
     key, name, host_suffix, has_search, has_detail = "workday", "Workday", ".myworkdayjobs.com", True, True
+    name_from_page = True
     _PAGE = 20
 
     def parse_url(self, url):
@@ -508,7 +549,7 @@ def _workday_posted(text: str) -> str:
 # ---------------------------------------------------------------- Workable
 
 class Workable(AtsPlatform):
-    key, name = "workable", "Workable"
+    key, name, name_from_page = "workable", "Workable", True
 
     def parse_url(self, url):
         host, parts = _parts(url)
@@ -703,11 +744,19 @@ class Rippling(AtsPlatform):
         desc = (data or {}).get("description") or {}
         return _plain(desc.get("role", "") if isinstance(desc, dict) else desc)
 
+    def board_name(self, ref, jobs):
+        # The list has no company name; each job's detail carries `companyName`.
+        if not jobs:
+            return None
+        data, _, _ = _get(ref, "GET", f"https://ats.rippling.com/api/v2/board/{quote(ref.slug)}/jobs/"
+                                      f"{quote(str(jobs[0]['external_id']))}")
+        return clean_board_name((data or {}).get("companyName"))
+
 
 # ---------------------------------------------------------------- Gem
 
 class Gem(AtsPlatform):
-    key, name = "gem", "Gem"
+    key, name, name_from_page = "gem", "Gem", True
 
     def parse_url(self, url):
         host, parts = _parts(url)

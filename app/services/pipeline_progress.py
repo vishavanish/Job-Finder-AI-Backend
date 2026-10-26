@@ -79,7 +79,10 @@ def claim_job_key(*, run_id: str, job_key: str) -> bool:
     return is_new
 
 
-def create_run(*, user_id: str, total_keywords: int) -> str:
+def create_run(*, user_id: str, total_keywords: int, kind: str = "search", keywords: list[str] | None = None,
+               skipped_sources: list[str] | None = None) -> str:
+    """`kind` "search" = a search the user started on Jobs (GET /pipeline/runs/latest
+    finds it again); "alert" = a job-alert run in the background."""
     run_id = str(uuid.uuid4())
     r = _redis()
     r.hset(_meta_key(run_id), mapping={
@@ -89,6 +92,10 @@ def create_run(*, user_id: str, total_keywords: int) -> str:
         "keywords_completed": 0,
         "error": "",
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "kind": kind,
+        "seq": r.incr("pipeline_run_seq"),  # orders runs made in the same clock tick
+        "keywords": json.dumps(keywords or []),
+        "skipped_sources": json.dumps(skipped_sources or []),
     })
     r.expire(_meta_key(run_id), RUN_TTL_SECONDS)
     r.sadd(_user_runs_key(user_id), run_id)
@@ -98,6 +105,29 @@ def create_run(*, user_id: str, total_keywords: int) -> str:
 
 def _user_runs_key(user_id: str) -> str:
     return f"user_runs:{user_id}"
+
+
+def latest_search_run(user_id: str) -> dict | None:
+    """The user's newest search started from Jobs that Redis still holds
+    (runs live RUN_TTL_SECONDS), with its keywords and skipped sources."""
+    r = _redis()
+    newest: tuple[tuple[str, int], str] | None = None
+    for run_id in r.smembers(_user_runs_key(user_id)):
+        meta = r.hgetall(_meta_key(run_id))
+        if not meta or meta.get("kind", "search") != "search":
+            continue
+        order = (meta.get("created_at", ""), int(meta.get("seq") or 0))
+        if newest is None or order > newest[0]:
+            newest = (order, run_id)
+    if newest is None:
+        return None
+    run = get_run_meta(run_id=newest[1])
+    if run is None:
+        return None
+    meta = r.hgetall(_meta_key(newest[1]))
+    run.update(created_at=newest[0][0], keywords=json.loads(meta.get("keywords") or "[]"),
+               skipped_sources=json.loads(meta.get("skipped_sources") or "[]"))
+    return run
 
 
 def cancel_runs_for_user(user_id: str) -> int:
@@ -116,13 +146,17 @@ def is_cancelled(run_id: str) -> bool:
     return _redis().hget(_meta_key(run_id), "status") == "cancelled"
 
 
-def record_scored_job(*, run_id: str, job: dict) -> dict:
+def record_scored_job(*, run_id: str, job: dict, replaces: bool = False) -> dict:
     """RPUSH — append-only, safe under concurrent callers from multiple
     group() workers with zero coordination needed; Redis serializes
     concurrent RPUSH calls on the same key natively.
 
     `id` is the canonical job id when the job came from job_store, so the
-    feed, save/hide and later replacements all use the same id."""
+    feed, save/hide and later replacements all use the same id.
+
+    QA2 §1: a job may be shown before it is scored (`scoring: true`, no
+    llm_score); its scored copy then comes with `replaces=True`, or a
+    `removed` entry when it scored too low (remove_recorded)."""
     payload = {
         "id": job.get("id") or str(uuid.uuid4()),
         "source": job.get("source", ""),
@@ -146,10 +180,29 @@ def record_scored_job(*, run_id: str, job: dict) -> dict:
         "early": bool(job.get("early")),
         "new_since_last_search": job.get("new_since_last_search"),
         "applicants": job.get("applicants"),
+        "scoring": bool(job.get("scoring")),
+        "followed": bool(job.get("followed")),  # QA4: a company the user follows
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if replaces:
+        payload["replaces"] = True
     _push(run_id, payload)
     return payload
+
+
+def remove_recorded(*, run_id: str, job_key: str) -> bool:
+    """Takes a job shown while scoring back out of the feed (it scored below
+    the user's threshold, or no model could score it): appends
+    `{id, replaces: true, removed: true}`. Clients drop that id."""
+    r = _redis()
+    raw = r.hget(_recorded_key(run_id), job_key)
+    if not raw:
+        return False
+    shown = json.loads(raw)
+    _push(run_id, {"id": shown["id"], "replaces": True, "removed": True,
+                   "created_at": datetime.now(timezone.utc).isoformat()})
+    r.hdel(_recorded_key(run_id), job_key)
+    return True
 
 
 def _apply_options(job: dict) -> dict:
@@ -236,6 +289,27 @@ def get_jobs(*, run_id: str, offset: int = 0) -> list[dict]:
     return [json.loads(item) for item in raw]
 
 
+_TIMING = "t:"  # meta hash fields holding seconds spent per stage
+
+
+def add_timings(*, run_id: str, timings: dict[str, float]) -> None:
+    """Adds seconds per stage ("LinkedIn + Indeed", "Scoring"...) to the run,
+    summed over its keyword tasks (QA2 §1.4)."""
+    r = _redis()
+    for label, seconds in timings.items():
+        if seconds:
+            r.hincrbyfloat(_meta_key(run_id), f"{_TIMING}{label}", round(float(seconds), 1))
+
+
+def current_jobs(*, run_id: str) -> list[dict]:
+    """The feed folded to one entry per job id, newest copy wins, removed
+    ones dropped — what a client that upserts by id ends up showing."""
+    latest: dict[str, dict] = {}
+    for entry in get_jobs(run_id=run_id):
+        latest[entry["id"]] = entry
+    return [e for e in latest.values() if not e.get("removed")]
+
+
 def increment_keyword_completed(*, run_id: str) -> None:
     """HINCRBY — atomic at the Redis level. This is the Redis-native
     equivalent of the earlier SQL `UPDATE ... SET x = x + 1`: the
@@ -277,4 +351,6 @@ def get_run_meta(*, run_id: str) -> dict | None:
         "total_keywords": total,
         "keywords_completed": completed,
         "error": meta.get("error") or None,
+        # Seconds per stage, summed over keyword tasks (they run in parallel, so the sum can exceed wall time).
+        "timings": {k[len(_TIMING):]: round(float(v), 1) for k, v in meta.items() if k.startswith(_TIMING)},
     }

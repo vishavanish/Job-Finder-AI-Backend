@@ -29,7 +29,7 @@ from app.models.profile_schemas import (
     EeoAnswers, PreferencesIn, PreferencesOut, ProfileIn, ProfileOut, ResumeDetail, ResumeList, ResumeOut, ResumeUpdate,
     SearchProfileIn, SearchProfileList, SearchProfileOut, SeedFromResumeIn, TitleSuggestions,
 )
-from app.services import key_store, resume_store, search_profiles
+from app.services import key_store, profile_fill, resume_store, search_profiles
 
 router = APIRouter(tags=["profile"])
 settings = get_settings()
@@ -59,6 +59,7 @@ def put_profile(req: ProfileIn, user=Depends(get_current_user), db: Session = De
         row = Profile(user_id=user.id)
         db.add(row)
     row.headline, row.summary = req.headline, req.summary
+    req.applicant_info = profile_fill.clean_applicant_urls(req.applicant_info)  # QA2 §3: no tracking params
     row.applicant_info = req.applicant_info.model_dump()
     row.work_authorization = [qa.model_dump() for qa in req.work_authorization]
     if req.eeo is not None:  # sensitive: encrypted at rest, never logged or sent to AI models

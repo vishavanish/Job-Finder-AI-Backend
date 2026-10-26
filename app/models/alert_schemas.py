@@ -19,6 +19,9 @@ class AlertIn(BaseModel):
     timezone: str = Field("Asia/Kolkata", max_length=64)
     min_score: int = Field(default_factory=lambda: get_settings().JOB_ALERT_DEFAULT_MIN_SCORE, ge=0, le=100)
     email_digest: bool = True
+    email_to: Optional[str] = Field(None, max_length=255, description=(
+        "Where the digest goes: empty = your sign-in email, otherwise one of your connected Gmail addresses "
+        "(see AlertList.email_options)"))
     enabled: bool = True
 
     @field_validator("timezone")
@@ -27,9 +30,15 @@ class AlertIn(BaseModel):
         from app.services.job_alerts import valid_timezone
         return valid_timezone(value)
 
+    @field_validator("email_to")
+    @classmethod
+    def _email_to(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip().lower() or None if value else None
+
 
 class AlertOut(AlertIn):
     id: str
+    sends_to: str = Field(..., description="The address the next digest goes to")
     last_run_at: Optional[datetime] = None
     next_run_at: Optional[datetime] = Field(None, description="UTC")
     created_at: datetime
@@ -38,6 +47,8 @@ class AlertOut(AlertIn):
 class AlertList(BaseModel):
     alerts: list[AlertOut]
     max_alerts: int
+    email_options: list[str] = Field(default_factory=list, description=(
+        "Addresses a digest can go to: the sign-in email first, then connected Gmail accounts"))
 
 
 class AlertRunOut(BaseModel):

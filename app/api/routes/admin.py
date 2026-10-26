@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.core.auth import require_role
+from app.core.health import run_health_check
 from app.core.db import get_db
 from app.models.admin import AuditLog
 from app.models.schemas import (
@@ -192,6 +193,13 @@ def set_flag(key: str, req: FlagUpdate, request: Request, actor=Depends(admin_on
 # ============================================================
 # Audit log
 # ============================================================
+
+@router.get("/system/health")
+def system_health(_admin=Depends(require_role("admin"))):
+    """Every health check with its detail: database, Redis queues, AI setup,
+    alerts scheduler. The public GET /health returns only the overall status."""
+    return run_health_check()
+
 
 @router.get("/audit", response_model=AuditList)
 def list_audit(

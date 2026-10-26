@@ -21,7 +21,8 @@ class ApplyOption(BaseModel):
 
 class ApplyOptions(BaseModel):
     """The four apply buttons for one job (P4 plan §2)."""
-    adapter: Optional[Literal["greenhouse", "lever", "linkedin"]] = None
+    adapter: Optional[Literal["greenhouse", "lever", "linkedin", "generic"]] = Field(
+        None, description="generic = the AI form reader (beta; turn it on in Apply settings)")
     manual: ApplyOption
     fast: ApplyOption
     auto: ApplyOption
@@ -50,7 +51,11 @@ class PrepPackOut(BaseModel):
     mailto: Optional[str] = Field(None, description="mailto: link with the subject and body filled in")
     dropped: list[str] = Field(default_factory=list,
                                description="Things the AI wrote that are not in your resume, so they were removed")
-    error: Optional[str] = None
+    error: Optional[str] = Field(None, description="Short message for people when part of the pack failed")
+    error_detail: Optional[str] = Field(None, description="Which AI models were tried and why each failed")
+    steps: dict[str, str] = Field(default_factory=dict,
+                                  description="Per part (resume, cover_letter): running, done, failed or skipped")
+    typical_seconds: Optional[int] = Field(None, description="How long packs usually take (median of the last 20)")
     updated_at: datetime
 
 
@@ -99,6 +104,11 @@ RISK_NOTICE = ("Auto apply fills and submits applications on company career site
                "only after you review and approve each one. Some sites limit automated applications, answers can "
                "still be wrong, and a submitted application can't be taken back. You stay responsible for every "
                "application sent in your name. LinkedIn applications are never submitted by the app.")
+GENERIC_NOTICE = ("The AI form reader (beta) fills application forms on other career sites (Ashby, SmartRecruiters, "
+                  "Workable and more). It is less reliable than the Greenhouse and Lever support: it can misread a "
+                  "question or a page. It never signs in or creates accounts, every application waits for your "
+                  "review, and pages it can't handle are handed back to you. It may use a paid image-reading AI "
+                  "model for hard pages, within a per-application limit.")
 
 
 class ApplySettingsIn(BaseModel):
@@ -108,12 +118,18 @@ class ApplySettingsIn(BaseModel):
     hours_end: Optional[int] = Field(None, ge=1, le=24)
     timezone: Optional[str] = Field(None, max_length=64)
     paused: Optional[bool] = Field(None, description="Your own off switch; pausing cancels active runs")
+    allow_generic: Optional[bool] = Field(None, description="Use the AI form reader (beta) on other career sites; "
+                                                            "turning it off cancels its active runs")
 
 
 class ApplySettingsOut(BaseModel):
     level: int
     max_level: int = Field(..., description="Highest level your account allows (set by an admin)")
     risk_notice: str = RISK_NOTICE
+    allow_generic: bool = False
+    generic_notice: str = GENERIC_NOTICE
+    generic_submit_enabled: bool = Field(False, description="False = the AI form reader is in test mode: runs "
+                                                            "are prepared for review but never submitted")
     risk_accepted_at: Optional[datetime] = None
     hours_start: int
     hours_end: int
@@ -157,6 +173,10 @@ class RunOut(BaseModel):
     pack_id: Optional[str] = None
     application_id: Optional[str] = None
     proofs: int = 0
+    steps: list[dict] = Field(default_factory=list, description="AI form reader: the form pages read "
+                                                                "({page, url, keys, files})")
+    vision: Optional[dict] = Field(None, description="AI form reader: screenshot-fallback use "
+                                                     "({steps, cost_usd, map_calls, log})")
     approved_at: Optional[datetime] = None
     submitted_at: Optional[datetime] = None
     created_at: datetime
@@ -178,7 +198,8 @@ class RunDone(BaseModel):
 
 class ProofOut(BaseModel):
     id: str
-    kind: Literal["confirmation", "stopped"]
+    kind: Literal["confirmation", "stopped", "step"] = Field(
+        ..., description="step = one page of a form the AI form reader read (confirmation_text says which)")
     confirmation_text: Optional[str] = None
     page_url: Optional[str] = None
     created_at: datetime
