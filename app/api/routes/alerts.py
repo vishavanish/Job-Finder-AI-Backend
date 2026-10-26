@@ -3,8 +3,8 @@ app/api/routes/alerts.py
 --------------------------
 Saved job alerts (P3.2):
 
-  - GET    /alerts                       my alerts (+ the per-user limit)
-  - POST   /alerts                       save one (search profile, local hour, time zone, min score)
+  - GET    /alerts                       my alerts (+ the per-user limit and the addresses a digest can go to)
+  - POST   /alerts                       save one (search profile, local hour, time zone, min score, email_to)
   - PUT    /alerts/{id}                  change it (recomputes the next run)
   - DELETE /alerts/{id}
   - POST   /alerts/{id}/run-now          run it now (counts against the daily job_alerts quota)
@@ -38,9 +38,10 @@ def _require_alerts(db: Session, user) -> None:
         raise HTTPException(403, "Your account does not include job alerts. Ask an admin to enable it.")
 
 
-def _alert_out(row: JobAlert) -> AlertOut:
+def _alert_out(row: JobAlert, options: list[str]) -> AlertOut:
     return AlertOut(id=row.id, name=row.name, search_profile_id=row.search_profile_id, hour_local=row.hour_local,
                     timezone=row.timezone, min_score=row.min_score, email_digest=row.email_digest,
+                    email_to=row.email_to, sends_to=job_alerts.sends_to(row, options),
                     enabled=row.enabled, last_run_at=row.last_run_at, next_run_at=row.next_run_at,
                     created_at=row.created_at)
 
@@ -53,21 +54,23 @@ def _run_out(row: JobAlertRun) -> AlertRunOut:
 
 @router.get("", response_model=AlertList)
 def list_alerts(user=Depends(get_current_user), db: Session = Depends(get_db)):
-    return {"alerts": [_alert_out(r) for r in job_alerts.list_alerts(db, user.id)],
-            "max_alerts": settings.JOB_ALERTS_MAX_PER_USER}
+    options = job_alerts.email_options(db, user)
+    return {"alerts": [_alert_out(r, options) for r in job_alerts.list_alerts(db, user.id)],
+            "max_alerts": settings.JOB_ALERTS_MAX_PER_USER, "email_options": options}
 
 
 @router.post("", response_model=AlertOut, status_code=201)
 def create_alert(req: AlertIn, user=Depends(get_current_user), db: Session = Depends(get_db)):
     _require_alerts(db, user)
-    return _alert_out(job_alerts.create_alert(db, user.id, req.model_dump()))
+    row = job_alerts.create_alert(db, user.id, req.model_dump())
+    return _alert_out(row, job_alerts.email_options(db, user))
 
 
 @router.put("/{alert_id}", response_model=AlertOut)
 def update_alert(alert_id: str, req: AlertIn, user=Depends(get_current_user), db: Session = Depends(get_db)):
     _require_alerts(db, user)
-    row = job_alerts.get_owned(db, user.id, alert_id)
-    return _alert_out(job_alerts.update_alert(db, row, req.model_dump()))
+    row = job_alerts.update_alert(db, job_alerts.get_owned(db, user.id, alert_id), req.model_dump())
+    return _alert_out(row, job_alerts.email_options(db, user))
 
 
 @router.delete("/{alert_id}", status_code=204)

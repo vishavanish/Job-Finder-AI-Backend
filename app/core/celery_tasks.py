@@ -1010,7 +1010,8 @@ def run_job_alert(self, alert_id: str, trigger: str = "schedule") -> dict:
         keywords = search_params["keywords"]
         run_id = pipeline_progress.create_run(user_id=user.id, total_keywords=len(keywords), kind="alert")
         request_keys = _request_keys(score_params)
-        counts = {"run_id": run_id, "raw": 0, "kept": 0, "duplicates": 0, "blocked": 0, "seen": 0, "filtered": 0}
+        counts = {"run_id": run_id, "raw": 0, "kept": 0, "duplicates": 0, "blocked": 0, "seen": 0, "filtered": 0,
+                  "unscored": 0}
         kept_keys: list[str] = []
         for keyword in keywords:
             raw_jobs = _scrape(db, search_params, keywords=[keyword], locations=search_params["locations"],
@@ -1031,17 +1032,23 @@ def run_job_alert(self, alert_id: str, trigger: str = "schedule") -> dict:
         run.job_ids = [j["id"] for j in jobs]
         run.counts = counts
         run.status, run.finished_at = "done", job_alerts.utcnow()
+        if counts["unscored"]:
+            # Without this a run where every AI model failed looks like "no new jobs".
+            n = counts["unscored"]
+            run.error = (f"{n} job{'s' if n != 1 else ''} couldn't be scored because every AI model failed; "
+                         "they will be tried again on the next run")
         alert.last_run_at = run.finished_at
         db.commit()
 
         if jobs and alert.email_digest:
             subject, body = job_alerts.digest_text(alert, jobs)
+            to = job_alerts.sends_to(alert, job_alerts.email_options(db, user))
             try:
-                get_email_sender().send(to=user.email, subject=subject, body=body)
+                get_email_sender().send(to=to, subject=subject, body=body)
                 run.emailed_at = job_alerts.utcnow()
             except Exception as e:  # noqa: BLE001 — the run's results stay in the app
                 logger.warning("alert %s: digest email failed: %s", alert.id, type(e).__name__)
-                run.error = f"digest email failed: {type(e).__name__}"
+                run.error = "; ".join(filter(None, [run.error, f"digest email failed: {type(e).__name__}"]))
             db.commit()
         return {"alert_id": alert.id, "run_id": run_id, "new_jobs": len(jobs)}
     except Exception as e:  # noqa: BLE001

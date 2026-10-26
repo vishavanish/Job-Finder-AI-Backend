@@ -7,8 +7,10 @@ JOB_ALERT_TICK_SECONDS; each due alert is claimed with a conditional UPDATE
 on next_run_at (two beats can't run it twice) and run as one task that
 goes through the normal pipeline path (_process_jobs): filters, seen-skip,
 scoring, the feed. Jobs at or above min_score that the user was never
-shown are stored on the run and emailed as a digest. Because shown jobs
-become "seen", a job is never sent twice.
+shown are stored on the run and emailed as a digest (to the sign-in email
+or a connected Gmail address). Because shown jobs become "seen", a job is
+never sent twice. Jobs no AI model could score are counted (`unscored`),
+explained on the run, and tried again next time.
 
 Timestamps in these tables are naive UTC (as SQLite returns them).
 """
@@ -27,6 +29,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.redis_client import get_redis
 from app.models.alerts import JobAlert, JobAlertRun
+from app.models.email import EmailAccount
 from app.models.jobs import Job, UserJob
 from app.models.profile import SearchProfile
 from app.models.user import User
@@ -87,8 +90,36 @@ def _check_profile(db: Session, user_id: str, profile_id: str) -> None:
         raise _error(422, "search_profile_not_found", "Pick one of your saved search profiles.")
 
 
+def email_options(db: Session, user: User) -> list[str]:
+    """Where a digest may go: the sign-in email, then the user's connected
+    Gmail addresses (proven by OAuth, so alerts can't mail strangers)."""
+    out = [user.email.lower()]
+    for (address,) in (db.query(EmailAccount.gmail_address).filter(EmailAccount.user_id == user.id)
+                       .order_by(EmailAccount.connected_at).all()):
+        if address and address.lower() not in out:
+            out.append(address.lower())
+    return out
+
+
+def sends_to(alert: JobAlert, options: list[str]) -> str:
+    """The digest address: the chosen Gmail while it's still connected, else the sign-in email."""
+    return alert.email_to if alert.email_to in options else options[0]
+
+
+def _check_email(db: Session, user_id: str, data: dict) -> None:
+    if not data.get("email_to"):
+        return
+    options = email_options(db, db.get(User, user_id))
+    if data["email_to"] not in options:
+        raise _error(422, "alert_email_not_allowed",
+                     "Send alerts to your sign-in email or a Gmail account you connected in Tracker.")
+    if data["email_to"] == options[0]:
+        data["email_to"] = None  # the sign-in email: follow it if it ever changes
+
+
 def _apply(row: JobAlert, data: dict) -> None:
-    for field in ("name", "search_profile_id", "hour_local", "timezone", "min_score", "email_digest", "enabled"):
+    for field in ("name", "search_profile_id", "hour_local", "timezone", "min_score", "email_digest", "email_to",
+                  "enabled"):
         setattr(row, field, data[field])
     row.next_run_at = next_run_at(row) if row.enabled else None
 
@@ -98,6 +129,7 @@ def create_alert(db: Session, user_id: str, data: dict) -> JobAlert:
         raise _error(409, "alert_limit",
                      f"You can keep up to {get_settings().JOB_ALERTS_MAX_PER_USER} alerts. Delete one first.")
     _check_profile(db, user_id, data["search_profile_id"])
+    _check_email(db, user_id, data)
     row = JobAlert(id=str(uuid.uuid4()), user_id=user_id)  # id first: it fixes the run minute
     _apply(row, data)
     db.add(row)
@@ -107,6 +139,7 @@ def create_alert(db: Session, user_id: str, data: dict) -> JobAlert:
 
 def update_alert(db: Session, row: JobAlert, data: dict) -> JobAlert:
     _check_profile(db, row.user_id, data["search_profile_id"])
+    _check_email(db, row.user_id, data)
     _apply(row, data)
     db.commit()
     return row
