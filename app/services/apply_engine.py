@@ -55,7 +55,7 @@ from sqlalchemy.orm import Session
 
 from app.apply import adapters as adapter_registry
 from app.apply import vision
-from app.apply.adapters import HardStop
+from app.apply.adapters import Blocked, HardStop
 from app.apply.generic import MAP_SYSTEM, RunTools, valid_map
 from app.core.config import get_settings
 from app.core.redis_client import get_redis
@@ -67,7 +67,7 @@ from app.models.jobs import Job
 from app.models.profile import Resume
 from app.models.user import User
 from app.services import (
-    ai_router, answer_bank, apply_options, apply_prep, entitlements, feature_flags, job_store, key_store,
+    ai_router, answer_bank, apply_blocks, apply_options, apply_prep, entitlements, feature_flags, job_store, key_store,
     resume_store,
 )
 from app.services.applications_store import record_status
@@ -303,6 +303,9 @@ def create_run(db: Session, user: User, job: Job, *, mode: str) -> ApplyRun:
         if adapter == "generic" and not s.allow_generic:
             raise _error(409, "generic_off",
                          "This job uses the AI form reader (beta). Turn it on in Apply settings first.")
+        block = apply_blocks.paused(apply_blocks.platform_of(adapter, job.apply_url or job.url, job.best_source)[0])
+        if block:
+            raise _error(409, "platform_blocked", apply_blocks.reason(block))
         level = 2
     else:  # fast
         if adapter != "linkedin":
@@ -564,6 +567,7 @@ def prepare(db: Session, run_id: str) -> ApplyRun | None:
                              profile_dir=_profile_dir(run.user_id) if fast else None, keep_open=fast) as page:
             try:
                 adapter.open(page, run.apply_url, cfg.APPLY_PAGE_TIMEOUT_SECONDS * 1000)
+                apply_blocks.note_ok(_platform(run, job)[0])
                 if adapter.multi_step:
                     try:
                         return _prepare_steps(db, run, adapter, page, job, docs)
@@ -572,6 +576,8 @@ def prepare(db: Session, run_id: str) -> ApplyRun | None:
                 fields = adapter.read_form(page)
             except HardStop as stop:
                 _save_usage(db, run, adapter)
+                if isinstance(stop, Blocked):
+                    return _blocked_stop(db, run, adapter, page, job, stop)
                 _snap(db, run, adapter, page, kind="stopped", text=stop.reason)
                 _transition(db, run, "needs_user", stop.reason + " Finish this application on the job page.",
                             tracker_status="needs_user")
@@ -621,6 +627,24 @@ def prepare(db: Session, run_id: str) -> ApplyRun | None:
         shutil.rmtree(workdir, ignore_errors=True)  # uploads read the files when they are set
 
     _after_answers(db, run)
+    return run
+
+
+def _platform(run: ApplyRun, job: Job | None) -> tuple[str, str]:
+    return apply_blocks.platform_of(run.adapter, run.apply_url, job.best_source if job else None)
+
+
+def _blocked_stop(db: Session, run: ApplyRun, adapter, page, job: Job | None, stop: Blocked) -> ApplyRun:
+    """The site refused the server's browser (QA5): hand the run over, say so plainly and pause Auto apply on
+    that platform for everyone (the block is on the server's IP)."""
+    key, name = _platform(run, job)
+    row = apply_blocks.record(key, name, run.id)
+    logger.warning("apply run=%s blocked by %s: %s (paused %s h)", run.id, name, stop.reason, row["hours"])
+    _snap(db, run, adapter, page, kind="stopped", text=stop.reason)
+    _transition(db, run, "needs_user",
+                f"{name} blocked the app's browser — it treats our server as a bot. Apply on the job page in your "
+                f"own browser. Auto apply on {name} is paused for {row['hours']} h.",
+                tracker_status="needs_user", error=f"Blocked: {stop.reason}")
     return run
 
 
@@ -841,6 +865,8 @@ def submit(db: Session, run_id: str) -> ApplyRun | None:
                         _save_usage(db, run, adapter)
                 fields = adapter.read_form(page)
             except HardStop as stop:
+                if isinstance(stop, Blocked):
+                    return _blocked_stop(db, run, adapter, page, db.get(Job, run.job_id), stop)
                 _snap(db, run, adapter, page, kind="stopped", text=stop.reason)
                 _transition(db, run, "needs_user", stop.reason + " Finish this application on the job page.",
                             tracker_status="needs_user")
