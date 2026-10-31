@@ -160,3 +160,58 @@ def test_migration_makes_groq_the_copilot_default_only_where_none_is_set(monkeyp
         db.query(TaskModelDefault).filter(TaskModelDefault.task.in_(m.TASKS)).delete(synchronize_session=False)
         db.commit()
         db.close()
+
+
+def test_qwen_on_groq_skips_thinking_on_live_tasks_and_hides_it_elsewhere():
+    assert adapters.groq_reasoning(spec("qwen/qwen3.8-27b", "groq")) == {"reasoning_effort": "none"}
+    assert adapters.groq_reasoning(spec("qwen/qwen3.8-27b", "groq", fast=False)) == {"reasoning_format": "hidden"}
+
+
+def _load(name: str):
+    path = MIGRATION.parent / name
+    mod_spec = importlib.util.spec_from_file_location(path.stem, path)
+    mod = importlib.util.module_from_spec(mod_spec)
+    mod_spec.loader.exec_module(mod)
+    return mod
+
+
+def test_migration_0021_moves_the_copilot_default_to_qwen_but_keeps_an_admin_choice(monkeypatch):
+    m = _load("0021_copilot_qwen.py")
+    db = SessionLocal()
+    try:
+        qwen = db.query(AiModel).filter(AiModel.provider == "groq", AiModel.model_id == m.MODEL_ID).one()
+        assert qwen.tasks == ["copilot_answer", "question_gate"] and qwen.tier == "free"
+        gpt = db.query(AiModel).filter(AiModel.provider == "groq", AiModel.model_id == "openai/gpt-oss-120b").one()
+        db.query(TaskModelDefault).filter(TaskModelDefault.task.in_(m.TASKS)).delete(synchronize_session=False)
+        db.add(TaskModelDefault(task="copilot_answer", model_ref=gpt.id, updated_by="migration 0020"))
+        db.add(TaskModelDefault(task="question_gate", model_ref=gpt.id, updated_by="admin"))
+        db.commit()
+        with engine.begin() as conn:
+            monkeypatch.setattr(m.op, "get_bind", lambda: conn, raising=False)
+            m.upgrade()
+        db.expire_all()
+        assert db.get(TaskModelDefault, "copilot_answer").model_ref == qwen.id
+        assert db.get(TaskModelDefault, "question_gate").model_ref == gpt.id  # the admin's choice stays
+    finally:
+        db.query(TaskModelDefault).filter(TaskModelDefault.task.in_(m.TASKS)).delete(synchronize_session=False)
+        db.commit()
+        db.close()
+
+
+@pytest.mark.parametrize("question, qtype, expect", [
+    ("Write a program to find duplicate elements in a list.", "coding", "then a line starting 'Approach:'"),
+    ("How does a Kubernetes rolling update work?", "devops", "kubectl"),
+    ("What is the difference between useEffect and useLayoutEffect in React?", "frontend", "concept"),
+    ("How would you make a slow REST API endpoint faster?", "backend", "API, database, cache, queue"),
+])
+def test_each_technical_type_gets_its_own_answer_format(question, qtype, expect):
+    from app.services import copilot_session as cs, question_gate, voice_context
+    r = question_gate.classify(question)
+    assert r.is_question and r.qtype == qtype
+    sess = cs.CopilotSession.__new__(cs.CopilotSession)
+    sess.ctx = voice_context.SessionContext(role="Software engineer")
+    sess.cards, sess.length, sess.style, sess.language, sess.context = {}, "short", "bullets", "en", []
+    system, _, _ = sess._prompts(cs.Card("x", question, r.qtype), "normal")
+    assert expect in system and "Not in your profile:" not in system
+    if qtype == "coding":
+        assert system.index("code block") < system.index("Approach:") < system.index("Complexity:")

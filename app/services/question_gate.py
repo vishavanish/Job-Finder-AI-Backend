@@ -92,6 +92,24 @@ TYPES = (  # first match wins
                     "an example of", "mentor")),
     ("situational", ("what would you do if", "how would you handle", "imagine", "suppose", "let's say",
                      "lets say", "what if", "in a situation where")),
+    # Topic types (after the personal ones, so "tell me about a time ... Kubernetes" stays behavioral).
+    # A leading space matches at a word start only (the text is padded with spaces).
+    ("devops", ("kubernetes", " k8s", "kubectl", "docker", "container", " helm", "terraform", "ansible",
+                "jenkins", "ci/cd", " ci cd", "cicd", "pipeline", "github actions", "gitlab", "rolling update",
+                "blue green", "blue-green", "canary", " aws", " ec2", " s3 ", "lambda", "azure", " gcp",
+                "nginx", "linux", "bash", "shell script", "prometheus", "grafana", "monitoring", "observability",
+                "infrastructure as code", "devops", " sre", "on-call", "on call", "incident", " vpc", "autoscal",
+                "deployment", "deploy", "cron", "ssl certificate", "dns")),
+    ("frontend", ("react", " hook", "usestate", "useeffect", "uselayouteffect", "use effect", "use state",
+                  "redux", "angular", " vue", "next.js", "nextjs", " css", "flexbox", " html", " dom ",
+                  "virtual dom", "browser", "javascript", "typescript", "frontend", "front end", "front-end",
+                  " ui ", "component", " props", "webpack", " vite", "responsive", "accessibility",
+                  "event loop", "closure", "local storage", "localstorage", "cors")),
+    ("backend", (" api", "rest ", "graphql", "endpoint", "server", "backend", "back end", "back-end",
+                 "database", " sql", "postgres", "mysql", "mongodb", "index", "query", " orm", "transaction",
+                 "cache", "caching", "redis", "kafka", "rabbitmq", "message queue", "microservice",
+                 "authentication", "authorization", " jwt", "oauth", "session", "node.js", "nodejs", "express",
+                 "django", "flask", "fastapi", "spring", "connection pool", "concurrency", "idempot")),
 )
 # A coding task said as a statement ("we have to find the duplicate element in the list", "now reverse the
 # string"): no question mark or wh-word, but clearly a question to answer.
@@ -133,12 +151,28 @@ def _starts(t: str, prefixes) -> bool:
 
 
 def _qtype(t: str) -> str:
+    padded = f" {t} "
     for name, words in TYPES:
-        if any(w in t for w in words):
+        if any(w in padded for w in words):
             return name
     if any(h in t for h in TECH_HINTS):
         return "technical"
     return "general"
+
+
+_OPEN_ENDS = (" and", " or", " the", " a", " an", " of", " to", " with", " your", " for", " in", " on", " how",
+              " that", " which", " about")
+
+
+def unfinished(text: str) -> bool:
+    """A piece of speech that probably goes on after a pause ("Write a program.", "How would you design
+    the"): short or ending on a joining word, no question mark, not small talk."""
+    raw = (text or "").strip()
+    t = normalize(raw)
+    low = raw.lower()
+    if not t or raw.endswith("?") or any(p in t or p in low for p in SMALL_TALK):
+        return False
+    return len(t.split()) < 8 or t.endswith(_OPEN_ENDS)
 
 
 def classify(text: str, *, since_last_card_s: float | None = None) -> GateResult:

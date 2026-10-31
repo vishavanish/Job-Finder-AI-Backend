@@ -654,3 +654,37 @@ def test_coding_tasks_said_as_statements_get_code_and_whisper_gets_an_interview_
     assert done["not_sure"] is False  # no resume match needed for code
     assert stt.prompts and "Write a program" in stt.prompts[0]
 
+
+
+def test_a_question_split_by_a_short_pause_is_answered_as_one(client, make_user, speech, llm):
+    _, headers = ready_user(client, make_user)
+    fake = llm([(["- part one"], True), (["```python\nprint(1)\n```\nApproach: x\nComplexity: O(n)"], False),
+                (["- two sum"], False)])
+    speech.texts(["Write a program to", "find duplicate elements in a list.",
+                  "Given an array of integers.", "Find two numbers in the array that add up to a target."])
+    created = open_copilot(client, headers)
+    with client.websocket_connect(created["stream_path"]) as ws:
+        auth(ws, created)
+        ts = speak(ws, 0)
+        first, _ = recv_until(ws, "question.detected")
+        ts = speak(ws, 0, ts)  # 0.8 s pause: the same question goes on
+        updated, _ = recv_until(ws, "question.updated")
+        assert updated["question_id"] == first["question_id"]
+        assert updated["text"] == "Write a program to find duplicate elements in a list."
+        assert updated["qtype"] == "coding"
+        recv_until(ws, "answer.done")
+        ts = speak(ws, 0, ts, silence=20)  # a statement, then a long pause...
+        recv_until(ws, "transcript.final")
+        speak(ws, 0, ts)  # ...is not joined
+        alone, _ = recv_until(ws, "question.detected")
+        assert alone["text"] == "Find two numbers in the array that add up to a target."
+        stop(ws)
+    assert "Write a program to find duplicate elements" in fake.calls[1]["prompt"]
+
+
+def test_an_unfinished_statement_joins_the_next_piece():
+    from app.services import question_gate
+    assert question_gate.unfinished("Write a program.") and question_gate.unfinished("How would you design the")
+    assert not question_gate.unfinished("Can you hear me okay?")
+    assert not question_gate.unfinished("Thanks for joining.")
+    assert not question_gate.unfinished("Tell me about a time you led a project under a tight deadline.")

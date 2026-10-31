@@ -30,8 +30,8 @@ def _raise_for(resp: httpx.Response) -> None:
         raise SpeechError(f"HTTP {resp.status_code} from speech endpoint", retryable=retryable)
 
 
-# Whisper reads at most 224 prompt tokens; ~4 characters each, with room to spare.
-STT_PROMPT_MAX_CHARS = 800
+# Whisper reads at most 224 prompt tokens (it keeps the last ones); a little over 4 characters each here.
+STT_PROMPT_MAX_CHARS = 1100
 
 class OpenAICompatibleSTT:
     """POST {base_url}/audio/transcriptions with the utterance as a WAV file."""

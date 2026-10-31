@@ -73,11 +73,33 @@ CH_INTERVIEWER, CH_USER, CH_MIXED = 0, 1, 2
 CONTEXT_SECONDS = 60
 ANSWER_NOW_SECONDS = 20
 LLM_GATE_TIMEOUT = 0.6
+# Per-utterance STT: an interviewer pause shorter than this joins the two pieces into one question
+# ("Write a program to ..." [pause] "... find duplicates in a list").
+JOIN_GAP_MS = 1500
 SCREENSHOT_MAX_BYTES = 2 * 1024 * 1024
 SCREENSHOT_TYPES = ("image/png", "image/jpeg", "image/webp")
 PERSONAL_TYPES = ("behavioral", "intro", "hr", "situational", "general")
 # Knowledge questions: answered from general knowledge (the resume is only extra colour), never "Not in your profile".
-TECH_TYPES = ("coding", "technical", "system_design")
+TECH_TYPES = ("coding", "technical", "system_design", "devops", "frontend", "backend")
+CODE_LANGUAGE = ("Use the language the interviewer named, else the candidate's main language from <resume>, else "
+                 "Python")
+# Answer layout per technical type: (format, minimum words). Coding is what interviewers expect on a whiteboard:
+# readable code first, then the approach, then the complexity.
+TECH_FORMATS = {
+    "coding": ("a ``` code block with a clean, correct, human-readable solution (clear variable and function "
+               "names, short comments on the key steps, a tiny example call), then a line starting 'Approach:' "
+               "with 2-3 short sentences, then a line 'Complexity: Time O(..), Space O(..)' with a few words of "
+               "why. " + CODE_LANGUAGE, 160),
+    "system_design": ("short bullet points: requirements, main components, data flow, storage, scaling, "
+                      "trade-offs", 130),
+    "devops": ("3-5 short bullet points on how it works and the steps you would take, with the real command or "
+               "config line in `backticks` where it helps (kubectl, docker, terraform, CI/CD YAML)", 110),
+    "frontend": ("3-5 short bullet points that explain the concept and when to use it; add a very small code "
+                 "snippet in a ``` block only if it makes the answer clearer", 110),
+    "backend": ("3-5 short bullet points: the approach, the components involved (API, database, cache, queue) "
+                "and the trade-offs; add a short code or SQL snippet only if it makes the answer clearer", 110),
+    "technical": ("3-5 short bullet points a confident engineer would say out loud", 90),
+}
 _DATA_URL = re.compile(r"^data:(image/[a-z+.-]+);base64,(.+)$", re.S)
 
 STYLE_TEXT = {
@@ -246,6 +268,8 @@ class CopilotSession(VoiceSocket):
         self.gen: CardGen | None = None
         self.heard: dict | None = None  # timing of the latest interviewer utterance (segmented STT)
         self.stt_prompt = stt_hint(ctx)
+        self.last_int_end_ms: int | None = None       # end of the previous interviewer utterance (audio ms)
+        self.fragment: tuple[str, int] | None = None  # (text, utterance no.) of a piece that wasn't a question
         self.seq = 0
         self.utt_no = 0
         self.int_finals: list[str] = []
@@ -493,6 +517,22 @@ class CopilotSession(VoiceSocket):
         if not text:
             return
         self._remember("Interviewer", text)
+        cur = self.utt_no - 1
+        gap = (t.start_ms - self.last_int_end_ms
+               if self.last_int_end_ms is not None and t.start_ms is not None else None)
+        self.last_int_end_ms = t.end_ms if t.end_ms is not None else self.last_int_end_ms
+        joinable = not self.streaming and gap is not None and 0 <= gap <= JOIN_GAP_MS
+        fragment, self.fragment = self.fragment, None
+        if card is None and joinable:
+            prev = self.last_card
+            if prev is not None and prev.utt_no == cur - 1 and question_gate.unfinished(prev.text):
+                # The question went on after a short pause: answer the whole of it.
+                prev.utt_no = cur
+                await self._restart(prev, f"{prev.text} {text}")
+                await self._persist_question(prev, start_ms=t.start_ms, end_ms=t.end_ms)
+                return
+            if fragment is not None and fragment[1] == cur - 1 and question_gate.unfinished(fragment[0]):
+                text = f"{fragment[0]} {text}"  # an unfinished piece ("Write a program.") + the rest
         if card is not None:
             if text != card.text and len(text.split()) > len(card.text.split()):
                 await self._restart(card, text)
@@ -509,6 +549,7 @@ class CopilotSession(VoiceSocket):
             await self._persist_question(card, start_ms=t.start_ms, end_ms=t.end_ms)
             return
         await self._persist(speaker="interviewer", kind="utterance", text=text, start_ms=t.start_ms, end_ms=t.end_ms)
+        self.fragment = (text, cur)
         if r.decision == "unsure":
             self._spawn(self._llm_gate(text, self.utt_no))
 
@@ -596,23 +637,23 @@ class CopilotSession(VoiceSocket):
         else:
             extra = ""
         tech = card.qtype in TECH_TYPES
-        if card.qtype == "coding":
-            # Code is what the candidate needs on screen: approach, code, complexity in the first answer.
-            words = max(words, 250 if mode == "expand" else 160)
-            style = ("one line with the approach, then a short correct solution in a ``` code block, then one line "
-                     "with time and space complexity. Use the language the interviewer named, else the "
-                     "candidate's main language from <resume>, else Python")
+        if tech and mode != "shorter":
+            style, minimum = TECH_FORMATS[card.qtype]
+            words = max(words, minimum + (100 if mode == "expand" else 0))
             if mode == "expand":
-                extra = "Explain the approach step by step, give clean commented code, complexity and edge cases."
-        elif card.qtype == "system_design":
-            words = max(words, 130)
-            style = "short bullet points: requirements, main components, data flow, scaling, trade-offs"
+                extra = ("Go deeper: explain each step, give a fuller code or config example, edge cases and "
+                         "trade-offs." if card.qtype != "coding" else
+                         "Go deeper: explain the approach step by step, give clean commented code, the complexity, "
+                         "edge cases and one alternative approach with its trade-off.")
         if card.multipart:
             extra += " The question has several parts: answer each as a numbered point."
         if tech:
-            rules = ("This is a technical question: answer it correctly from general knowledge. Mention the "
-                     "candidate's own experience only when <resume>, <stories> or <job> show it, and never invent "
-                     "employers, projects or numbers. Do not write \"Not in your profile\". ")
+            rules = ("This is a technical question: answer it correctly and specifically from general "
+                     "knowledge, the way a strong engineer would in an interview. Mention the candidate's own "
+                     "experience only when <resume>, <stories> or <job> show it, and never invent employers, "
+                     "projects or numbers. If asked whether the candidate has used something that isn't in the "
+                     "materials, say so honestly and explain what they know about it. Do not write \"Not in your "
+                     "profile\". ")
         else:
             rules = ("Use ONLY facts found in <resume>, <stories> and <job>: never invent employers, projects, "
                      "numbers, tools or results. If the materials don't cover the question, give a short general "
@@ -650,7 +691,7 @@ class CopilotSession(VoiceSocket):
         # screenshots (vision).
         strong = mode == "expand" or bool(images)
         task = "copilot_expand" if strong else "copilot_answer"
-        max_tokens = 900 if mode == "expand" else 600 if card.qtype == "coding" else 500 if card.hard else 350
+        max_tokens = 900 if mode == "expand" else 600 if card.qtype == "coding" else 500 if card.hard or card.qtype in TECH_TYPES else 350
         first_token = get_settings().VOICE_FIRST_TOKEN_TIMEOUT_MS / 1000
         stream = LLMStream(user_id=self.user_id, task=task, system=system, user_prompt=prompt, max_tokens=max_tokens,
                            free_only=self.free_only, ref=self.session_id, images=images,
@@ -844,14 +885,20 @@ STT_HINT = ("A job interview. The interviewer asks questions such as: Tell me ab
             "to find duplicate elements in a list. Write a function to reverse a string. What is the time "
             "complexity? Explain the difference between a process and a thread. Design a URL shortener. "
             "Tell me about a time you handled a conflict. What is your notice period?")
+# Technical words Whisper mishears without help (measured: "Kubernetes" was heard as "Pagare Next").
+STT_TERMS = ("Technical terms: Kubernetes, kubectl, Docker, Helm, Terraform, Ansible, Jenkins, GitHub Actions, CI/CD, "
+             "AWS, EC2, S3, Lambda, Azure, GCP, Nginx, Linux, Prometheus, Grafana, React, useEffect, useState, "
+             "useLayoutEffect, Redux, Next.js, TypeScript, JavaScript, CSS, DOM, Node.js, Express, Django, FastAPI, "
+             "Spring Boot, REST API, GraphQL, PostgreSQL, MySQL, MongoDB, Redis, Kafka, microservices, OAuth, JWT, "
+             "SQL, big O, linked list, hash map, binary tree.")
 
 
 def stt_hint(ctx: voice_context.SessionContext) -> str:
     """Whisper's context hint for the interviewer channel: interview phrasing (so "write a program" isn't
     heard as "right there...") plus the role and the candidate's skills."""
-    parts = [STT_HINT, f"Role: {ctx.target}."]
+    parts = [STT_HINT, STT_TERMS, f"Role: {ctx.target}."]
     if ctx.headline:
-        parts.append(" ".join(ctx.headline.split())[:300])
+        parts.append(" ".join(ctx.headline.split())[:200])
     return " ".join(parts)
 
 
