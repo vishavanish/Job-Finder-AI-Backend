@@ -37,13 +37,11 @@ _PLATFORM_HINTS = {
     "career": "successfactors",  # vanity domains (careers.<company>.com) often proxy SF
     "taleo.net": "taleo",
     "icims.com": "icims",
-    "fa.oraclecloud.com": "oracle_fusion",
+    "oraclecloud.com": "oracle_fusion",  # eeho.fa.us2…, ibqbjb.fa.ocs…, jpmc.fa…
 }
 
-# Registry of known Oracle Fusion tenants — each needs a session_url (the
-# human-facing career page, primes the anonymous session cookie) alongside
-# the JSON API endpoint_url passed in via custom_endpoint_url. Add new
-# Oracle Fusion companies here — no other code changes needed.
+# Known Oracle Fusion career sites by slug, used when only a slug is given. Any careers / job / API link on
+# *.oraclecloud.com works without an entry here (QA7: read through providers/ats/platforms.OracleCloud).
 KNOWN_ORACLE_FUSION_SESSION_URLS = {
     "jpmorgan": "https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/jobs",
     # "somecompany": "https://<tenant>.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/<SITE>/jobs",
@@ -207,70 +205,31 @@ def fetch_workday(tenant_url: str, company_slug: str, progress: Callable[[str], 
 def fetch_oracle_fusion(
     company_slug: str,
     endpoint_url: str,
-    session_url: str,
+    session_url: str | None = None,
     progress: Callable[[str], None] = NoOpProgress,
 ) -> list[dict]:
-    """Oracle Fusion/HCM career sites (jpmc.fa.oraclecloud.com and similar
-    <tenant>.fa.oraclecloud.com domains) expose a public JSON API at
-    /hcmRestApi/resources/latest/recruitingCEJobRequisitions — but it only
-    returns real data once the client holds a session cookie obtained by
-    first visiting the human-facing career page. No login/candidate
-    account is required; the cookie is anonymous and issued on first
-    visit (verified: incognito browsing with no prior visit history still
-    gets full job data once this priming step happens).
+    """Oracle Fusion / Recruiting Cloud career sites (<tenant>.fa[.region].oraclecloud.com). Reads the public
+    REST resource through the ATS Discovery adapter (`platforms.OracleCloud`): no session priming is needed
+    (live-checked 2026-10-31 on 9 sites), and the site number comes from the link instead of a fixed CX_1001."""
+    from app.providers.ats import platforms  # the discovery adapters import job_sources.base, not this module
 
-    Paginates via the response's own {count, items, hasMore, offset,
-    limit} shape until hasMore is False.
-    """
-    session = requests.Session()
-    session.headers.update(HEADERS)
-    session.headers["Accept"] = "application/json, application/vnd.oracle.adf.resourcecollection+json;q=0.9, */*;q=0.8"
-
-    try:
-        session.get(session_url, timeout=15)  # primes the session cookie jar
-    except Exception as e:  # noqa: BLE001
-        progress(f"Oracle Fusion '{company_slug}': failed to prime session from {session_url}: {e}")
+    ref = None
+    for url in (session_url, endpoint_url, KNOWN_ORACLE_FUSION_SESSION_URLS.get(company_slug.lower())):
+        ref = platforms.get("oracle_cloud").parse_url(url) if url else None
+        if ref:
+            break
+    if ref is None:
+        progress(f"Oracle Fusion '{company_slug}': give the careers page link "
+                 f"(…oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/jobs).")
         return []
-
-    jobs: list[dict] = []
-    url = endpoint_url
-    while url:
-        try:
-            resp = session.get(
-                url,
-                headers={"Content-Type": "application/vnd.oracle.adf.resourceitem+json;charset=utf-8"},
-                timeout=20,
-            )
-            if resp.status_code != 200:
-                progress(f"Oracle Fusion '{company_slug}' returned {resp.status_code}")
-                break
-            data = resp.json()
-        except Exception as e:  # noqa: BLE001
-            progress(f"Oracle Fusion '{company_slug}' fetch failed: {e}")
-            break
-
-        for item in data.get("items", []):
-            jobs.append({
-                "source": company_slug.title(),
-                "title": item.get("Title", ""),
-                "company": company_slug,
-                "location": item.get("PrimaryLocation", "") or "",
-                "url": f"{urlparse(endpoint_url).scheme}://{urlparse(endpoint_url).hostname}/hcmUI/CandidateExperience/en/sites/CX_1001/job/{item.get('Id', '')}",
-                "description": _strip_html(item.get("ExternalDescriptionStr", "")),
-                "posted": item.get("PostedDate", ""),
-            })
-
-        has_more = bool(data.get("hasMore", False))
-        if not has_more:
-            break
-        offset = data.get("offset", 0)
-        limit = data.get("limit", len(data.get("items", [])) or 1)
-        next_offset = offset + limit
-        if f"offset={offset}" in url:
-            url = url.replace(f"offset={offset}", f"offset={next_offset}")
-        else:
-            url = f"{url}&offset={next_offset}"
-
+    try:
+        result = platforms.get("oracle_cloud").list_jobs(ref, max_jobs=1000)
+    except Exception as e:  # noqa: BLE001
+        progress(f"Oracle Fusion '{company_slug}' fetch failed: {e}")
+        return []
+    jobs = [{"source": company_slug.title(), "title": j["title"], "company": company_slug,
+             "location": j["location"], "url": j["url"], "description": j["description"], "posted": j["posted"]}
+            for j in result.jobs]
     progress(f"Oracle Fusion '{company_slug}': {len(jobs)} jobs")
     return jobs
 
@@ -607,15 +566,7 @@ def fetch_custom(
     if platform == "successfactors":
         return fetch_successfactors(endpoint_url, company_slug, progress=progress)
     if platform == "oracle_fusion":
-        resolved_session_url = session_url or KNOWN_ORACLE_FUSION_SESSION_URLS.get(company_slug.lower())
-        if not resolved_session_url:
-            progress(
-                f"Oracle Fusion '{company_slug}': no custom_session_url given and no known "
-                f"default for this slug — cannot prime session. Supply custom_session_url "
-                f"(the human-facing career page URL) alongside custom_endpoint_url."
-            )
-            return []
-        return fetch_oracle_fusion(company_slug, endpoint_url, resolved_session_url, progress=progress)
+        return fetch_oracle_fusion(company_slug, endpoint_url, session_url, progress=progress)
     data = None
     try:
         if method.upper() == "POST":

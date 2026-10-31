@@ -9527,5 +9527,68 @@
   "platform": "zoho_recruit",
   "slug": "eligarf",
   "host": "zohorecruit.in"
+ },
+ {
+  "platform": "oracle_cloud",
+  "slug": "eeho",
+  "host": "eeho.fa.us2.oraclecloud.com",
+  "site": "CX_1",
+  "name": "Oracle"
+ },
+ {
+  "platform": "oracle_cloud",
+  "slug": "eofh",
+  "host": "eofh.fa.em2.oraclecloud.com",
+  "site": "CX_3001",
+  "name": "Tata Capital"
+ },
+ {
+  "platform": "oracle_cloud",
+  "slug": "fa-etvl-saasfaprod1",
+  "host": "fa-etvl-saasfaprod1.fa.ocs.oraclecloud.com",
+  "site": "CX_1",
+  "name": "Zensar Technologies"
+ },
+ {
+  "platform": "oracle_cloud",
+  "slug": "fa-euxc-saasfaprod1",
+  "host": "fa-euxc-saasfaprod1.fa.ocs.oraclecloud.com",
+  "site": "CX_1",
+  "name": "Citco"
+ },
+ {
+  "platform": "oracle_cloud",
+  "slug": "fa-ewjt-saasfaprod1",
+  "host": "fa-ewjt-saasfaprod1.fa.ocs.oraclecloud.com",
+  "site": "CX_2",
+  "name": "EXL Service"
+ },
+ {
+  "platform": "oracle_cloud",
+  "slug": "hcbt",
+  "host": "hcbt.fa.em2.oraclecloud.com",
+  "site": "CX_1001",
+  "name": "Kotak Securities"
+ },
+ {
+  "platform": "oracle_cloud",
+  "slug": "hdjq",
+  "host": "hdjq.fa.us2.oraclecloud.com",
+  "site": "CX_1",
+  "name": "Emerson"
+ },
+ {
+  "platform": "oracle_cloud",
+  "slug": "iaamcp",
+  "host": "iaamcp.fa.ocs.oraclecloud.com",
+  "site": "CX_xx",
+  "name": "CSB Bank"
+ },
+ {
+  "platform": "oracle_cloud",
+  "slug": "ibqbjb",
+  "host": "ibqbjb.fa.ocs.oraclecloud.com",
+  "site": "CX_1",
+  "name": "Honeywell"
  }
 ]

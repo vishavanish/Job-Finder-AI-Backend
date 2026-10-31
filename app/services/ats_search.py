@@ -45,6 +45,8 @@ logger = logging.getLogger("job_finder_api.ats_search")
 
 PAGE_SIZE = 25
 MATCH_LIMIT = 3000
+# Platforms with server-side text search (Workday, SmartRecruiters, Oracle Cloud): live-searched in a top-up.
+SEARCHABLE = tuple(key for key, impl in platforms.PLATFORMS.items() if impl.has_search)
 SYNONYM_TTL = 30 * 24 * 3600
 _WORD = re.compile(r"[a-z0-9+#]+")
 _SENIORITY = {"senior", "sr", "junior", "jr", "lead", "staff", "principal", "intern", "trainee", "fresher",
@@ -403,7 +405,7 @@ def topup_lock(q: str) -> bool:
 
 def topup(session_factory: Callable[[], Session], q: str, *, progress: Callable[[str], None] = lambda m: None) -> dict:
     """Live-searches / refreshes stale companies for a query with few index matches (P6 plan §3.4.5).
-    Workday and SmartRecruiters tenants are searched by text; other companies are crawled in full."""
+    Companies on SEARCHABLE platforms are searched by text; other companies are crawled in full."""
     cfg = get_settings()
     phrases, _ = expansions(q)
     db = session_factory()
@@ -411,12 +413,11 @@ def topup(session_factory: Callable[[], Session], q: str, *, progress: Callable[
         enabled = ats_registry.enabled_platforms(db)
         stale_before = _now() - timedelta(hours=cfg.ATS_HOT_REFRESH_HOURS)
         searchable = [c for (c,) in db.query(AtsCompany.id).filter(
-            AtsCompany.active.is_(True), AtsCompany.platform.in_([p for p in ("workday", "smartrecruiters")
-                                                                  if p in enabled])
+            AtsCompany.active.is_(True), AtsCompany.platform.in_([p for p in SEARCHABLE if p in enabled])
         ).order_by(AtsCompany.job_count.desc()).limit(cfg.ATS_TOPUP_MAX_COMPANIES // 2).all()]
         stale = [c for (c,) in db.query(AtsCompany.id).filter(
             AtsCompany.active.is_(True), AtsCompany.platform.in_(list(enabled)),
-            AtsCompany.platform.notin_(["workday", "smartrecruiters"]),
+            AtsCompany.platform.notin_(list(SEARCHABLE)),
             or_(AtsCompany.last_crawled_at.is_(None), AtsCompany.last_crawled_at < stale_before),
         ).order_by(AtsCompany.last_crawled_at.is_(None).desc(), AtsCompany.last_crawled_at).limit(
             cfg.ATS_TOPUP_MAX_COMPANIES - len(searchable)).all()]

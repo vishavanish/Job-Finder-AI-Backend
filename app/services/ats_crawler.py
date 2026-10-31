@@ -214,7 +214,8 @@ def _platform_health(db: Session, platform: str, error: str | None) -> None:
 def fetch(company: AtsCompany) -> ListResult:
     cfg = get_settings()
     impl = platforms.get(company.platform)
-    max_jobs = cfg.ATS_WORKDAY_MAX_JOBS if company.platform == "workday" else cfg.ATS_MAX_JOBS_PER_COMPANY
+    big = company.platform in ats_registry.SITE_PLATFORMS  # thousands of jobs per site: capped, markets first
+    max_jobs = cfg.ATS_WORKDAY_MAX_JOBS if big else cfg.ATS_MAX_JOBS_PER_COMPANY
     result = impl.list_jobs(ats_registry.to_ref(company), etag=company.etag, max_jobs=max_jobs,
                             markets=cfg.ats_markets)
     if not result.not_modified:

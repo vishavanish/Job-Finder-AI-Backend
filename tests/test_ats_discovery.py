@@ -64,6 +64,9 @@ ROUTES = {
     "steeloncall.keka.com/careers/api/jobs/default/active": ATS / "keka.json",
     "steeloncall.keka.com/careers/api/organization/default/careerportalinfo": ATS / "keka_info.json",
     "digitalnest.zohorecruit.in/jobs/Careers": ATS / "zoho_recruit.html",
+    "ibqbjb.fa.ocs.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions?": ATS / "oracle_cloud.json",
+    "ibqbjb.fa.ocs.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails":
+        ATS / "oracle_cloud_detail.json",
 }
 
 
@@ -129,6 +132,7 @@ def company(db, ref: AtsRef, name: str | None = None) -> AtsCompany:
     (AtsRef("gem", "gem"), 2),
     (AtsRef("keka", "steeloncall"), 3),
     (AtsRef("zoho_recruit", "digitalnest", host="zohorecruit.in"), 4),
+    (AtsRef("oracle_cloud", "ibqbjb", host="ibqbjb.fa.ocs.oraclecloud.com", site="CX_1"), 3),
 ])
 def test_every_platform_parses_its_recorded_response(http, monkeypatch, ref, min_jobs):
     monkeypatch.setattr(platforms, "public_host", lambda host: True)
@@ -197,6 +201,10 @@ def test_workday_big_tenant_indexes_target_market_first(http):
     ("https://kanerika.zohorecruit.com/jobs/Careers/705962000023064981/Engineer-Backend?source=CareerSite",
      ("zoho_recruit", "kanerika", "zohorecruit.com", None)),
     ("https://digitalnest.zohorecruit.in/jobs/Careers", ("zoho_recruit", "digitalnest", "zohorecruit.in", None)),
+    ("https://ibqbjb.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/158159",
+     ("oracle_cloud", "ibqbjb", "ibqbjb.fa.ocs.oraclecloud.com", "CX_1")),
+    ("https://eofh.fa.em2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_3001/requisitions/preview/47609",
+     ("oracle_cloud", "eofh", "eofh.fa.em2.oraclecloud.com", "CX_3001")),
 ])
 def test_urls_map_to_platform_refs(url, expected):
     ref = platforms.parse_url(url)
@@ -208,6 +216,8 @@ def test_urls_map_to_platform_refs(url, expected):
     "https://jobs.lever.co/", "https://acme.homerun.co/", "https://bad_slug!.recruitee.com/", "not a url",
     "https://acme.keka.com/#/home", "https://www.keka.com/careers", "https://www.zohorecruit.com/jobs/Careers",
     "https://acme.zohorecruit.com.attacker.io/jobs/Careers",
+    "https://acme.oraclecloud.com.attacker.io/hcmUI/CandidateExperience/en/sites/CX_1/jobs",
+    "https://eeho.fa.us2.oraclecloud.com/hcmUI/faces/AtkHomePageWelcome",
 ])
 def test_unsupported_or_malformed_urls_are_refused(url):
     assert platforms.parse_url(url) is None
@@ -655,3 +665,54 @@ def test_zoho_location_has_no_repeats_and_site_name_beats_the_title():
     page = ('<title>Jobs at PeoplePlus</title><meta property="og:site_name" content="Kanerika Software">')
     assert impl._company(page) == "Kanerika Software"
     assert impl._company("<title>Jobs at Digital Nest</title>") == "Digital Nest"
+
+
+# ---------------------------------------------------------------- Oracle Cloud (QA7 decision 8)
+
+ORACLE = AtsRef("oracle_cloud", "ibqbjb", host="ibqbjb.fa.ocs.oraclecloud.com", site="CX_1")
+
+
+def test_oracle_cloud_jobs_link_to_the_site_and_full_text_comes_from_the_detail(http):
+    impl = platforms.get("oracle_cloud")
+    result = impl.list_jobs(ORACLE)
+    job = result.jobs[0]
+    assert job["country"] == "IN" and job["posted"].startswith("20") and job["description"]
+    assert job["url"] == f"https://ibqbjb.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/{job['external_id']}"
+    assert result.complete and impl.job_detail(ORACLE, job["external_id"])
+
+
+def test_oracle_cloud_big_site_reads_the_india_facet_first(http):
+    overrides, calls = http
+    page = load(ATS / "oracle_cloud.json")
+    page["items"][0]["TotalJobsCount"] = 5000
+    india = {"items": [{"TotalJobsCount": 1, "requisitionList": [
+        {"Id": "IN1", "Title": "SDE India", "PrimaryLocation": "Pune, India", "PrimaryLocationCountry": "IN",
+         "PostedDate": "2026-10-31"}]}]}
+    overrides["selectedLocationsFacet=300000000469485"] = FakeResponse(india)
+    overrides["recruitingCEJobRequisitions?"] = FakeResponse(page)
+    result = platforms.get("oracle_cloud").list_jobs(ORACLE, max_jobs=5, markets=("India",))
+    assert result.jobs[0]["title"] == "SDE India" and not result.complete and len(result.jobs) <= 5
+    assert any("facetsList=LOCATIONS" in c["url"] for c in calls)
+
+
+def test_oracle_cloud_search_sends_the_keyword(http):
+    _, calls = http
+    platforms.get("oracle_cloud").search(ORACLE, "data engineer", limit=3)
+    assert "keyword=data%20engineer" in calls[-1]["url"]
+
+
+def test_oracle_cloud_name_falls_back_to_the_legal_employer(http):
+    overrides, _ = http
+    overrides["/hcmUI/CandidateExperience/en/sites/CX_1/jobs"] = FakeResponse("", 302)
+    impl = platforms.get("oracle_cloud")
+    jobs = impl.list_jobs(ORACLE).jobs
+    for job in jobs:
+        job["_employer"] = "Honeywell International"
+    assert impl.board_name(ORACLE, jobs) == "Honeywell International"
+
+
+def test_old_company_ats_oracle_fetch_uses_the_new_adapter(http):
+    from app.services import company_ats_sources
+    jobs = company_ats_sources.fetch_custom(
+        "honeywell", "https://ibqbjb.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/jobs")
+    assert len(jobs) == 3 and jobs[0]["company"] == "honeywell" and "/sites/CX_1/job/" in jobs[0]["url"]

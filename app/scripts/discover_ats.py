@@ -34,6 +34,7 @@ CC_PATTERNS = [
     "*.recruitee.com", "*.myworkdayjobs.com", "jobs.smartrecruiters.com/*", "apply.workable.com/*",
     "*.teamtailor.com", "*.breezy.hr", "*.jobs.personio.de", "ats.rippling.com/*", "jobs.gem.com/*",
     "*.keka.com/careers*", "*.zohorecruit.com/jobs*", "*.zohorecruit.in/jobs*",
+    "*.oraclecloud.com/hcmUI/CandidateExperience/*",
 ]
 
 

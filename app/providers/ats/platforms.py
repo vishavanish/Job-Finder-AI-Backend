@@ -24,7 +24,7 @@ class here, a fixture in tests/fixtures/ats/ and seed rows.
 
 Live-checked 2026-10-19: Greenhouse (ETag/304), Lever, Recruitee, Workday
 (searchText), Ashby, SmartRecruiters (country=), Personio, Breezy,
-Teamtailor (RSS), Rippling, Gem; 2026-10-31: Keka, Zoho Recruit (India). Not built: BambooHR (careers JSON redirected for
+Teamtailor (RSS), Rippling, Gem; 2026-10-31: Keka, Zoho Recruit (India), Oracle Cloud. Not built: BambooHR (careers JSON redirected for
 every tenant tried) and Homerun (its public feed returns Homerun's own jobs
 for any company name; per-company feeds use unguessable URLs).
 """
@@ -538,6 +538,120 @@ class Workday(AtsPlatform):
         return _plain(((data or {}).get("jobPostingInfo") or {}).get("jobDescription", ""))
 
 
+# ---------------------------------------------------------------- Oracle Recruiting Cloud (Fusion HCM)
+
+class OracleCloud(AtsPlatform):
+    """{host}.oraclecloud.com Candidate Experience sites (Kotak, Tata Capital, Honeywell, Oracle…). The public
+    REST resource answers without a session. Big sites (thousands of jobs) are read target markets first
+    through the LOCATIONS facet, like Workday; `keyword=` searches titles. `host` = the oraclecloud host,
+    `site` = the site number (CX_1, CX_1001…). Live-checked 2026-10-31 on 9 Indian employers' sites."""
+    key, name, host_suffix, has_search, has_detail = "oracle_cloud", "Oracle Cloud", ".oraclecloud.com", True, True
+    _PAGE = 25
+    _SITE = re.compile(r"^CX_\d{1,6}$|^[A-Za-z0-9_]{2,40}$")
+
+    def parse_url(self, url):
+        host, parts = _parts(url)
+        if not host.endswith(self.host_suffix) or not _HOST.match(host):
+            return None
+        site = None
+        if "sites" in parts and parts.index("sites") + 1 < len(parts):        # /hcmUI/CandidateExperience/en/sites/CX_1/…
+            site = parts[parts.index("sites") + 1]
+        else:                                                                 # the REST API: …finder=findReqs;siteNumber=CX_1
+            m = re.search(r"siteNumber=([A-Za-z0-9_]+)", url)
+            site = m.group(1) if m else None
+        tenant = host.split(".")[0]
+        if not site or not self._SITE.match(site) or not valid_subdomain(tenant):
+            return None
+        return AtsRef(self.key, tenant, host=host, site=site)
+
+    def valid(self, ref):
+        return bool(ref.host and ref.host.endswith(self.host_suffix) and _HOST.match(ref.host)
+                    and ref.site and self._SITE.match(ref.site))
+
+    def careers_url(self, ref):
+        return f"https://{ref.host}/hcmUI/CandidateExperience/en/sites/{ref.site}/jobs"
+
+    def _api(self, ref) -> str:
+        return f"https://{ref.host}/hcmRestApi/resources/latest"
+
+    def _page(self, ref, offset: int, *, keyword: str = "", facet: str = "",
+              with_facets: bool = False) -> tuple[list[dict], int, list[dict]]:
+        finder = f"siteNumber={ref.site},limit={self._PAGE},offset={offset},sortBy=POSTING_DATES_DESC"
+        if keyword:
+            finder += f",keyword={quote(keyword)}"
+        if facet:
+            finder += f",selectedLocationsFacet={facet}"
+        if with_facets:
+            finder += ",facetsList=LOCATIONS"
+        data, _, _ = _get(ref, "GET", f"{self._api(ref)}/recruitingCEJobRequisitions?onlyData=true"
+                                      f"&expand=requisitionList.secondaryLocations,locationsFacet&finder=findReqs;{finder}")
+        block = ((data or {}).get("items") or [{}])[0]
+        jobs = []
+        for item in block.get("requisitionList") or []:
+            places = [item.get("PrimaryLocation") or ""] + [
+                loc.get("Name") or "" for loc in item.get("secondaryLocations") or [] if isinstance(loc, dict)]
+            workplace = str(item.get("WorkplaceType") or item.get("WorkplaceTypeCode") or "")
+            jobs.append(_job(external_id=item.get("Id"), title=item.get("Title"),
+                             location="; ".join(dict.fromkeys(p for p in places if p)),
+                             department=item.get("Department") or item.get("JobFamily"),
+                             url=f"https://{ref.host}/hcmUI/CandidateExperience/en/sites/{ref.site}/job/{item.get('Id')}",
+                             posted=item.get("PostedDate"), remote="remote" in workplace.lower(),
+                             country=item.get("PrimaryLocationCountry"),
+                             description=" ".join(filter(None, (item.get("ShortDescriptionStr"),
+                                                                item.get("ExternalResponsibilitiesStr"),
+                                                                item.get("ExternalQualificationsStr")))))
+                        | {"_employer": item.get("LegalEmployer") or ""})
+        return jobs, int(block.get("TotalJobsCount") or 0), block.get("locationsFacet") or []
+
+    def _collect(self, ref, budget: int, **kw) -> tuple[list[dict], int, list[dict]]:
+        out, offset, total, facets = [], 0, 0, []
+        while budget > 0:
+            page, t, f = self._page(ref, offset, with_facets=offset == 0, **kw)
+            total, facets = total or t, facets or f
+            out += page[:budget]
+            budget -= len(page)
+            offset += self._PAGE
+            if not page or offset >= total:
+                break
+        return out, total, facets
+
+    def list_jobs(self, ref, *, etag=None, max_jobs=400, markets=()):
+        jobs, total, facets = self._collect(ref, max_jobs)
+        if total > max_jobs and markets:
+            # Big site (Kotak: 12,000): the target markets' location facets first, then what fits of the rest.
+            wanted = {m.strip().lower() for m in markets}
+            market_jobs: list[dict] = []
+            for facet in facets:
+                if (facet.get("Name") or "").strip().lower() in wanted and len(market_jobs) < max_jobs:
+                    found, _, _ = self._collect(ref, max_jobs - len(market_jobs), facet=str(facet.get("Id")))
+                    market_jobs += found
+            seen = {j["external_id"] for j in market_jobs}
+            jobs = (market_jobs + [j for j in jobs if j["external_id"] not in seen])[:max_jobs]
+        return ListResult(jobs=jobs, complete=total <= max_jobs)
+
+    def search(self, ref, text, *, limit=100):
+        return self._collect(ref, limit, keyword=text)[0]
+
+    def job_detail(self, ref, external_id):
+        data, _, _ = _get(ref, "GET", f'{self._api(ref)}/recruitingCEJobRequisitionDetails?onlyData=true'
+                                      f'&expand=all&finder=ById;Id="{quote(str(external_id))}",siteNumber={ref.site}')
+        item = ((data or {}).get("items") or [{}])[0]
+        return _plain(" ".join(filter(None, (item.get("ExternalDescriptionStr"), item.get("ExternalResponsibilitiesStr"),
+                                             item.get("ExternalQualificationsStr")))))
+
+    def board_name(self, ref, jobs):
+        # The careers page title ("Honeywell"); some sites redirect it, then the jobs' legal employer.
+        try:
+            text, _, _ = _get(ref, "GET", self.careers_url(ref), as_text=True, accept="text/html")
+            name = page_title_name(text or "")
+        except SourceError:
+            name = None
+        if not name:
+            employers = [j.get("_employer") for j in jobs if j.get("_employer")]
+            name = clean_board_name(max(set(employers), key=employers.count)) if employers else None
+        return name
+
+
 def _workday_posted(text: str) -> str:
     t = (text or "").lower().replace("posted", "").strip()
     if t == "today":
@@ -910,7 +1024,7 @@ class ZohoRecruit(AtsPlatform):
 
 PLATFORMS: dict[str, AtsPlatform] = {p.key: p for p in (
     Greenhouse(), Lever(), Workday(), Recruitee(), Ashby(), SmartRecruiters(), Workable(), Personio(), Breezy(),
-    Teamtailor(), Rippling(), Gem(), Keka(), ZohoRecruit(),
+    Teamtailor(), Rippling(), Gem(), Keka(), ZohoRecruit(), OracleCloud(),
 )}
 
 

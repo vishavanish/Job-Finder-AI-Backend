@@ -1,6 +1,6 @@
 # QA7 — More job sources
 
-Status 2026-10-31: decision 7 (Keka + Zoho Recruit) approved and built (CLAUDE.md §6.21); decisions 1–6 waiting for the owner.
+Status 2026-10-31: decisions 7 (Keka + Zoho Recruit) and 8 (Oracle Cloud) approved and built (CLAUDE.md §6.21); decisions 1–6 waiting for the owner.
 
 Owner asked 2026-10-31: is Glassdoor used, and which similar sources are missing? Groups A–C below were
 live-tested from the owner's PC on 2026-10-31 (python-jobspy as installed, plain HTTPS clients).
@@ -61,6 +61,24 @@ Companies per platform in one Common Crawl index (CC-MAIN-2026-43): Keka 182, Zo
 (`company_ats` source), Target companies and the resolver. Seed: Common Crawl (several indexes, ~350+
 companies from one), then grown automatically from apply links in search results (`ats_registry.harvest`).
 Estimated volume: ~5k Keka + ~6k Zoho jobs, mostly India. _Recommended: yes — do this before decisions 1–4._
+
+## 2c. Oracle Recruiting Cloud and PeopleStrong (tested 2026-10-31, app's own User-Agent)
+
+A second scan of 800 Indian Indeed jobs: 78 apply links on `*.oraclecloud.com` (9 career sites), 11 on
+PeopleStrong, 3 on Taleo (Optum).
+
+| Platform | Result | Verdict |
+|---|---|---|
+| **Oracle Recruiting Cloud** (Fusion HCM) | `GET https://{host}/hcmRestApi/resources/latest/recruitingCEJobRequisitions?onlyData=true&expand=requisitionList.secondaryLocations&finder=findReqs;siteNumber={CX_n},limit=25,sortBy=POSTING_DATES_DESC` answers **without** a primed browser session on 9/9 sites: Kotak Securities 12,051 open jobs, Tata Capital 5,247, Oracle 2,754, EXL 2,312, CSB Bank 1,787, Honeywell 1,343, Emerson 1,118, Citco 513, Zensar 224 (~27k). `facetsList=LOCATIONS` gives an India facet id → `selectedLocationsFacet={id}` returns India only (Oracle 324, Honeywell 325, Kotak 11,986); `keyword=python` searches titles (Oracle 418, Honeywell 104). Jobs carry title, primary + secondary locations, posted date, description fields. Company name: careers page `<title>` ("Honeywell"; some sites redirect it). | ✅ add as platform 15 |
+| PeopleStrong | The candidate portal is an Angular app that loads Google **reCAPTCHA v3** and a Keycloak session before it asks for jobs; no public list. | ❌ skip — never work around a captcha |
+| Taleo | 3 links (one company) | ⏸ not worth it yet |
+
+**Decision 8 — Oracle Recruiting Cloud as ATS platform 15** (`oracle_cloud`; `host` = the `*.oraclecloud.com`
+host, `site` = `CX_n`, like Workday): India first through the location facet for big sites (the
+`ATS_INDEX_COUNTRIES` markets, capped like Workday at `ATS_WORKDAY_MAX_JOBS`), `search()` with `keyword=` for
+the live top-up, `job_detail` from the requisition details resource, harvest from apply links
+(`/hcmUI/CandidateExperience/{lang}/sites/{CX_n}/job/{id}` and `/requisitions/preview/{id}`). The old one-off
+`company_ats_sources.fetch_oracle_fusion` (hard-coded `CX_1001`, session priming) can then go. _Recommended: yes._
 
 ## 3. Build notes (if approved)
 - `providers/job_sources/feeds.py`: `working_nomads` feed; registry row `SourceSpec("working_nomads",
