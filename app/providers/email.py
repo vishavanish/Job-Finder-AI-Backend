@@ -7,6 +7,9 @@ EMAIL_BACKEND picks the implementation:
   - "console": logs the message. Development only — get_email_sender()
     refuses it in production so OTP codes never land in prod logs.
   - "smtp": any SMTP relay (Resend, Amazon SES, Gmail, Mailgun...).
+
+`html` (optional) is sent as the text/html alternative of the same message; `body` is always the
+text/plain part, so clients without HTML still get the full email.
 """
 from __future__ import annotations
 
@@ -25,22 +28,25 @@ class EmailNotConfigured(RuntimeError):
 
 
 class EmailSender(Protocol):
-    def send(self, *, to: str, subject: str, body: str) -> None: ...
+    def send(self, *, to: str, subject: str, body: str, html: str | None = None) -> None: ...
 
 
 class ConsoleEmailSender:
-    def send(self, *, to: str, subject: str, body: str) -> None:
-        logger.info("[console email] to=%s subject=%r\n%s", to, subject, body)
+    def send(self, *, to: str, subject: str, body: str, html: str | None = None) -> None:
+        logger.info("[console email] to=%s subject=%r%s\n%s", to, subject,
+                    f" (+ {len(html)} chars of HTML)" if html else "", body)
 
 
 class SmtpEmailSender:
-    def send(self, *, to: str, subject: str, body: str) -> None:
+    def send(self, *, to: str, subject: str, body: str, html: str | None = None) -> None:
         settings = get_settings()
         msg = EmailMessage()
         msg["From"] = settings.SMTP_FROM
         msg["To"] = to
         msg["Subject"] = subject
         msg.set_content(body)
+        if html:
+            msg.add_alternative(html, subtype="html")
         with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=15) as smtp:
             if settings.SMTP_STARTTLS:
                 smtp.starttls()

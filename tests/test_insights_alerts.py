@@ -390,7 +390,7 @@ def test_alert_run_emails_new_matches_once(client, make_user, monkeypatch):
     sent = []
 
     class Mailer:
-        def send(self, *, to, subject, body):
+        def send(self, *, to, subject, body, html=None):
             sent.append((to, subject, body))
 
     monkeypatch.setattr("app.providers.email.get_email_sender", lambda: Mailer())
@@ -446,7 +446,7 @@ def _alert_run_setup(client, headers, monkeypatch, scorer_fn) -> tuple[str, list
     sent = []
 
     class Mailer:
-        def send(self, *, to, subject, body):
+        def send(self, *, to, subject, body, html=None):
             sent.append((to, subject, body))
 
     monkeypatch.setattr("app.providers.email.get_email_sender", lambda: Mailer())

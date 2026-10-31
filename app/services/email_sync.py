@@ -49,7 +49,8 @@ ATS_SENDERS = (
     "greenhouse.io", "lever.co", "smartrecruiters.com", "myworkdayjobs.com", "workday.com", "successfactors.com",
     "icims.com", "taleo.net", "ashbyhq.com", "recruitee.com", "workable.com", "breezy.hr", "personio",
 )
-BOARD_SENDERS = ("linkedin.com", "indeed.com", "naukri.com", "foundit.in", "instahyre.com")
+BOARD_SENDERS = ("linkedin.com", "indeed.com", "naukri.com", "foundit.in", "instahyre.com", "glassdoor.com",
+                 "glassdoor.co.in", "ziprecruiter.com")
 ATS_DOMAINS = ATS_SENDERS + BOARD_SENDERS
 CATEGORY_STATUS = {"acknowledgement": "acknowledged", "assessment": "assessment", "interview_invite": "interview",
                    "offer": "offer", "rejection": "rejected"}

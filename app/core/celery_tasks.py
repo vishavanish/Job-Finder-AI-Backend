@@ -976,7 +976,7 @@ def run_job_alert(self, alert_id: str, trigger: str = "schedule") -> dict:
     from app.models.schemas import PipelineRequest
     from app.models.user import User
     from app.providers.email import get_email_sender
-    from app.services import job_alerts
+    from app.services import email_templates, job_alerts
     from app.services.task_params import build_pipeline_params
     from fastapi import HTTPException
 
@@ -1042,9 +1042,10 @@ def run_job_alert(self, alert_id: str, trigger: str = "schedule") -> dict:
 
         if jobs and alert.email_digest:
             subject, body = job_alerts.digest_text(alert, jobs)
+            html = email_templates.job_alert_digest(alert.name, alert.min_score, jobs)
             to = job_alerts.sends_to(alert, job_alerts.email_options(db, user))
             try:
-                get_email_sender().send(to=to, subject=subject, body=body)
+                get_email_sender().send(to=to, subject=subject, body=body, html=html)
                 run.emailed_at = job_alerts.utcnow()
             except Exception as e:  # noqa: BLE001 — the run's results stay in the app
                 logger.warning("alert %s: digest email failed: %s", alert.id, type(e).__name__)

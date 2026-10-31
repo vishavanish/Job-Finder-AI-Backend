@@ -30,6 +30,19 @@ NAUKRI_ALERT = """<table>
 <tr><td>Kite Analytics</td></tr><tr><td>Mumbai</td></tr></table>"""
 
 
+GLASSDOOR_ALERT = """<table>
+<tr><td><a href="https://www.glassdoor.co.in/job-listing/backend-engineer-acme-JV_IC2940587_KO0,16.htm?jl=1009512345678&amp;utm_source=jobsAlert">Backend Engineer</a></td></tr>
+<tr><td>Acme Corp</td></tr><tr><td>Bengaluru</td></tr>
+<tr><td><a href="https://www.glassdoor.co.in/partner/jobListing.htm?pos=102&amp;jobListingId=1009876543210">Platform Engineer</a></td></tr>
+<tr><td>Kite Analytics</td></tr><tr><td>Hyderabad</td></tr></table>"""
+ZIP_ALERT = """<table>
+<tr><td><a href="https://www.ziprecruiter.com/c/Acme-Corp/Job/Python-Developer/-in-Austin,TX?jid=a1b2c3d4&amp;lvk=x">Python Developer</a></td></tr>
+<tr><td>Acme Corp</td></tr><tr><td>Austin, TX</td></tr>
+<tr><td><a href="https://www.ziprecruiter.com/k/l/AAKjhsdkjhasdkjh">Opaque Tracking Job</a></td></tr>
+<tr><td><a href="https://www.ziprecruiter.com/jobs/kite-123/data-engineer-77?jid=zz9">Data Engineer</a></td></tr>
+<tr><td>Kite Analytics</td></tr></table>"""
+
+
 def _ts(days_ago: float = 0) -> str:
     return str(int((datetime.now(timezone.utc) - timedelta(days=days_ago)).timestamp() * 1000))
 
@@ -417,6 +430,28 @@ def test_naukri_alert_emails_become_jobs_for_searches(make_user, ai):
     found = job_sources.scrape_all(["Python Developer"], ["Pune"], ["email_alerts"], inbox_jobs=inbox,
                                    max_age_hours=72)
     assert [j["title"] for j in found] == ["Python Developer"] and found[0]["source"] == "Naukri"
+
+
+def test_glassdoor_and_ziprecruiter_alert_emails_become_jobs(make_user, ai):
+    user_id, _ = make_user()
+    account = _account(user_id)
+    fake = FakeGmail()
+    fake.add("g1", sender="Glassdoor Jobs <noreply@glassdoor.co.in>", subject="Backend Engineer jobs for you",
+             html=GLASSDOOR_ALERT)
+    fake.add("z1", sender="ZipRecruiter <alerts@ziprecruiter.com>", subject="New jobs for Python Developer",
+             html=ZIP_ALERT)
+    out = _sync(account, fake)
+    assert out["job_alerts"] == 2 and ai.calls == []
+    db = SessionLocal()
+    try:
+        jobs = {j.title: j for j in db.query(EmailJob).filter_by(user_id=user_id).all()}
+    finally:
+        db.close()
+    assert set(jobs) == {"Backend Engineer", "Platform Engineer", "Python Developer", "Data Engineer"}
+    assert jobs["Backend Engineer"].source == "Glassdoor" and jobs["Backend Engineer"].company == "Acme Corp"
+    assert jobs["Backend Engineer"].url == "https://www.glassdoor.co.in/partner/jobListing.htm?jobListingId=1009512345678"
+    assert jobs["Python Developer"].source == "ZipRecruiter" and jobs["Python Developer"].url.endswith("?jid=a1b2c3d4")
+    assert "Opaque Tracking Job" not in jobs  # a tracking link with no job id in it can't be read
 
 
 # ---------------------------------------------------------------- disconnect, retention, stats

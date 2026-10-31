@@ -3,7 +3,8 @@ app/services/job_alert_emails.py
 -----------------------------------
 Jobs from job-alert emails in the user's own inbox (P5 plan §2.6) — the free
 and safe Naukri path (research §6), plus LinkedIn / Indeed / Foundit /
-Instahyre alerts. No AI: a job is a link to a known job page; its text is
+Instahyre alerts, and (QA7, 2026-10-31) Glassdoor and ZipRecruiter alerts —
+the allowed route to boards that block server-side scraping. No AI: a job is a link to a known job page; its text is
 the title, and the next short lines in the same block are the company and
 (when it looks like one) the location. Blocks that can't be read are
 skipped, never guessed.
@@ -20,7 +21,10 @@ from urllib.parse import unquote
 # Senders that send job alerts (a message from them is an alert only if it also links to job pages).
 ALERT_SENDERS = re.compile(
     r"@(?:[\w-]+\.)*(naukri\.com|linkedin\.com|indeed\.com|indeedemail\.com|foundit\.in|monsterindia\.com|"
-    r"instahyre\.com)\b", re.I)
+    r"instahyre\.com|glassdoor\.com|glassdoor\.co\.in|ziprecruiter\.com)\b", re.I)
+
+_GLASSDOOR_HOST = r"(glassdoor\.(?:com|co\.in|co\.uk|ca|com\.au|de|fr))"
+_ZIP_PATH = r"https?://(?:www\.)?ziprecruiter\.(?:com|co\.uk|in)(/(?:c|jobs|job)/[^\s\"'<>?#]+)"
 
 _JOB_LINKS: list[tuple[str, re.Pattern, callable]] = [
     ("Naukri", re.compile(r"https?://(?:www\.)?naukri\.com/job-listings-[\w%-]+", re.I), lambda m: m.group(0)),
@@ -30,6 +34,13 @@ _JOB_LINKS: list[tuple[str, re.Pattern, callable]] = [
      lambda m: f"https://in.indeed.com/viewjob?jk={m.group(1)}"),
     ("Foundit", re.compile(r"https?://(?:www\.)?foundit\.in/job/[\w%-]+", re.I), lambda m: m.group(0)),
     ("Instahyre", re.compile(r"https?://(?:www\.)?instahyre\.com/job-[\w%-]+", re.I), lambda m: m.group(0)),
+    # glassdoor.*/job-listing/…htm?jl=ID and glassdoor.*/partner/jobListing.htm?…jobListingId=ID -> one form.
+    ("Glassdoor", re.compile(r"https?://(?:www\.)?" + _GLASSDOOR_HOST + r"/(?:job-listing/[^\s\"'<>?#]+\?[^\s\"'<>#]*?"
+                             r"\bjl=(\d+)|partner/jobListing\.htm\?[^\s\"'<>#]*?\bjobListingId=(\d+))", re.I),
+     lambda m: f"https://www.{m.group(1).lower()}/partner/jobListing.htm?jobListingId={m.group(2) or m.group(3)}"),
+    # ziprecruiter.com/c/<Company>/Job/<Title>/-in-<City>?jid=… or /jobs/<slug>: path (+ jid) without tracking.
+    ("ZipRecruiter", re.compile(_ZIP_PATH + r"(?:\?[^\s\"'<>#]*?\bjid=([\w-]+))?", re.I),
+     lambda m: f"https://www.ziprecruiter.com{m.group(1)}" + (f"?jid={m.group(2)}" if m.group(2) else "")),
 ]
 _GENERIC = re.compile(r"^(apply|apply now|view( job| details)?|see (job|more)|know more|easy apply|save|share|"
                       r"\d+ (new )?jobs?.*|view all.*|unsubscribe.*|.{0,2})$", re.I)
