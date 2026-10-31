@@ -119,6 +119,12 @@ def availability(db: Session, user: User, row: ProviderCatalog, *, choices: dict
         if not db.query(EmailAccount.id).filter(EmailAccount.user_id == user.id,
                                                 EmailAccount.status == "active").first():
             return False, "connect Gmail to read your job-alert emails"
+    if registry.kind(row.key) == "capture":
+        from app.services import entitlements, extension
+        if not entitlements.effective(db, user.id, "browser_capture").enabled:
+            return False, "your account does not include saving jobs from your browser"
+        if not extension.has_connection(db, user.id):
+            return False, "connect the browser extension in Settings"
     if registry.kind(row.key) == "index":
         from app.services import entitlements
         if not entitlements.effective(db, user.id, "ats_discovery").enabled:

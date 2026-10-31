@@ -1,4 +1,6 @@
-# P8a — Browser extension "Job Finder capture" (plan, waiting for owner approval)
+# P8a — Browser extension "Job Finder capture"
+
+Status 2026-10-31: owner said go ahead; **E1 built** with the recommended defaults (CLAUDE.md §6.21). E2 (Darwinbox, PeopleStrong, Instahyre, Cutshort, Wellfound, Hirist, ZipRecruiter) and E3 (apply assist) not started. Differences from the plan: the extension is plain JavaScript (no build step) so it can be loaded unpacked straight from the repo; captured jobs live in their own table and reach searches through the `browser_capture` source instead of being upserted into `jobs` at once.
 
 Owner asked 2026-10-31 for a free way to get jobs from Naukri, Foundit, Glassdoor, ZipRecruiter, Darwinbox
 and PeopleStrong. From the server those sites answer with captchas, 403s or a browser-only page, and

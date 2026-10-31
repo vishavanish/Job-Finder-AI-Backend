@@ -100,6 +100,14 @@ def _inbox_jobs(db, user_id: str | None, sources: list[str], search_params: dict
     return email_sync.recent_alert_jobs(db, user_id, search_params.get("max_age_hours", 24))
 
 
+def _captured_jobs(db, user_id: str | None, sources: list[str], search_params: dict) -> list[dict]:
+    """Jobs the user saved with the browser extension (P8a), only when that source runs."""
+    if not user_id or "browser_capture" not in sources:
+        return []
+    from app.services import extension
+    return extension.recent_captured_jobs(db, user_id, search_params.get("max_age_hours", 24))
+
+
 def _index_lookup(db, sources: list[str], search_params: dict, locations: list[str]):
     """The ATS index search for the `company_ats` source (P6), or None when that source doesn't run."""
     if "company_ats" not in sources:
@@ -232,6 +240,7 @@ def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str
         enable_naukri_auto=search_params.get("enable_naukri_auto", False),
         manual_naukri_jobs=manual_naukri_jobs,
         inbox_jobs=_inbox_jobs(db, user_id, sources, search_params),
+        captured_jobs=_captured_jobs(db, user_id, sources, search_params),
         index_jobs=_index_lookup(db, sources, search_params, locations),
         enable_naukri_apify=naukri_apify,
         apify_naukri_actor_id=search_params.get("apify_naukri_actor_id", ""),

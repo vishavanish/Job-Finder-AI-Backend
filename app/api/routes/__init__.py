@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.routes import (
-    admin, admin_ai, alerts, answer_bank, applications, apply, ats, auth, gmail, company_ats, jobs, models, pipeline, profile, providers, score, search,
+    admin, admin_ai, alerts, answer_bank, applications, apply, ats, auth, gmail, company_ats, extension, jobs, models, pipeline, profile, providers, score, search,
     story_bank, target_companies, tasks, voice,
 )
 
@@ -29,3 +29,4 @@ api_router.include_router(target_companies.router)
 api_router.include_router(voice.router)
 api_router.include_router(voice.admin_router)
 api_router.include_router(story_bank.router)
+api_router.include_router(extension.router)

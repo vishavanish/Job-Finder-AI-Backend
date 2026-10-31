@@ -15,6 +15,7 @@ Kinds:
   manual   jobs the user pasted in (Naukri)
   apify    paid Apify actor (naukri_apify; driven by enable_naukri_apify)
   inbox    jobs parsed from the user's own job-alert emails (P5; needs Gmail connected)
+  capture  jobs the user saved with the browser extension (P8a; needs it connected)
   index    our ATS Discovery index of company career pages (P6; needs ats_discovery)
 
 `user_key_only`: never run on a shared platform/.env key in production —
@@ -63,6 +64,7 @@ SOURCES: dict[str, SourceSpec] = {s.key: s for s in [
     SourceSpec("hn_hiring", "HN Who is hiring", "feed"),
     SourceSpec("naukri", "Naukri", "manual"),
     SourceSpec("email_alerts", "Job alert emails", "inbox"),
+    SourceSpec("browser_capture", "Saved from your browser", "capture"),
     SourceSpec("company_ats", "Company career pages", "index"),
     SourceSpec("naukri_apify", "Naukri", "apify", key_scopes=("apify",)),
 ]}

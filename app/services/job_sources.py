@@ -329,6 +329,7 @@ def scrape_all(
     enable_naukri_auto: bool = False,
     manual_naukri_jobs: list[dict] | None = None,
     inbox_jobs: list[dict] | None = None,
+    captured_jobs: list[dict] | None = None,
     index_jobs: Callable[[str], list[dict]] | None = None,
     enable_naukri_apify: bool = False,
     apify_naukri_actor_id: str = "",
@@ -422,6 +423,15 @@ def scrape_all(
         progress(f"Job alert emails: {len(picked)} matching jobs (of {len(inbox_jobs)} from your inbox)")
         all_jobs.extend(picked[: results_per_keyword * max(1, len(keywords))])
         outcomes.success("email_alerts")
+
+    if "browser_capture" in sources and captured_jobs:
+        # P8a: jobs the user saved from pages they opened (Naukri, Foundit, Glassdoor...) with the extension.
+        # Same rules as the alert emails: matched per keyword, real source kept.
+        from app.providers.job_sources.base import matches_keyword
+        picked = [j for j in captured_jobs if any(matches_keyword(j, kw) for kw in keywords)]
+        progress(f"Saved from your browser: {len(picked)} matching jobs (of {len(captured_jobs)} saved)")
+        all_jobs.extend(picked[: results_per_keyword * max(1, len(keywords))])
+        outcomes.success("browser_capture")
 
     if "company_ats" in sources and index_jobs:
         # P6: our index of company career pages, matched per keyword in the DB (the caller's lookup).
