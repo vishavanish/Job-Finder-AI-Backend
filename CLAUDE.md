@@ -596,6 +596,9 @@ Owner asked 2026-10-31 for the fastest copilot; plan approved in chat (steps 1�
 | Fast model first | ✅ hard questions (coding, system design, long) start on `copilot_answer` with 500 max tokens; `copilot_expand` only for Expand and screenshots. |
 | End of speech | ✅ copilot per-utterance STT ends an interviewer utterance after `VOICE_COPILOT_END_SILENCE_MS` (450; Practice keeps `VOICE_END_OF_TURN_MS`). |
 | Timing | ✅ `answer.done.latency` adds `end_wait_ms`, `stt_ms`, `total_ms` (end of speech → first words) for per-utterance STT; the card shows "1.2 s · wait 0.45 · speech→text 0.40 · AI 0.35 · model". |
+| Hearing (2026-10-31) | ✅ the interviewer channel's per-utterance STT gets a Whisper `prompt` (`copilot_session.stt_hint`: typical interview phrasing + role + headline, ≤ 800 chars) — "Write a program to…" was heard as "Right there we have to…". The user's own channel gets none. |
+| Coding said as a statement | ✅ `question_gate._CODING_TASK`: a task verb at the start or after "have to / need to / let's / please / now / can you…" ("we have to find the duplicate element in the list") counts as a question when the type is coding; more coding words (duplicate, palindrome, fibonacci, "in the list"…); "sort out" excluded. Eval cases added. |
+| Technical answers | ✅ `TECH_TYPES` (coding, technical, system_design) answer from general knowledge (resume only when it shows the experience) and never start with "Not in your profile"; weak retrieval doesn't mark them `not_sure`. Coding: approach line, code block (named language → resume's → Python), complexity line — in the first answer (≥ 160 words, 600 max tokens); Expand adds steps, comments and edge cases. System design: requirements / components / data flow / scaling / trade-offs. |
 | Not done | Real-audio measurement (`voice_bench` with real keys); Deepgram streaming (speculative start) needs a `deepgram` key. |
 
 **Operational changes introduced in QA6**

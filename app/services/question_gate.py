@@ -74,7 +74,10 @@ TYPES = (  # first match wins
     ("coding", ("write a function", "write code", "write a program", "algorithm", "time complexity",
                 "space complexity", "big o", "linked list", "binary tree", "array", "string reversal",
                 "reverse a", "leetcode", "data structure", "implement a", "implement the", "recursion",
-                "dynamic programming", "sort ", "sorting", "hash map", "hashmap")),
+                "dynamic programming", "sort ", "sorting", "hash map", "hashmap", "duplicate", "palindrome",
+                "fibonacci", "factorial", "anagram", "prime number", "substring", "subarray", "missing number",
+                "second largest", "largest element", "smallest element", "in the list", "in a list",
+                "of the list", "of a list", "in the array", "elements", "reverse the")),
     ("system_design", ("design a", "design an", "design the", "architecture", "architect", "scale to",
                        "scalab", "million users", "distributed", "high availability", "load balanc",
                        "rate limiter", "url shortener", "shard", "throughput", "latency budget")),
@@ -90,6 +93,12 @@ TYPES = (  # first match wins
     ("situational", ("what would you do if", "how would you handle", "imagine", "suppose", "let's say",
                      "lets say", "what if", "in a situation where")),
 )
+# A coding task said as a statement ("we have to find the duplicate element in the list", "now reverse the
+# string"): no question mark or wh-word, but clearly a question to answer.
+_CODING_TASK = re.compile(r"^(?:find|write|print|count|remove|reverse|sort(?! out)|check|return|merge|implement|convert|"
+                          r"solve|code)\b|\b(?:have to|has to|need to|needs to|want you to|like you to|let's|lets|"
+                          r"please|now|can you|could you)\s+(?:find|write|print|count|remove|reverse|sort(?! out)|check|"
+                          r"return|merge|implement|convert|solve|code|program)\b")
 TECH_HINTS = ("python", "java", "javascript", "react", "sql", "database", "api", "rest", "http", "docker",
               "kubernetes", "aws", "cloud", "cache", "thread", "async", "memory", "index", "query", "framework",
               "microservice", "test", "git", "linux", "network", "security", "oauth", "jwt", "kafka", "redis",
@@ -146,7 +155,8 @@ def classify(text: str, *, since_last_card_s: float | None = None) -> GateResult
     is_followup = recent and len(words) <= 12 and (_starts(t, FOLLOWUP) or t.rstrip("?") in FOLLOWUP)
     cue = (asks > 0 or _starts(t, WH) or _starts(t, AUX) or any(t.startswith(p) or f" {p}" in f" {t}"
                                                                 for p in IMPERATIVE)
-           or any(w.strip("?,.") in HINGLISH for w in words))
+           or any(w.strip("?,.") in HINGLISH for w in words)
+           or (_CODING_TASK.search(t) is not None and _qtype(t) == "coding"))
     if not cue and not is_followup:
         addressed = len(words) >= 6 and any(w in ("you", "your", "you've", "you're", "yourself") for w in words)
         return GateResult("unsure" if addressed else "no", raw)

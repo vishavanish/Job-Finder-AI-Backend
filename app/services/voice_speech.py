@@ -130,8 +130,10 @@ class SpeechRouter:
                 "tts": {**self.tts[0].public(), "kind": self.tts_kind} if self.tts else
                 {"name": "Browser voice", "provider": "browser", "kind": "browser", "tier": "free"}}
 
-    async def transcribe(self, pcm: bytes, *, language: str | None = None) -> tuple[Transcript, float]:
-        """(transcript, cost). Raises SpeechError when every model failed."""
+    async def transcribe(self, pcm: bytes, *, language: str | None = None,
+                         prompt: str | None = None) -> tuple[Transcript, float]:
+        """(transcript, cost). `prompt` hints the vocabulary to expect. Raises SpeechError when every model
+        failed."""
         errors: list[str] = []
         while True:
             utterance_models = [c for c in self.stt if not c.streaming]
@@ -141,7 +143,8 @@ class SpeechRouter:
             started = time.monotonic()
             seconds = max(1, round(duration_ms(pcm) / 1000))
             try:
-                result = await make_stt(choice).transcribe(pcm, language=language)
+                extra = {"prompt": prompt} if prompt else {}
+                result = await make_stt(choice).transcribe(pcm, language=language, **extra)
             except SpeechError as e:
                 latency = int((time.monotonic() - started) * 1000)
                 await asyncio.to_thread(_ledger, self.user_id, "stt", choice, units=seconds, latency_ms=latency,

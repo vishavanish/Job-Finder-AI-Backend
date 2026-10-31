@@ -119,8 +119,10 @@ class FakeStream:
 class FakeSTT:
     def __init__(self, texts):
         self.texts = list(texts)
+        self.prompts: list[str | None] = []
 
-    async def transcribe(self, pcm, *, language=None):
+    async def transcribe(self, pcm, *, language=None, prompt=None):
+        self.prompts.append(prompt)
         return Transcript(text=self.texts.pop(0) if self.texts else "")
 
 
@@ -154,6 +156,7 @@ def speech(monkeypatch):
     class Handle:
         def texts(self, texts):
             state["stt"].texts = list(texts)
+            return state["stt"]
 
         def stream(self, script):
             state["stream"] = FakeStream(script)
@@ -461,6 +464,7 @@ def test_hard_questions_start_on_the_fast_model_and_cards_show_the_timing(client
         done, _ = recv_until(ws, "answer.done")
         stop(ws)
     assert fake.calls[0]["task"] == "copilot_answer"
+    assert "requirements, main components" in fake.calls[0]["system"]
     lat = done["latency"]
     assert lat["end_wait_ms"] == 450 and lat["stt_ms"] >= 0
     assert lat["total_ms"] >= lat["end_wait_ms"] + lat["stt_ms"]
@@ -630,3 +634,23 @@ def test_deepgram_stream_sends_audio_and_reads_results():
     assert t.text == "Hello there." and t.utterance_end
     assert seconds == pytest.approx(0.1) and seen["headers"]["Authorization"] == "Token secret"
     assert any(isinstance(m, str) and "CloseStream" in m for m in seen["ws"].sent)
+
+
+def test_coding_tasks_said_as_statements_get_code_and_whisper_gets_an_interview_hint(client, make_user, speech,
+                                                                                    llm):
+    _, headers = ready_user(client, make_user)
+    fake = llm([(["Use a set.\n```python\nseen = set()\n```\nO(n) time, O(n) space."], False)])
+    stt = speech.texts(["Right there we have to find duplicate element in the list."])
+    created = open_copilot(client, headers)
+    with client.websocket_connect(created["stream_path"]) as ws:
+        auth(ws, created)
+        speak(ws, 0)
+        detected, _ = recv_until(ws, "question.detected")
+        done, _ = recv_until(ws, "answer.done")
+        stop(ws)
+    assert detected["qtype"] == "coding"
+    system = fake.calls[0]["system"]
+    assert "code block" in system and "technical question" in system and "start with" not in system
+    assert done["not_sure"] is False  # no resume match needed for code
+    assert stt.prompts and "Write a program" in stt.prompts[0]
+

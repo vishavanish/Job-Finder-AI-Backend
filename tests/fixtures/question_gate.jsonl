@@ -125,3 +125,10 @@
 {"text": "That's fine.", "question": false}
 {"text": "Okay, I'll note that down.", "question": false}
 {"text": "Why?", "question": false, "note": "a lone why with no card to follow"}
+{"text": "Right there we have to find duplicate element in the list.", "question": true, "type": "coding"}
+{"text": "Now reverse the string.", "question": true, "type": "coding"}
+{"text": "We need to find the second largest element in the array.", "question": true, "type": "coding"}
+{"text": "Please check if a string is a palindrome.", "question": true, "type": "coding"}
+{"text": "We have to sort out the schedule first.", "question": false}
+{"text": "I find your background interesting.", "question": false}
+{"text": "We need to check the agenda for tomorrow.", "question": false}
