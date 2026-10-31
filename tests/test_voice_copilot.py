@@ -22,7 +22,7 @@ from app.core.db import SessionLocal
 from app.models.admin import AuditLog
 from app.models.voice import VoiceSession, VoiceTurn
 from app.providers.voice import deepgram
-from app.providers.voice.base import Transcript
+from app.providers.voice.base import SpeechError, Transcript
 from app.providers.voice.vad import Segmenter
 from app.services import ai_router, copilot_session, entitlements, feature_flags, voice_eval, voice_speech, voice_store
 from app.services.question_gate import classify
@@ -420,6 +420,53 @@ def test_speculative_start_restarts_when_the_speaker_keeps_talking(client, make_
     try:
         questions = [t for t in voice_store.turns(db, sid) if t.kind == "question"]
         assert len(questions) == 1 and "expected CTC" in voice_store.unseal(questions[0].text_sealed)
+    finally:
+        db.close()
+
+
+def test_deepgram_dropping_mid_session_switches_to_groq_whisper(client, make_user, speech, llm):
+    _, headers = ready_user(client, make_user)
+    llm([(["- I led the rewrite."], False)])
+    stream = speech.stream([[]])
+
+    async def dropped(pcm):  # the stream already reconnected once and dropped again
+        raise SpeechError("Deepgram stream dropped twice", retryable=True)
+
+    stream.send = dropped
+    speech.texts(["Tell me about a time you led a project."])  # the per-utterance model (Groq Whisper)
+    created = open_copilot(client, headers)
+    with client.websocket_connect(created["stream_path"]) as ws:
+        assert auth(ws, created)["streaming"] is True
+        ws.send_bytes(frame(0, 100, 0))
+        switched, _ = recv_until(ws, "status")
+        assert "switched to the standard one" in switched.get("message", "")
+        speak(ws, 0, 100)
+        detected, _ = recv_until(ws, "question.detected")
+        assert detected["text"] == "Tell me about a time you led a project."
+        recv_until(ws, "answer.done")
+        stop(ws)
+
+
+def test_deepgram_is_used_only_for_speech_to_text():
+    from app.models.ai import AiModel
+    from app.services import ai_router
+    db = SessionLocal()
+    try:
+        row = db.query(AiModel).filter(AiModel.provider == "deepgram").one()
+    finally:
+        db.close()
+    assert row.tasks == ["stt"]
+    assert [t for t in ai_router.TASKS if ai_router.serves(row, t)] == ["stt"]  # never answers, TTS or scoring
+
+
+def test_deepgram_key_can_come_from_env(monkeypatch):
+    from app.core.config import get_settings
+    from app.services import key_store
+    assert key_store.ENV_FALLBACK["deepgram"] == "DEEPGRAM_API_KEY"
+    monkeypatch.setattr(get_settings(), "DEEPGRAM_API_KEY", "dg-test-key-123456")
+    db = SessionLocal()
+    try:
+        assert key_store.platform_key_available(db, "deepgram") is True
     finally:
         db.close()
 

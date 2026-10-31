@@ -424,10 +424,15 @@ class CopilotSession(VoiceSocket):
             return ch
 
     async def _fallback(self, channel: int) -> None:
+        """Deepgram dropped twice in a session: Groq Whisper (per utterance) takes over from the next frame."""
         ch = self.channels.pop(channel, None)
         if isinstance(ch, StreamingChannel):
             self.speech.drop(ch.choice)
             await ch.close()
+            logger.warning("copilot: streaming STT dropped session=%s; switching to per-utterance STT",
+                           self.session_id)
+            await self.status("paused" if self.paused else "listening", **self._status_extra(),
+                              message="Fast speech recognition stopped; switched to the standard one.")
 
     async def _on_text(self, raw: str) -> None:
         try:

@@ -46,6 +46,7 @@ ENV_FALLBACK = {
     "jsearch": "JSEARCH_API_KEY",
     "themuse": "THEMUSE_API_KEY",
     "findwork": "FINDWORK_API_KEY",
+    "deepgram": "DEEPGRAM_API_KEY",
 }
 
 MIN_KEY_LENGTH = 8

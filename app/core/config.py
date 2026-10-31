@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     SERPAPI_API_KEY: str = ""
     JSEARCH_API_KEY: str = ""
     FINDWORK_API_KEY: str = ""
+    DEEPGRAM_API_KEY: str = ""  # Live Copilot streaming STT; Groq Whisper takes over when it fails
     THEMUSE_API_KEY: str = ""     # platform key for The Muse feed (shared cache)
 
     # ---- job sources (CLAUDE.md 7.4) ----
