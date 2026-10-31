@@ -219,10 +219,10 @@ def _run_keyword_api(key: str, query: SourceQuery, *, user_id: str | None, key_l
                      progress: Callable[[str], None]) -> list[dict]:
     """Runs a keyed API. A source with several key scopes (Google Jobs)
     tries them in order and stops at the first that returns jobs."""
-    from app.services.provider_catalog import user_key_only
+    from app.services.provider_catalog import shared_keys_allowed, user_key_only
 
     spec = registry.get(key)
-    own_key_only = user_key_only(key)
+    own_key_only = user_key_only(key) and not shared_keys_allowed(user_id)
     tried, last_error = [], None
     for scope in spec.key_scopes:
         resolved = key_lookup(scope) if key_lookup else None

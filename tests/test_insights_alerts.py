@@ -273,6 +273,30 @@ def test_google_jobs_never_uses_a_shared_key_in_production(monkeypatch, client, 
     assert view["hn_hiring"]["default_enabled"] is True
 
 
+def test_admin_can_let_one_user_use_the_shared_google_jobs_keys(monkeypatch, client, make_user, make_admin, http):
+    routes, calls = http
+    routes["serpapi.com"] = SERPAPI
+    monkeypatch.setattr(get_settings(), "ENVIRONMENT", "production")
+    allowed_id, allowed_headers = make_user()
+    other_id, other_headers = make_user()
+    _, admin_headers = make_admin()
+    shared = lambda scope, platform_only=False: ResolvedKey("shared-serp", "platform") if scope == "serpapi" else None  # noqa: E731
+
+    def run(user_id):
+        return job_sources.scrape_all(["Python Developer"], ["Bengaluru"], ["google_jobs_api"], max_age_hours=24 * 7,
+                                      user_id=user_id, key_lookup=shared)
+
+    assert run(allowed_id) == []  # off by default
+    r = client.put(f"{API}/admin/users/{allowed_id}/entitlements/shared_search_keys", headers=admin_headers,
+                   json={"enabled": True})
+    assert r.status_code == 200, r.text
+    assert [j["title"] for j in run(allowed_id)] == ["Python Developer"]
+    assert calls[-1]["params"]["api_key"] == "shared-serp"
+    assert run(other_id) == []  # everyone else still needs their own key
+    me = client.get(f"{API}/auth/me", headers=allowed_headers).json()
+    assert me["entitlements"]["shared_search_keys"]["enabled"] is True
+
+
 def test_the_muse_sends_the_platform_key(http):
     routes, calls = http
     routes["themuse.com"] = {"results": [], "page_count": 1}
