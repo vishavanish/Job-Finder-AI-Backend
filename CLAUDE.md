@@ -191,7 +191,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Shared Redis | `core/redis_client.py` | One client per process (`get_redis()`); tests swap in fakeredis. |
 | Frontend | separate repo `Job-Finder-AI-Frontend` | React 18 + Vite + react-router, plain JS (no TypeScript), axios client with hardcoded `API_URL`. Pages: Home, Keywords, Skills, ATS Targets, Providers, Applications, Profile, Login. Deployed on Vercel. |
 
-**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts, `0008`–`0009` apply center, `0010` tracker & Gmail, `0011` ATS discovery, `0012`–`0013` voice, `0014` Gemini 2.5 Flash → 3.8 Flash, `0015` prep-pack error detail, `0016` ATS resolver probes, `0017` target companies, `0018` generic AI apply, `0019` job-alert digest address, `0020`–`0021` copilot answer model); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
+**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts, `0008`–`0009` apply center, `0010` tracker & Gmail, `0011` ATS discovery, `0012`–`0013` voice, `0014` Gemini 2.5 Flash → 3.8 Flash, `0015` prep-pack error detail, `0016` ATS resolver probes, `0017` target companies, `0018` generic AI apply, `0019` job-alert digest address, `0020`–`0021` copilot answer model, `0022` Keka + Zoho Recruit); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
 
 **CI:** `.github/workflows/tests.yml` runs the tests on every push and pull request (no secrets needed).
 
@@ -607,6 +607,21 @@ Owner asked 2026-10-31 for the fastest copilot; plan approved in chat (steps 1�
 
 **Operational changes introduced in QA6**
 - Migration `0020` (run `alembic upgrade head`). New env (optional): `VOICE_COPILOT_END_SILENCE_MS` (450).
+
+### 6.21 QA7 — Indian career-page platforms: Keka, Zoho Recruit (branch `dev`)
+
+Plan: `docs/plans/QA7-more-job-sources.md` (owner approved decision 7 on 2026-10-31; decisions 1–6 still open). Live tests that day: ZipRecruiter, Bayt and **Glassdoor** answer 403 to JobSpy (Glassdoor stays off); USAJobs / Reed / Findwork.dev need a free key and don't cover India; Working Nomads / HN job posts / Landing.jobs are small; Darwinbox serves non-browser clients a placeholder (we don't disguise requests); PeopleStrong / RippleHire not solved yet.
+
+| Item | State |
+|------|-------|
+| Keka | ✅ platform 13 `keka`: `{co}.keka.com/careers/api/jobs/default/active` (JSON: full description, cities with country, `publishedOn`, department); company name from `/careers/api/organization/default/careerportalinfo` (`board_name`); unknown company = 302 → gone. URLs must be under `/careers`. |
+| Zoho Recruit | ✅ platform 14 `zoho_recruit` (`host` = `zohorecruit.com` / `.in` / `.eu` / `.com.au`): no API — the public `/jobs/Careers` page (~1–2 MB) embeds the list as HTML-escaped JSON; read with `JSONDecoder.raw_decode`; `Publish: false` skipped; name from `og:site_name`, else the title; repeated places removed; Zoho's error page (`cl-error-block`) = gone, a page without the list = no openings. |
+| Everywhere else | ✅ crawler host slots `keka.com` / `zohorecruit.com` (one slot per platform), `source_info` ranks them as company ATS, `discover_ats` Common Crawl patterns, resolver guesses Keka slugs (not Zoho: page too heavy), migration `0022` platform rows, frontend `platforms.ts` + Add company hint. |
+| Seed | ✅ 27 checked companies (11 Keka with 269 open jobs, 16 Zoho) appended to `app/data/ats_seed.json`; `ats_tick` now reloads the seed when it names a platform with no company yet (`ats_registry.needs_seed`). More come from apply links in searches (harvest) and the resolver. Common Crawl listed ~182 Keka + ~160 Zoho companies on 2026-10-31 but was down when the seed was built: run `python -m app.scripts.discover_ats --commoncrawl` later for the rest. |
+| Tests | ✅ recorded fixtures `tests/fixtures/ats/keka.json`, `keka_info.json`, `zoho_recruit.html`; URL parsing, gone/empty pages, unpublished jobs, name + location rules, seed reload. |
+
+**Operational changes introduced in QA7**
+- Migration `0022` (run `alembic upgrade head`). The first `ats_tick` after deploy adds the 27 seed companies.
 
 ---
 

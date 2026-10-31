@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -134,6 +135,27 @@ def harvest(db: Session, jobs: list[dict]) -> int:
         added += int(created)
     db.commit()
     return added
+
+
+def seed_platforms(path: Path | None = None) -> set[str]:
+    """Platforms the seed file names (read once per file version)."""
+    path = path or SEED_FILE
+    if not path.exists():
+        return set()
+    return _seed_platforms(str(path), path.stat().st_mtime)
+
+
+@lru_cache(maxsize=4)
+def _seed_platforms(path: str, mtime: float) -> set[str]:
+    entries = json.loads(Path(path).read_text(encoding="utf-8"))
+    return {e["platform"] for e in entries if isinstance(e, dict) and e.get("platform")}
+
+
+def needs_seed(db: Session) -> bool:
+    """True when the registry is empty, or the seed file names a platform with no company yet (a platform
+    added after the first load, e.g. Keka / Zoho Recruit in QA7)."""
+    have = {p for (p,) in db.query(AtsCompany.platform).distinct().all()}
+    return not have or bool(seed_platforms() - have)
 
 
 def seed(db: Session, path: Path | None = None) -> int:

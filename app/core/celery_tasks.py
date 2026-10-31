@@ -783,13 +783,13 @@ def sync_gmail_account_task(account_id: str) -> dict:
 
 @celery_app.task(name="job_finder.ats_tick")
 def ats_tick_task() -> dict:
-    """Beat (P6): loads the seed once when the registry is empty, then queues a crawl for each due company."""
-    from app.models.ats import AtsCompany
+    """Beat (P6): loads the seed when the registry is empty or a new platform's companies are missing, then
+    queues a crawl for each due company."""
     from app.services import ats_crawler, ats_registry
 
     db = SessionLocal()
     try:
-        if db.query(AtsCompany.id).first() is None:
+        if ats_registry.needs_seed(db):
             ats_registry.seed(db)
         claimed = ats_crawler.claim_due(db)
     finally:

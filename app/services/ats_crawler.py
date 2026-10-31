@@ -74,7 +74,9 @@ def host_slot(host: str):
 def api_host(company: AtsCompany) -> str:
     return {"greenhouse": "boards-api.greenhouse.io", "lever": "api.lever.co", "ashby": "api.ashbyhq.com",
             "smartrecruiters": "api.smartrecruiters.com", "workable": "apply.workable.com",
-            "rippling": "ats.rippling.com", "gem": "api.gem.com"}.get(
+            "rippling": "ats.rippling.com", "gem": "api.gem.com",
+            # One shared host per tenant platform, so all their companies count against one slot.
+            "keka": "keka.com", "zoho_recruit": "zohorecruit.com"}.get(
         company.platform) or company.host or f"{company.slug}.{company.platform}"
 
 

@@ -43,7 +43,7 @@ class FakeResponse:
 
 def load(path: Path):
     text = path.read_text(encoding="utf-8")
-    return text if path.suffix in (".xml", ".rss") else json.loads(text)
+    return text if path.suffix in (".xml", ".rss", ".html") else json.loads(text)
 
 
 ROUTES = {
@@ -61,6 +61,9 @@ ROUTES = {
     "apply.workable.com/api/v3/accounts/acme/jobs": SOURCES / "workable.json",
     "acme.jobs.personio.de/xml": SOURCES / "personio.xml",
     "acme.breezy.hr/json": SOURCES / "breezy.json",
+    "steeloncall.keka.com/careers/api/jobs/default/active": ATS / "keka.json",
+    "steeloncall.keka.com/careers/api/organization/default/careerportalinfo": ATS / "keka_info.json",
+    "digitalnest.zohorecruit.in/jobs/Careers": ATS / "zoho_recruit.html",
 }
 
 
@@ -124,6 +127,8 @@ def company(db, ref: AtsRef, name: str | None = None) -> AtsCompany:
     (AtsRef("teamtailor", "teamtailor", host="career.teamtailor.com"), 2),
     (AtsRef("rippling", "rippling"), 2),
     (AtsRef("gem", "gem"), 2),
+    (AtsRef("keka", "steeloncall"), 3),
+    (AtsRef("zoho_recruit", "digitalnest", host="zohorecruit.in"), 4),
 ])
 def test_every_platform_parses_its_recorded_response(http, monkeypatch, ref, min_jobs):
     monkeypatch.setattr(platforms, "public_host", lambda host: True)
@@ -188,6 +193,10 @@ def test_workday_big_tenant_indexes_target_market_first(http):
     ("https://acme.teamtailor.com/jobs/1", ("teamtailor", "acme", None, None)),
     ("https://ats.rippling.com/rippling/jobs/abc", ("rippling", "rippling", None, None)),
     ("https://jobs.gem.com/gem/1", ("gem", "gem", None, None)),
+    ("https://techdome.keka.com/careers/jobdetails/168376?source=indeed", ("keka", "techdome", None, None)),
+    ("https://kanerika.zohorecruit.com/jobs/Careers/705962000023064981/Engineer-Backend?source=CareerSite",
+     ("zoho_recruit", "kanerika", "zohorecruit.com", None)),
+    ("https://digitalnest.zohorecruit.in/jobs/Careers", ("zoho_recruit", "digitalnest", "zohorecruit.in", None)),
 ])
 def test_urls_map_to_platform_refs(url, expected):
     ref = platforms.parse_url(url)
@@ -197,6 +206,8 @@ def test_urls_map_to_platform_refs(url, expected):
 @pytest.mark.parametrize("url", [
     "https://www.linkedin.com/jobs/view/1", "https://example.com/careers", "https://evil.myworkdayjobs.com.attacker.io/x",
     "https://jobs.lever.co/", "https://acme.homerun.co/", "https://bad_slug!.recruitee.com/", "not a url",
+    "https://acme.keka.com/#/home", "https://www.keka.com/careers", "https://www.zohorecruit.com/jobs/Careers",
+    "https://acme.zohorecruit.com.attacker.io/jobs/Careers",
 ])
 def test_unsupported_or_malformed_urls_are_refused(url):
     assert platforms.parse_url(url) is None
@@ -586,3 +597,61 @@ def test_search_api_takes_several_locations_and_any_age(client, make_user, db):
     assert r.status_code == 200, r.text
     assert [g["name"] for g in r.json()["groups"]] == ["Acme"]
     assert r.json()["groups"][0]["top_jobs"][0]["more_locations"] == []
+
+
+# ---------------------------------------------------------------- Keka / Zoho Recruit (QA7)
+
+def test_keka_jobs_carry_city_country_date_and_the_company_name(http):
+    ref = AtsRef("keka", "steeloncall")
+    impl = platforms.get("keka")
+    result = impl.list_jobs(ref)
+    job = result.jobs[0]
+    assert job["country"] == "India" and job["posted"].startswith("20") and job["description"]
+    assert job["url"] == f"https://steeloncall.keka.com/careers/jobdetails/{job['external_id']}"
+    assert impl.board_name(ref, result.jobs) == "Steel On Call Services (India) Private Limited"
+
+
+def test_zoho_recruit_reads_the_embedded_list_and_skips_unpublished(http):
+    result = platforms.get("zoho_recruit").list_jobs(AtsRef("zoho_recruit", "digitalnest", host="zohorecruit.in"))
+    assert result.company_name == "Digital Nest"
+    assert all("/jobs/Careers/" in j["url"] and j["location"].startswith("Hyderabad") for j in result.jobs)
+    overrides, _ = http
+    page = load(ATS / "zoho_recruit.html").replace("&quot;Publish&quot;: true", "&quot;Publish&quot;: false", 1)
+    overrides["digitalnest.zohorecruit.in/jobs/Careers"] = FakeResponse(page)
+    fewer = platforms.get("zoho_recruit").list_jobs(AtsRef("zoho_recruit", "digitalnest", host="zohorecruit.in"))
+    assert len(fewer.jobs) == len(result.jobs) - 1
+
+
+def test_unknown_keka_or_zoho_company_means_gone(http):
+    overrides, _ = http
+    overrides["nosuch.keka.com"] = FakeResponse("", 302)
+    overrides["nosuch.zohorecruit.com"] = FakeResponse('<html><div class="cl-error-block">Oops</div></html>')
+    overrides["quiet.zohorecruit.com"] = FakeResponse("<html><title>Jobs at Quiet</title><body>No openings</body></html>")
+    with pytest.raises(GoneError):
+        platforms.get("keka").list_jobs(AtsRef("keka", "nosuch"))
+    with pytest.raises(GoneError):
+        platforms.get("zoho_recruit").list_jobs(AtsRef("zoho_recruit", "nosuch", host="zohorecruit.com"))
+    quiet = platforms.get("zoho_recruit").list_jobs(AtsRef("zoho_recruit", "quiet", host="zohorecruit.com"))
+    assert quiet.jobs == [] and quiet.company_name == "Quiet"
+
+
+def test_seed_is_loaded_again_when_a_new_platform_has_no_companies(db, tmp_path, monkeypatch):
+    seed_file = tmp_path / "seed.json"
+    seed_file.write_text(json.dumps([{"platform": "lever", "slug": "spotify"},
+                                     {"platform": "keka", "slug": "techdome"}]), encoding="utf-8")
+    monkeypatch.setattr(ats_registry, "SEED_FILE", seed_file)
+    assert ats_registry.needs_seed(db)  # empty registry
+    company(db, AtsRef("lever", "spotify"))
+    assert ats_registry.needs_seed(db)  # keka is in the seed but not in the registry
+    assert ats_registry.seed(db) == 1
+    assert not ats_registry.needs_seed(db)
+
+
+def test_zoho_location_has_no_repeats_and_site_name_beats_the_title():
+    impl = platforms.get("zoho_recruit")
+    assert impl._location({"City": "Hyderabad, Ahmedabad, India", "Country": "India"}) == "Hyderabad, Ahmedabad, India"
+    assert impl._location({"City": "hyderabad", "State": "Telangana", "Country": "India"}) == \
+        "Hyderabad, Telangana, India"
+    page = ('<title>Jobs at PeoplePlus</title><meta property="og:site_name" content="Kanerika Software">')
+    assert impl._company(page) == "Kanerika Software"
+    assert impl._company("<title>Jobs at Digital Nest</title>") == "Digital Nest"
