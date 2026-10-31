@@ -82,7 +82,7 @@ class FakeLLM:
         self.calls: list[dict] = []
 
     def stream(self, db, *, user_id, task, system, user_prompt, outcome, max_tokens=800, ref=None,
-               free_only=False, timeout=None, cancel=None, images=None):
+               free_only=False, timeout=None, cancel=None, images=None, first_token_timeout=None):
         self.calls.append({"task": task, "prompt": user_prompt, "images": images, "system": system})
         pieces, block = self.replies.pop(0) if self.replies else (["- An answer."], False)
         outcome.first_token_ms = 3
@@ -447,6 +447,23 @@ def test_controls_expand_dismiss_and_answer_now(client, make_user, speech, llm):
         assert recv_until(ws, "error")[0]["code"] == "unknown_question"
         stop(ws)
     assert [c["task"] for c in fake.calls] == ["copilot_answer", "copilot_expand", "copilot_answer"]
+
+
+def test_hard_questions_start_on_the_fast_model_and_cards_show_the_timing(client, make_user, speech, llm):
+    _, headers = ready_user(client, make_user)
+    fake = llm([(["- Hash the URL."], False)])
+    speech.texts(["How would you design a URL shortener?"])
+    created = open_copilot(client, headers)
+    with client.websocket_connect(created["stream_path"]) as ws:
+        auth(ws, created)
+        speak(ws, 0)
+        recv_until(ws, "question.detected")
+        done, _ = recv_until(ws, "answer.done")
+        stop(ws)
+    assert fake.calls[0]["task"] == "copilot_answer"
+    lat = done["latency"]
+    assert lat["end_wait_ms"] == 450 and lat["stt_ms"] >= 0
+    assert lat["total_ms"] >= lat["end_wait_ms"] + lat["stt_ms"]
 
 
 def test_screenshot_goes_to_one_vision_call_and_is_never_stored(client, make_user, speech, llm):

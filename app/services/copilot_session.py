@@ -116,6 +116,7 @@ class CardGen:
     t0: float = 0.0
     gate_ms: int = 0
     grounding: float = 0.0
+    heard: dict | None = None  # segmented STT: when the utterance was ready + how long STT took
 
 
 # ---------------------------------------------------------------- audio channels
@@ -128,7 +129,8 @@ class SegmentedChannel:
         s = get_settings()
         self.session = session
         self.channel = channel
-        self.segmenter = Segmenter(end_silence_ms=max(400, s.VOICE_END_OF_TURN_MS - 100),
+        self.end_silence_ms = max(300, s.VOICE_COPILOT_END_SILENCE_MS)
+        self.segmenter = Segmenter(end_silence_ms=self.end_silence_ms,
                                    min_speech_ms=s.VOICE_MIN_SPEECH_MS,
                                    max_utterance_ms=s.VOICE_MAX_UTTERANCE_SECONDS * 1000,
                                    aggressiveness=s.VOICE_VAD_AGGRESSIVENESS)
@@ -148,11 +150,13 @@ class SegmentedChannel:
                         self.queue.get_nowait()  # bounded: drop the oldest rather than lag
                     except asyncio.QueueEmpty:
                         pass
-                self.queue.put_nowait(event)
+                self.queue.put_nowait((event, time.monotonic()))
 
     async def _worker(self) -> None:
         while True:
-            utt: Utterance = await self.queue.get()
+            utt, ready_at = await self.queue.get()
+            utt: Utterance
+            stt_started = time.monotonic()
             try:
                 result, cost = await self.session.speech.transcribe(utt.pcm, language=self.session.language)
             except SpeechError as e:
@@ -162,6 +166,9 @@ class SegmentedChannel:
                 utt.pcm = b""  # the audio is dropped as soon as it is transcribed
             await self.session.add_cost(cost)
             if result.text.strip():
+                if self.channel != CH_USER:
+                    self.session.heard = {"ready_at": ready_at, "end_wait_ms": self.end_silence_ms,
+                                          "stt_ms": int((time.monotonic() - stt_started) * 1000)}
                 await self.session.on_transcript(self.channel, Transcript(
                     text=result.text.strip(), final=True, start_ms=utt.start_ms, end_ms=utt.end_ms,
                     utterance_end=utt.final))
@@ -233,6 +240,7 @@ class CopilotSession(VoiceSocket):
         self.last_card: Card | None = None
         self.last_card_at: float | None = None
         self.gen: CardGen | None = None
+        self.heard: dict | None = None  # timing of the latest interviewer utterance (segmented STT)
         self.seq = 0
         self.utt_no = 0
         self.int_finals: list[str] = []
@@ -489,9 +497,10 @@ class CopilotSession(VoiceSocket):
         started = time.monotonic()
         r = question_gate.classify(text, since_last_card_s=self._since_last_card())
         gate_ms = int((time.monotonic() - started) * 1000)
+        heard, self.heard = self.heard, None
         if r.is_question:
             card = await self._new_card(text, r, speculative=False, gate_ms=gate_ms, utt_no=self.utt_no - 1,
-                                        speaker=speaker)
+                                        speaker=speaker, heard=heard)
             await self._persist_question(card, start_ms=t.start_ms, end_ms=t.end_ms)
             return
         await self._persist(speaker="interviewer", kind="utterance", text=text, start_ms=t.start_ms, end_ms=t.end_ms)
@@ -520,7 +529,7 @@ class CopilotSession(VoiceSocket):
 
     async def _new_card(self, text: str, r: question_gate.GateResult, *, speculative: bool, gate_ms: int = 0,
                         utt_no: int | None = None, speaker: int | None = None, images=None,
-                        forced: bool = False) -> Card:
+                        forced: bool = False, heard: dict | None = None) -> Card:
         if self.gen is not None:
             await self._interrupt(self.gen, "interrupted")
         parent = None
@@ -535,7 +544,7 @@ class CopilotSession(VoiceSocket):
         await self.send({"type": "question.detected", "question_id": card.id, "text": text, "qtype": card.qtype,
                          "is_followup": card.is_followup, "parent_id": parent,
                          "multipart": card.multipart, "speculative": speculative, "forced": forced})
-        await self._start_answer(card, "normal", gate_ms=gate_ms, images=images)
+        await self._start_answer(card, "normal", gate_ms=gate_ms, images=images, heard=heard)
         return card
 
     async def _restart(self, card: Card, text: str) -> None:
@@ -615,14 +624,20 @@ class CopilotSession(VoiceSocket):
             parts.append(f"Instruction: {extra.strip()}")
         return system, "\n\n".join(parts), score
 
-    async def _start_answer(self, card: Card, mode: str, *, gate_ms: int = 0, images=None) -> None:
+    async def _start_answer(self, card: Card, mode: str, *, gate_ms: int = 0, images=None,
+                            heard: dict | None = None) -> None:
         system, prompt, score = self._prompts(card, mode)
-        task = "copilot_expand" if mode == "expand" or card.hard or images else "copilot_answer"
-        max_tokens = 700 if mode == "expand" else 350
+        # The fast model always answers first (hard questions too); the strong one only on Expand and for
+        # screenshots (vision).
+        strong = mode == "expand" or bool(images)
+        task = "copilot_expand" if strong else "copilot_answer"
+        max_tokens = 700 if mode == "expand" else 500 if card.hard else 350
+        first_token = get_settings().VOICE_FIRST_TOKEN_TIMEOUT_MS / 1000
         stream = LLMStream(user_id=self.user_id, task=task, system=system, user_prompt=prompt, max_tokens=max_tokens,
                            free_only=self.free_only, ref=self.session_id, images=images,
-                           timeout=get_settings().VOICE_FIRST_TOKEN_TIMEOUT_MS / 1000 * 4)
-        gen = CardGen(card, stream, mode, time.monotonic(), t0=time.monotonic(), gate_ms=gate_ms, grounding=score)
+                           timeout=first_token * 4, first_token_timeout=first_token * (2 if strong else 1))
+        gen = CardGen(card, stream, mode, time.monotonic(), t0=time.monotonic(), gate_ms=gate_ms, grounding=score,
+                      heard=heard)
         self.gen = gen
         gen.task = self._spawn(self._run_answer(gen))
 
@@ -675,6 +690,11 @@ class CopilotSession(VoiceSocket):
                    "first_visible_ms": int((gen.first_at - gen.t0) * 1000) if gen.first_at else None,
                    "answer_ms": int((time.monotonic() - gen.t0) * 1000), "speculative": card.speculative,
                    "mode": gen.mode}
+        if gen.heard and gen.first_at:
+            # From the end of the interviewer's speech: silence wait + STT + gate + first words.
+            latency["stt_ms"] = gen.heard["stt_ms"]
+            latency["end_wait_ms"] = gen.heard["end_wait_ms"]
+            latency["total_ms"] = gen.heard["end_wait_ms"] + int((gen.first_at - gen.heard["ready_at"]) * 1000)
         latency = {k: v for k, v in latency.items() if v is not None}
         await self.send({"type": "answer.done", "question_id": card.id, "text": text, "not_sure": not_sure,
                          "unverified": unverified, "model": model.display_name if model else None,

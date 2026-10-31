@@ -29,6 +29,7 @@ never logged.
 from __future__ import annotations
 
 import logging
+import queue
 import re
 import threading
 import time
@@ -57,6 +58,8 @@ SPEECH_TASKS = frozenset({"stt", "tts"})
 # Served only by rows that list them: speech, and form_vision (P4c) — it sends a screenshot, which a
 # text-only model (Groq, HF) would reject.
 LISTED_ONLY_TASKS = SPEECH_TASKS | {"form_vision"}
+# Live voice tasks: someone is waiting on the first words, so models skip optional thinking.
+FAST_TASKS = frozenset({"copilot_answer", "question_gate", "interview_chat"})
 # Providers that only do speech (no text adapter in app/providers/llm).
 SPEECH_ONLY_PROVIDERS = frozenset({"browser", "deepgram"})
 
@@ -367,7 +370,8 @@ def call_model(db: Session, model: AiModel, *, user_id: str | None, task: str, s
                ref: str | None = None, validate: Callable[[str], bool] | None = None) -> RouterResult:
     """One attempt on one model, ledgered. Raises LLMError on failure."""
     adapter = get_adapter(model.provider)
-    spec = ModelSpec(model.provider, model.model_id, model.base_url, model.max_output_tokens)
+    spec = ModelSpec(model.provider, model.model_id, model.base_url, model.max_output_tokens,
+                     fast=task in FAST_TASKS)
     limit = min(max_tokens, model.max_output_tokens) if model.max_output_tokens else max_tokens
     slot = _take_slot(model.provider)
     started = time.monotonic()
@@ -453,13 +457,17 @@ class StreamOutcome:
 def stream(db: Session, *, user_id: str | None, task: str, system: str, user_prompt: str,
            outcome: StreamOutcome, max_tokens: int = 800, ref: str | None = None, free_only: bool = False,
            timeout: float | None = None, cancel: threading.Event | None = None,
-           images: list[tuple[str, bytes]] | None = None) -> Iterator[str]:
+           images: list[tuple[str, bytes]] | None = None,
+           first_token_timeout: float | None = None) -> Iterator[str]:
     """Streams `task` from the first model in the chain that produces a
     first chunk. A model that fails BEFORE its first chunk is skipped (the
     next one is tried); a failure after that raises LLMError — the caller
     has already shown part of the answer. `cancel` stops the stream between
     chunks (the HTTP stream is closed); a cancelled call is still ledgered.
-    Raises NoModelAvailable when nothing produced a first chunk."""
+    `first_token_timeout`: a model that hasn't sent its first chunk by then
+    counts as failed and the next one is tried (a slow or stuck model must
+    not hold a live answer). Raises NoModelAvailable when nothing produced a
+    first chunk."""
     if task not in TASKS or task in SPEECH_TASKS:
         raise ValueError(f"unknown text task {task!r}")
     user = db.get(User, user_id) if user_id else None
@@ -470,13 +478,16 @@ def stream(db: Session, *, user_id: str | None, task: str, system: str, user_pro
     for model in chain:
         api_key, source = resolve_key(db, user_id=user_id, model=model)
         adapter = get_adapter(model.provider)
-        spec = ModelSpec(model.provider, model.model_id, model.base_url, model.max_output_tokens)
+        spec = ModelSpec(model.provider, model.model_id, model.base_url, model.max_output_tokens,
+                         fast=task in FAST_TASKS)
         limit = min(max_tokens, model.max_output_tokens) if model.max_output_tokens else max_tokens
         usage: dict = {}
         started = time.monotonic()
         chunks: list[str] = []
         gen = stream_text(adapter, spec, api_key=api_key, system=system, user=user_prompt, max_tokens=limit,
                           timeout=limit_timeout, usage=usage, images=images)
+        if first_token_timeout:
+            gen = _first_chunk_deadline(gen, first_token_timeout)
         try:
             for chunk in gen:
                 if not chunks:
@@ -524,6 +535,44 @@ def stream(db: Session, *, user_id: str | None, task: str, system: str, user_pro
         _record_success(model.id)
         return
     raise NoModelAvailable(task, attempts)
+
+
+def _first_chunk_deadline(gen: Iterator[str], seconds: float) -> Iterator[str]:
+    """Runs a (blocking) adapter stream in a thread and raises LLMError when
+    its first chunk takes longer than `seconds`. The abandoned stream stops at
+    its next chunk."""
+    q: queue.Queue = queue.Queue()
+    stop = threading.Event()
+
+    def pump() -> None:
+        try:
+            for chunk in gen:
+                if stop.is_set():
+                    break
+                q.put(("chunk", chunk))
+            q.put(("done", None))
+        except BaseException as e:  # noqa: BLE001 — handed to the caller's thread
+            q.put(("error", e))
+        finally:
+            gen.close()
+
+    threading.Thread(target=pump, daemon=True, name="llm-first-chunk").start()
+    first = True
+    try:
+        while True:
+            try:
+                kind, value = q.get(timeout=seconds if first else None)
+            except queue.Empty:
+                raise LLMError(f"no first token within {seconds:g} s") from None
+            if kind == "chunk":
+                first = False
+                yield value
+            elif kind == "done":
+                return
+            else:
+                raise value
+    finally:
+        stop.set()
 
 
 def _estimate_tokens(text: str) -> int:
