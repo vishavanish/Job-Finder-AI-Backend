@@ -160,6 +160,7 @@ class Settings(BaseSettings):
     VOICE_RESUME_SECONDS: int = 60              # a dropped socket may reconnect to its session this long
     VOICE_IDLE_PAUSE_SECONDS: int = 30          # no message from the client -> paused
     VOICE_END_OF_TURN_MS: int = 700             # silence that ends an answer (Practice)
+    VOICE_COPILOT_END_SILENCE_MS: int = 450     # silence that ends an interviewer utterance (Copilot, per-utterance STT)
     VOICE_MIN_SPEECH_MS: int = 300              # shorter sounds are not an utterance
     VOICE_MAX_UTTERANCE_SECONDS: int = 60       # long answers are transcribed in pieces
     VOICE_SPECULATIVE_GRACE_MS: int = 400

@@ -24,7 +24,7 @@ from app.services import ai_router
 class LLMStream:
     def __init__(self, *, user_id: str, task: str, system: str, user_prompt: str, max_tokens: int = 600,
                  free_only: bool = False, ref: str | None = None, timeout: float | None = None,
-                 images: list[tuple[str, bytes]] | None = None):
+                 images: list[tuple[str, bytes]] | None = None, first_token_timeout: float | None = None):
         self.user_id = user_id
         self.task = task
         self.system = system
@@ -33,6 +33,7 @@ class LLMStream:
         self.free_only = free_only
         self.ref = ref
         self.timeout = timeout
+        self.first_token_timeout = first_token_timeout
         self.images = images  # held in memory for this one call only
         self.outcome = ai_router.StreamOutcome()
         self._cancel = threading.Event()
@@ -54,7 +55,8 @@ class LLMStream:
             for chunk in ai_router.stream(db, user_id=self.user_id, task=self.task, system=self.system,
                                           user_prompt=self.user_prompt, outcome=self.outcome,
                                           max_tokens=self.max_tokens, ref=self.ref, free_only=self.free_only,
-                                          timeout=self.timeout, cancel=self._cancel, images=self.images):
+                                          timeout=self.timeout, cancel=self._cancel, images=self.images,
+                                          first_token_timeout=self.first_token_timeout):
                 put(("chunk", chunk))
                 if self._cancel.is_set():
                     break

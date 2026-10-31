@@ -26,6 +26,9 @@ class ModelSpec:
     model_id: str
     base_url: str | None = None
     max_output_tokens: int | None = None
+    # A live voice task (copilot, practice interviewer, question gate): the adapter skips the model's
+    # optional "thinking" so the first words come fast and a tiny max_tokens isn't spent on thoughts.
+    fast: bool = False
 
 
 @dataclass

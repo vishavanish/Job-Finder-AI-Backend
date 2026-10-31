@@ -191,7 +191,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Shared Redis | `core/redis_client.py` | One client per process (`get_redis()`); tests swap in fakeredis. |
 | Frontend | separate repo `Job-Finder-AI-Frontend` | React 18 + Vite + react-router, plain JS (no TypeScript), axios client with hardcoded `API_URL`. Pages: Home, Keywords, Skills, ATS Targets, Providers, Applications, Profile, Login. Deployed on Vercel. |
 
-**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts, `0008`–`0009` apply center, `0010` tracker & Gmail, `0011` ATS discovery, `0012`–`0013` voice, `0014` Gemini 2.5 Flash → 3.8 Flash, `0015` prep-pack error detail, `0016` ATS resolver probes, `0017` target companies, `0018` generic AI apply, `0019` job-alert digest address); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
+**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts, `0008`–`0009` apply center, `0010` tracker & Gmail, `0011` ATS discovery, `0012`–`0013` voice, `0014` Gemini 2.5 Flash → 3.8 Flash, `0015` prep-pack error detail, `0016` ATS resolver probes, `0017` target companies, `0018` generic AI apply, `0019` job-alert digest address, `0020` Groq as the copilot default); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
 
 **CI:** `.github/workflows/tests.yml` runs the tests on every push and pull request (no secrets needed).
 
@@ -583,6 +583,23 @@ Plan: `docs/plans/QA5-apply-blocked-sites.md` (owner approved the four recommend
 **Operational changes introduced in QA5**
 - No migration. New env (optional): `APPLY_BLOCK_PAUSE_HOURS` (24), `APPLY_BLOCK_MAX_PAUSE_HOURS` (168).
 - Server note: the OCI VM is Oracle Linux 9 (aarch64) — `playwright install --with-deps` fails there (no apt); install Chromium's libraries with `dnf` and run `python -m playwright install chromium` as the worker's user.
+
+### 6.20 QA6 — Live Copilot speed (branch `dev`)
+
+Owner asked 2026-10-31 for the fastest copilot; plan approved in chat (steps 1–5; Deepgram stays optional). Before: ≈ 3–6 s from the end of a question to the first words (Gemini thinking on, a failing model could hold an answer 10 s, hard questions went to the strong model).
+
+| Item | State |
+|------|-------|
+| No thinking on live tasks | ✅ `ai_router.FAST_TASKS` (`copilot_answer`, `question_gate`, `interview_chat`) → `ModelSpec.fast`. Gemini: `thinking_budget: 0` on 2.5 Flash, `thinking_level` `minimal` (Flash) / `low` (Pro) on 3+; a model that rejects the setting is asked again without it. Groq GPT-OSS: `reasoning_effort: low`, `include_reasoning: false`. Also stops the question gate's 5 max tokens being spent on thoughts. |
+| Groq first | ✅ migration `0020`: admin default for `copilot_answer` and `question_gate` = GPT-OSS 120B (Groq), only where no default was set; the rest of the chain stays as fallback. |
+| First-token deadline | ✅ `ai_router.stream(first_token_timeout=)`: a model with no first chunk in time counts as failed (breaker) and the next one is tried; later gaps are not cut. Copilot: `VOICE_FIRST_TOKEN_TIMEOUT_MS` (2.5 s) for answers, twice that for Expand / screenshots. |
+| Fast model first | ✅ hard questions (coding, system design, long) start on `copilot_answer` with 500 max tokens; `copilot_expand` only for Expand and screenshots. |
+| End of speech | ✅ copilot per-utterance STT ends an interviewer utterance after `VOICE_COPILOT_END_SILENCE_MS` (450; Practice keeps `VOICE_END_OF_TURN_MS`). |
+| Timing | ✅ `answer.done.latency` adds `end_wait_ms`, `stt_ms`, `total_ms` (end of speech → first words) for per-utterance STT; the card shows "1.2 s · wait 0.45 · speech→text 0.40 · AI 0.35 · model". |
+| Not done | Real-audio measurement (`voice_bench` with real keys); Deepgram streaming (speculative start) needs a `deepgram` key. |
+
+**Operational changes introduced in QA6**
+- Migration `0020` (run `alembic upgrade head`). New env (optional): `VOICE_COPILOT_END_SILENCE_MS` (450).
 
 ---
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from typing import Iterator
 
 import httpx
@@ -30,6 +31,38 @@ import httpx
 from app.providers.llm.base import LLMError, LLMResult, ModelSpec, short_error
 
 TEMPERATURE = 0.1
+
+_GEMINI_VERSION = re.compile(r"gemini-(\d+)(?:\.(\d+))?")
+
+
+def gemini_thinking(spec: ModelSpec) -> dict | None:
+    """The least thinking a Gemini model allows, for fast tasks. 2.5 Flash
+    turns it off with a zero budget (Pro can't); Gemini 3+ takes a level
+    ("minimal" on Flash, "low" on Pro). Older models don't think."""
+    if not spec.fast:
+        return None
+    m = _GEMINI_VERSION.match(spec.model_id.lower().removeprefix("models/"))
+    if not m:
+        return None
+    major, minor = int(m.group(1)), int(m.group(2) or 0)
+    pro = "pro" in spec.model_id.lower()
+    if major >= 3:
+        return {"thinking_level": "low" if pro else "minimal"}
+    if (major, minor) >= (2, 5) and not pro:
+        return {"thinking_budget": 0}
+    return None
+
+
+def groq_reasoning(spec: ModelSpec) -> dict:
+    """GPT-OSS on Groq reasons before it answers; fast tasks ask for the least."""
+    if spec.fast and "gpt-oss" in spec.model_id.lower():
+        return {"reasoning_effort": "low", "include_reasoning": False}
+    return {}
+
+
+def _rejects_thinking(e: Exception) -> bool:
+    text = str(e).lower()
+    return "thinking" in text or "reasoning" in text
 
 
 class GeminiAdapter:
@@ -43,9 +76,18 @@ class GeminiAdapter:
                         "max_output_tokens": max_tokens}
         if json_mode:
             config["response_mime_type"] = "application/json"
+        thinking = gemini_thinking(spec)
+        if thinking:
+            config["thinking_config"] = thinking
         try:
             client = genai.Client(api_key=api_key, http_options={"timeout": int(timeout * 1000)})
-            resp = client.models.generate_content(model=spec.model_id, contents=user, config=config)
+            try:
+                resp = client.models.generate_content(model=spec.model_id, contents=user, config=config)
+            except Exception as e:  # noqa: BLE001
+                if not (thinking and _rejects_thinking(e)):
+                    raise
+                config.pop("thinking_config")  # this model won't take that setting: ask again without it
+                resp = client.models.generate_content(model=spec.model_id, contents=user, config=config)
         except Exception as e:  # noqa: BLE001 — SDK raises many types; the router only needs "failed"
             raise LLMError(short_error(e)) from e
         usage = getattr(resp, "usage_metadata", None)
@@ -63,20 +105,32 @@ class GeminiAdapter:
         except ImportError as e:
             raise LLMError("google-genai is not installed", retryable=False) from e
         config = {"system_instruction": system, "temperature": TEMPERATURE, "max_output_tokens": max_tokens}
+        thinking = gemini_thinking(spec)
+        if thinking:
+            config["thinking_config"] = thinking
         contents: object = user
         if images:
             from google.genai import types
             contents = [*(types.Part.from_bytes(data=data, mime_type=mime) for mime, data in images), user]
         try:
             client = genai.Client(api_key=api_key, http_options={"timeout": int(timeout * 1000)})
-            for chunk in client.models.generate_content_stream(model=spec.model_id, contents=contents,
-                                                               config=config):
-                meta = getattr(chunk, "usage_metadata", None)
-                if meta is not None:
-                    usage["tokens_in"] = int(getattr(meta, "prompt_token_count", 0) or 0)
-                    usage["tokens_out"] = int(getattr(meta, "candidates_token_count", 0) or 0)
-                if chunk.text:
-                    yield chunk.text
+            sent = False
+            while True:
+                try:
+                    for chunk in client.models.generate_content_stream(model=spec.model_id, contents=contents,
+                                                                       config=config):
+                        meta = getattr(chunk, "usage_metadata", None)
+                        if meta is not None:
+                            usage["tokens_in"] = int(getattr(meta, "prompt_token_count", 0) or 0)
+                            usage["tokens_out"] = int(getattr(meta, "candidates_token_count", 0) or 0)
+                        if chunk.text:
+                            sent = True
+                            yield chunk.text
+                    break
+                except Exception as e:  # noqa: BLE001
+                    if sent or "thinking_config" not in config or not _rejects_thinking(e):
+                        raise
+                    config.pop("thinking_config")  # this model won't take that setting: ask again without it
         except LLMError:
             raise
         except Exception as e:  # noqa: BLE001
@@ -106,6 +160,7 @@ class GroqAdapter:
                 messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
                 temperature=TEMPERATURE,
                 max_tokens=max_tokens,
+                **groq_reasoning(spec),
             )
         except Exception as e:  # noqa: BLE001
             raise LLMError(short_error(e)) from e
@@ -127,6 +182,7 @@ class GroqAdapter:
                 temperature=TEMPERATURE,
                 max_tokens=max_tokens,
                 stream=True,
+                **groq_reasoning(spec),
             )
             for chunk in resp:
                 extra = getattr(chunk, "x_groq", None)
