@@ -40,7 +40,8 @@ class Transcript:
 
 
 class STTProvider(Protocol):
-    async def transcribe(self, pcm: bytes, *, language: str | None = None) -> Transcript: ...
+    async def transcribe(self, pcm: bytes, *, language: str | None = None,
+                         prompt: str | None = None) -> Transcript: ...
 
 
 class StreamingSTTProvider(Protocol):

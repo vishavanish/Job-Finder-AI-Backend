@@ -62,7 +62,7 @@ class FakeSTT:
         self.texts = list(texts)
         self.seen_bytes = 0
 
-    async def transcribe(self, pcm, *, language=None):
+    async def transcribe(self, pcm, *, language=None, prompt=None):
         self.seen_bytes += len(pcm)
         return Transcript(text=self.texts.pop(0) if self.texts else "")
 

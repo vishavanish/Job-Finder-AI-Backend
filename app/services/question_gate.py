@@ -74,7 +74,10 @@ TYPES = (  # first match wins
     ("coding", ("write a function", "write code", "write a program", "algorithm", "time complexity",
                 "space complexity", "big o", "linked list", "binary tree", "array", "string reversal",
                 "reverse a", "leetcode", "data structure", "implement a", "implement the", "recursion",
-                "dynamic programming", "sort ", "sorting", "hash map", "hashmap")),
+                "dynamic programming", "sort ", "sorting", "hash map", "hashmap", "duplicate", "palindrome",
+                "fibonacci", "factorial", "anagram", "prime number", "substring", "subarray", "missing number",
+                "second largest", "largest element", "smallest element", "in the list", "in a list",
+                "of the list", "of a list", "in the array", "elements", "reverse the")),
     ("system_design", ("design a", "design an", "design the", "architecture", "architect", "scale to",
                        "scalab", "million users", "distributed", "high availability", "load balanc",
                        "rate limiter", "url shortener", "shard", "throughput", "latency budget")),
@@ -89,7 +92,31 @@ TYPES = (  # first match wins
                     "an example of", "mentor")),
     ("situational", ("what would you do if", "how would you handle", "imagine", "suppose", "let's say",
                      "lets say", "what if", "in a situation where")),
+    # Topic types (after the personal ones, so "tell me about a time ... Kubernetes" stays behavioral).
+    # A leading space matches at a word start only (the text is padded with spaces).
+    ("devops", ("kubernetes", " k8s", "kubectl", "docker", "container", " helm", "terraform", "ansible",
+                "jenkins", "ci/cd", " ci cd", "cicd", "pipeline", "github actions", "gitlab", "rolling update",
+                "blue green", "blue-green", "canary", " aws", " ec2", " s3 ", "lambda", "azure", " gcp",
+                "nginx", "linux", "bash", "shell script", "prometheus", "grafana", "monitoring", "observability",
+                "infrastructure as code", "devops", " sre", "on-call", "on call", "incident", " vpc", "autoscal",
+                "deployment", "deploy", "cron", "ssl certificate", "dns")),
+    ("frontend", ("react", " hook", "usestate", "useeffect", "uselayouteffect", "use effect", "use state",
+                  "redux", "angular", " vue", "next.js", "nextjs", " css", "flexbox", " html", " dom ",
+                  "virtual dom", "browser", "javascript", "typescript", "frontend", "front end", "front-end",
+                  " ui ", "component", " props", "webpack", " vite", "responsive", "accessibility",
+                  "event loop", "closure", "local storage", "localstorage", "cors")),
+    ("backend", (" api", "rest ", "graphql", "endpoint", "server", "backend", "back end", "back-end",
+                 "database", " sql", "postgres", "mysql", "mongodb", "index", "query", " orm", "transaction",
+                 "cache", "caching", "redis", "kafka", "rabbitmq", "message queue", "microservice",
+                 "authentication", "authorization", " jwt", "oauth", "session", "node.js", "nodejs", "express",
+                 "django", "flask", "fastapi", "spring", "connection pool", "concurrency", "idempot")),
 )
+# A coding task said as a statement ("we have to find the duplicate element in the list", "now reverse the
+# string"): no question mark or wh-word, but clearly a question to answer.
+_CODING_TASK = re.compile(r"^(?:find|write|print|count|remove|reverse|sort(?! out)|check|return|merge|implement|convert|"
+                          r"solve|code)\b|\b(?:have to|has to|need to|needs to|want you to|like you to|let's|lets|"
+                          r"please|now|can you|could you)\s+(?:find|write|print|count|remove|reverse|sort(?! out)|check|"
+                          r"return|merge|implement|convert|solve|code|program)\b")
 TECH_HINTS = ("python", "java", "javascript", "react", "sql", "database", "api", "rest", "http", "docker",
               "kubernetes", "aws", "cloud", "cache", "thread", "async", "memory", "index", "query", "framework",
               "microservice", "test", "git", "linux", "network", "security", "oauth", "jwt", "kafka", "redis",
@@ -124,12 +151,28 @@ def _starts(t: str, prefixes) -> bool:
 
 
 def _qtype(t: str) -> str:
+    padded = f" {t} "
     for name, words in TYPES:
-        if any(w in t for w in words):
+        if any(w in padded for w in words):
             return name
     if any(h in t for h in TECH_HINTS):
         return "technical"
     return "general"
+
+
+_OPEN_ENDS = (" and", " or", " the", " a", " an", " of", " to", " with", " your", " for", " in", " on", " how",
+              " that", " which", " about")
+
+
+def unfinished(text: str) -> bool:
+    """A piece of speech that probably goes on after a pause ("Write a program.", "How would you design
+    the"): short or ending on a joining word, no question mark, not small talk."""
+    raw = (text or "").strip()
+    t = normalize(raw)
+    low = raw.lower()
+    if not t or raw.endswith("?") or any(p in t or p in low for p in SMALL_TALK):
+        return False
+    return len(t.split()) < 8 or t.endswith(_OPEN_ENDS)
 
 
 def classify(text: str, *, since_last_card_s: float | None = None) -> GateResult:
@@ -146,7 +189,8 @@ def classify(text: str, *, since_last_card_s: float | None = None) -> GateResult
     is_followup = recent and len(words) <= 12 and (_starts(t, FOLLOWUP) or t.rstrip("?") in FOLLOWUP)
     cue = (asks > 0 or _starts(t, WH) or _starts(t, AUX) or any(t.startswith(p) or f" {p}" in f" {t}"
                                                                 for p in IMPERATIVE)
-           or any(w.strip("?,.") in HINGLISH for w in words))
+           or any(w.strip("?,.") in HINGLISH for w in words)
+           or (_CODING_TASK.search(t) is not None and _qtype(t) == "coding"))
     if not cue and not is_followup:
         addressed = len(words) >= 6 and any(w in ("you", "your", "you've", "you're", "yourself") for w in words)
         return GateResult("unsure" if addressed else "no", raw)

@@ -14,16 +14,16 @@
 {"text": "Suppose your estimate turns out to be wrong by a week", "question": true, "type": "situational"}
 {"text": "Let's say a customer reports data loss, what's your first step?", "question": true, "type": "situational"}
 {"text": "What is the difference between a process and a thread?", "question": true, "type": "technical"}
-{"text": "Explain how indexes work in a relational database.", "question": true, "type": "technical"}
+{"text": "Explain how indexes work in a relational database.", "question": true, "type": "backend"}
 {"text": "How does garbage collection work in Java?", "question": true, "type": "technical"}
 {"text": "What are the SOLID principles?", "question": true, "type": "technical"}
-{"text": "Can you explain REST versus GraphQL", "question": true, "type": "technical"}
-{"text": "Why would you choose Postgres over MongoDB here?", "question": true, "type": "technical"}
-{"text": "What happens when you type a URL into the browser?", "question": true, "type": "technical"}
-{"text": "How do you secure an API with JWT tokens?", "question": true, "type": "technical"}
-{"text": "Do you have experience with Kubernetes?", "question": true, "type": "technical"}
+{"text": "Can you explain REST versus GraphQL", "question": true, "type": "backend"}
+{"text": "Why would you choose Postgres over MongoDB here?", "question": true, "type": "backend"}
+{"text": "What happens when you type a URL into the browser?", "question": true, "type": "frontend"}
+{"text": "How do you secure an API with JWT tokens?", "question": true, "type": "backend"}
+{"text": "Do you have experience with Kubernetes?", "question": true, "type": "devops"}
 {"text": "Which testing frameworks have you used?", "question": true, "type": "technical"}
-{"text": "Explain the event loop in JavaScript.", "question": true, "type": "technical"}
+{"text": "Explain the event loop in JavaScript.", "question": true, "type": "frontend"}
 {"text": "Write a function that reverses a linked list.", "question": true, "type": "coding"}
 {"text": "Can you implement a function to find duplicates in an array?", "question": true, "type": "coding"}
 {"text": "What's the time complexity of your solution?", "question": true, "type": "coding"}
@@ -45,10 +45,10 @@
 {"text": "Why are you leaving your current job?", "question": true, "type": "hr"}
 {"text": "Do you have any questions for us?", "question": true, "type": "hr"}
 {"text": "Are you comfortable with working from office three days a week?", "question": true, "type": "hr"}
-{"text": "I'd like to hear about your experience with Kafka.", "question": true, "type": "technical"}
+{"text": "I'd like to hear about your experience with Kafka.", "question": true, "type": "backend"}
 {"text": "I'm curious how you approached testing on that project", "question": true, "type": "technical"}
-{"text": "Help me understand why you picked microservices.", "question": true, "type": "technical"}
-{"text": "Compare SQL and NoSQL databases for this use case.", "question": true, "type": "technical"}
+{"text": "Help me understand why you picked microservices.", "question": true, "type": "backend"}
+{"text": "Compare SQL and NoSQL databases for this use case.", "question": true, "type": "backend"}
 {"text": "Talk me through how you debugged that memory leak.", "question": true, "type": "technical"}
 {"text": "Okay, and how did you measure the improvement?", "question": true, "type": "general"}
 {"text": "What was your exact role in that migration?", "question": true, "type": "general"}
@@ -61,7 +61,7 @@
 {"text": "Apne baare mein thoda batao.", "question": true, "type": "general"}
 {"text": "Aapka notice period kitna hai?", "question": true, "type": "hr"}
 {"text": "Is project mein aapka role kya tha?", "question": true, "type": "general"}
-{"text": "React mein hooks kaise kaam karte hain?", "question": true, "type": "technical"}
+{"text": "React mein hooks kaise kaam karte hain?", "question": true, "type": "frontend"}
 {"text": "Aap yeh job kyun change karna chahte ho?", "question": true, "type": "general"}
 {"text": "Expected CTC kitna hai aapka?", "question": true, "type": "hr"}
 {"text": "Why?", "question": true, "recent": true, "followup": true}
@@ -125,3 +125,20 @@
 {"text": "That's fine.", "question": false}
 {"text": "Okay, I'll note that down.", "question": false}
 {"text": "Why?", "question": false, "note": "a lone why with no card to follow"}
+{"text": "Right there we have to find duplicate element in the list.", "question": true, "type": "coding"}
+{"text": "Now reverse the string.", "question": true, "type": "coding"}
+{"text": "We need to find the second largest element in the array.", "question": true, "type": "coding"}
+{"text": "Please check if a string is a palindrome.", "question": true, "type": "coding"}
+{"text": "We have to sort out the schedule first.", "question": false}
+{"text": "I find your background interesting.", "question": false}
+{"text": "We need to check the agenda for tomorrow.", "question": false}
+{"text": "How does a Kubernetes rolling update work, and how do you roll back?", "question": true, "type": "devops"}
+{"text": "Explain how you would set up a CI CD pipeline with Jenkins and Docker.", "question": true, "type": "devops"}
+{"text": "What is the difference between a Docker image and a container?", "question": true, "type": "devops"}
+{"text": "How do you manage infrastructure with Terraform?", "question": true, "type": "devops"}
+{"text": "What is the difference between useEffect and useLayoutEffect in React?", "question": true, "type": "frontend"}
+{"text": "How do you make a web page responsive with CSS flexbox?", "question": true, "type": "frontend"}
+{"text": "Explain closures in JavaScript.", "question": true, "type": "frontend"}
+{"text": "How do you handle database connection pooling in a Node.js server?", "question": true, "type": "backend"}
+{"text": "How would you make a slow REST API endpoint faster?", "question": true, "type": "backend"}
+{"text": "What is idempotency and why does it matter for payment APIs?", "question": true, "type": "backend"}

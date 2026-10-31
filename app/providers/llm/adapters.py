@@ -54,9 +54,13 @@ def gemini_thinking(spec: ModelSpec) -> dict | None:
 
 
 def groq_reasoning(spec: ModelSpec) -> dict:
-    """GPT-OSS on Groq reasons before it answers; fast tasks ask for the least."""
-    if spec.fast and "gpt-oss" in spec.model_id.lower():
-        return {"reasoning_effort": "low", "include_reasoning": False}
+    """GPT-OSS and Qwen on Groq reason before they answer; fast tasks ask for the least. Qwen's thoughts are
+    otherwise mixed into the reply as <think> text, so they are always hidden."""
+    model = spec.model_id.lower()
+    if "gpt-oss" in model:
+        return {"reasoning_effort": "low", "include_reasoning": False} if spec.fast else {}
+    if "qwen" in model:
+        return {"reasoning_effort": "none"} if spec.fast else {"reasoning_format": "hidden"}
     return {}
 
 

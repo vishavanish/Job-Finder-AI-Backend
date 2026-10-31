@@ -30,6 +30,9 @@ def _raise_for(resp: httpx.Response) -> None:
         raise SpeechError(f"HTTP {resp.status_code} from speech endpoint", retryable=retryable)
 
 
+# Whisper reads at most 224 prompt tokens (it keeps the last ones); a little over 4 characters each here.
+STT_PROMPT_MAX_CHARS = 1100
+
 class OpenAICompatibleSTT:
     """POST {base_url}/audio/transcriptions with the utterance as a WAV file."""
 
@@ -39,10 +42,14 @@ class OpenAICompatibleSTT:
         self.api_key = api_key
         self.timeout = timeout
 
-    async def transcribe(self, pcm: bytes, *, language: str | None = None) -> Transcript:
+    async def transcribe(self, pcm: bytes, *, language: str | None = None,
+                         prompt: str | None = None) -> Transcript:
+        """`prompt`: Whisper's vocabulary/context hint (what kind of speech to expect)."""
         data = {"model": self.model_id, "response_format": "json", "temperature": "0"}
         if language:
             data["language"] = language.split("-")[0]
+        if prompt:
+            data["prompt"] = prompt[:STT_PROMPT_MAX_CHARS]
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         try:
             async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
