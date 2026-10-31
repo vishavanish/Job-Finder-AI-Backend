@@ -45,6 +45,7 @@ ENV_FALLBACK = {
     "serpapi": "SERPAPI_API_KEY",
     "jsearch": "JSEARCH_API_KEY",
     "themuse": "THEMUSE_API_KEY",
+    "findwork": "FINDWORK_API_KEY",
 }
 
 MIN_KEY_LENGTH = 8

@@ -22,8 +22,8 @@ COMPANY_ATS_SOURCES = {
     "oracle cloud",
 }
 AGGREGATOR_SOURCES = {
-    "adzuna", "jooble", "careerjet",
-    "remoteok", "remotive", "himalayas", "jobicy", "arbeitnow", "the muse", "we work remotely",
+    "adzuna", "jooble", "careerjet", "findwork",
+    "remoteok", "remotive", "himalayas", "jobicy", "arbeitnow", "the muse", "we work remotely", "working nomads",
 }
 # Sources whose API returns a snippet, not the full job description.
 PARTIAL_DESCRIPTION_SOURCES = {"adzuna", "jooble", "careerjet"}

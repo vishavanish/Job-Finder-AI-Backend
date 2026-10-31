@@ -1,6 +1,6 @@
 # QA7 — More job sources
 
-Status 2026-10-31: decisions 7 (Keka + Zoho Recruit) and 8 (Oracle Cloud) approved and built (CLAUDE.md §6.21); decisions 1–6 waiting for the owner.
+Status 2026-10-31: decisions 1, 2, 4, 7 and 8 approved and built (CLAUDE.md §6.21); Workline (2 of ~1,000 Indian apply links, no company-wide list), RippleHire (1 link, token-only list) and HireWand (0) tested and not worth building now; decisions 3, 5, 6 stay as recommended (skip).
 
 Owner asked 2026-10-31: is Glassdoor used, and which similar sources are missing? Groups A–C below were
 live-tested from the owner's PC on 2026-10-31 (python-jobspy as installed, plain HTTPS clients).

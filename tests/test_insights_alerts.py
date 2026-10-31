@@ -196,7 +196,8 @@ def test_hn_thread_is_found_and_parsed(http):
     routes["search_by_date"] = json.loads((FIXTURES / "hn_search.json").read_text(encoding="utf-8"))
     routes["/items/"] = json.loads((FIXTURES / "hn_item.json").read_text(encoding="utf-8"))
     jobs = feeds.fetch_hn_hiring()
-    assert "/items/49922569" in calls[-1]["url"]  # the "Who is hiring?" thread, not "Who wants to be hired?"
+    # the "Who is hiring?" thread, not "Who wants to be hired?" (the YC job-post search comes after it)
+    assert any("/items/49922569" in c["url"] for c in calls)
     assert len(jobs) >= 6
     by_company = {j["company"]: j for j in jobs}
     sidekick = by_company["Sidekick Labs"]

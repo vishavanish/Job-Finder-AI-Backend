@@ -97,7 +97,27 @@ def search_careerjet(q: SourceQuery, api_key: str) -> list[dict]:
     return [j for j in jobs if is_recent(j["posted"], q.max_age_hours)]
 
 
+def search_findwork(q: SourceQuery, api_key: str) -> list[dict]:
+    """Findwork.dev (QA7): tech jobs aggregated from many boards, free key (header `Authorization: Token …`).
+    Mostly US/EU/remote; full descriptions; `location` and `remote=true` narrow it."""
+    what, where = _what_where(q)
+    params = {"search": what, "sort_by": "date"}
+    if location_is_remote(q.location):
+        params["remote"] = "true"
+    elif where:
+        params["location"] = where
+    data = get_json("https://findwork.dev/api/jobs/", source="Findwork", params=params,
+                    headers={"Authorization": f"Token {api_key}"})
+    jobs = [make_job(
+        source="Findwork", title=item.get("role"), company=item.get("company_name"),
+        location=item.get("location") or ("Remote" if item.get("remote") else ""), url=item.get("url"),
+        description=item.get("text"), posted=iso(item.get("date_posted")),
+    ) for item in (data.get("results") or [])[: q.results_wanted]]
+    return [j for j in jobs if is_recent(j["posted"], q.max_age_hours)]
+
+
 KEYWORD_APIS = {
+    "findwork": search_findwork,
     "adzuna": search_adzuna,
     "jooble": search_jooble,
     "careerjet": search_careerjet,

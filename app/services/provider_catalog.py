@@ -130,7 +130,8 @@ def availability(db: Session, user: User, row: ProviderCatalog, *, choices: dict
 
 
 _SCOPE_LABELS = {"apify": "Apify", "adzuna": "Adzuna", "jooble": "Jooble", "careerjet": "Careerjet",
-                 "serpapi": "SerpApi", "jsearch": "JSearch", "brightdata": "Bright Data", "themuse": "The Muse"}
+                 "serpapi": "SerpApi", "jsearch": "JSearch", "brightdata": "Bright Data", "themuse": "The Muse",
+                 "findwork": "Findwork"}
 
 # Sources a normal search never runs on its own (QA1 §6), with what users see instead of "will run".
 NOT_IN_SEARCH = {

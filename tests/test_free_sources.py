@@ -252,7 +252,7 @@ def test_default_sources_are_every_free_source_that_can_run(client, make_user, d
 
     resp, params = _search(client, headers, dispatched, locations=["Remote"])
     assert params["sources"] == ["linkedin", "indeed", "remoteok", "remotive", "himalayas", "jobicy", "wwr",
-                                 "hn_hiring", "company_ats"]
+                                 "working_nomads", "hn_hiring", "company_ats"]
 
 
 def test_remote_work_mode_in_preferences_turns_feeds_on(client, make_user, dispatched):

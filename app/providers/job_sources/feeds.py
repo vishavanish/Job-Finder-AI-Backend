@@ -149,6 +149,22 @@ def fetch_wwr() -> list[dict]:
     return jobs
 
 
+def fetch_working_nomads() -> list[dict]:
+    """Working Nomads' public export (QA7, 2026-10-31): ~40 recent remote jobs with full descriptions.
+    `location` is the region the job is open to ("Europe, LATAM, APAC, the U.S., Canada")."""
+    data = get_json("https://www.workingnomads.com/api/exposed_jobs/", source="Working Nomads")
+    jobs = []
+    for item in data if isinstance(data, list) else []:
+        region = (item.get("location") or "").strip()
+        anywhere = not region or region.lower() in ("anywhere", "worldwide", "remote")
+        jobs.append(_with_meta(make_job(
+            source="Working Nomads", title=item.get("title"), company=item.get("company_name"),
+            location=f"Remote ({region})" if region and not anywhere else "Remote", url=item.get("url"),
+            description=item.get("description"), posted=iso(item.get("pub_date")),
+        ), geo="" if anywhere else region, tags=[item.get("category_name") or "", item.get("tags") or ""]))
+    return jobs
+
+
 FEEDS = {
     "remoteok": fetch_remoteok,
     "remotive": fetch_remotive,
@@ -157,6 +173,7 @@ FEEDS = {
     "arbeitnow": fetch_arbeitnow,
     "themuse": fetch_themuse,
     "wwr": fetch_wwr,
+    "working_nomads": fetch_working_nomads,
 }
 
 
@@ -205,15 +222,65 @@ def _hn_parse(comment: dict) -> dict | None:
     }
 
 
-def fetch_hn_hiring() -> list[dict]:
+# HN job posts (QA7): the YC companies' own "X (YC S23) Is Hiring a Founding Engineer" stories, one Algolia
+# call. The link is the company's careers page (often Ashby / Greenhouse / Lever / workatastartup), so a
+# search that shows one also feeds that company into the career-pages registry (ats_registry.harvest).
+_HN_JOB_TITLE = re.compile(r"^(?P<company>.+?)\s*\((?:YC\s*)?[A-Z]{1,2}\d{2}\)\s+is\s+hiring\b[\s:,-]*(?P<rest>.*)$",
+                           re.IGNORECASE)
+_HN_JOB_IN = re.compile(r"^(?P<role>.*?)\s+(?:in|at|from)\s+(?P<place>[A-Z][^()]{1,60})$")
+
+
+def _hn_job_post(hit: dict) -> dict | None:
+    m = _HN_JOB_TITLE.match((hit.get("title") or "").strip())
+    url = hit.get("url") or ""
+    if not m or not url.startswith(("https://", "http://")):
+        return None
+    company, rest = m.group("company").strip(), m.group("rest").strip().rstrip(".")
+    place = ""
+    if rest.lower().startswith("in "):
+        role, place = "", rest[3:]
+    else:
+        where = _HN_JOB_IN.match(rest)
+        role, place = (where.group("role"), where.group("place")) if where else (rest, "")
+    role = re.sub(r"^(?:an?|the|our|multiple|several)\s+", "", role, flags=re.IGNORECASE).strip()
+    title = role[:1].upper() + role[1:] if role else "Open roles"
+    remote = "remote" in (rest or "").lower()
+    location = "Remote" if remote and not place else place
+    return {
+        **make_job(source="HN Who is hiring", title=title[:200], company=company[:200], location=location,
+                   url=url, description=hit.get("title") or "", posted=iso(hit.get("created_at"))),
+        "_geo": "" if remote and not place else (f"{place} only" if place else "unknown only"), "_tags": "YC",
+    }
+
+
+def fetch_hn_job_posts() -> list[dict]:
     found = get_json("https://hn.algolia.com/api/v1/search_by_date", source="HN Who is hiring",
-                     params={"tags": "story,author_whoishiring", "query": "who is hiring", "hitsPerPage": 5})
-    thread = next((h for h in found.get("hits") or []
-                   if str(h.get("title", "")).lower().startswith("ask hn: who is hiring")), None)
-    if thread is None or not str(thread.get("objectID", "")).isdigit():
-        raise SourceError("HN Who is hiring: this month's thread was not found")
-    item = get_json(f"https://hn.algolia.com/api/v1/items/{thread['objectID']}", source="HN Who is hiring")
-    jobs = [job for job in (_hn_parse(c) for c in item.get("children") or [] if c.get("text")) if job]
+                     params={"tags": "job", "hitsPerPage": 60})
+    return [job for job in (_hn_job_post(h) for h in found.get("hits") or []) if job]
+
+
+def fetch_hn_hiring() -> list[dict]:
+    """This month's "Who is hiring?" thread + the YC job posts. Either half may fail on its own."""
+    jobs: list[dict] = []
+    error: SourceError | None = None
+    try:
+        found = get_json("https://hn.algolia.com/api/v1/search_by_date", source="HN Who is hiring",
+                         params={"tags": "story,author_whoishiring", "query": "who is hiring", "hitsPerPage": 5})
+        thread = next((h for h in found.get("hits") or []
+                       if str(h.get("title", "")).lower().startswith("ask hn: who is hiring")), None)
+        if thread is None or not str(thread.get("objectID", "")).isdigit():
+            raise SourceError("HN Who is hiring: this month's thread was not found")
+        item = get_json(f"https://hn.algolia.com/api/v1/items/{thread['objectID']}", source="HN Who is hiring")
+        jobs = [job for job in (_hn_parse(c) for c in item.get("children") or [] if c.get("text")) if job]
+    except SourceError as e:
+        error = e
+    try:
+        jobs += fetch_hn_job_posts()
+    except SourceError:
+        if error is not None:
+            raise error from None
+    if not jobs and error is not None:
+        raise error
     return jobs
 
 

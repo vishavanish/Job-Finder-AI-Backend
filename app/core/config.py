@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     BRIGHTDATA_API_KEY: str = ""  # "API_KEY:ZONE"
     SERPAPI_API_KEY: str = ""
     JSEARCH_API_KEY: str = ""
+    FINDWORK_API_KEY: str = ""
     THEMUSE_API_KEY: str = ""     # platform key for The Muse feed (shared cache)
 
     # ---- job sources (CLAUDE.md 7.4) ----
