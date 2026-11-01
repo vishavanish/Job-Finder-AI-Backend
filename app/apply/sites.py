@@ -20,6 +20,21 @@ GENERIC_HOSTS = {
 # platforms is still a generic form.
 GENERIC_SOURCES = {name.lower() for name in GENERIC_HOSTS.values()}
 
+# A direct apply link on any other host is the company's own career page, and the AI form reader tries it
+# (it stops on a sign-in page anyway) — except job boards, which need the user's own account there, and
+# career suites known to ask for an account before the form.
+JOB_BOARD_SITES = {
+    "indeed.com", "linkedin.com", "naukri.com", "glassdoor.com", "glassdoor.co.in", "foundit.in",
+    "monster.com", "monsterindia.com", "shine.com", "timesjobs.com", "instahyre.com", "cutshort.io",
+    "wellfound.com", "angel.co", "ziprecruiter.com", "simplyhired.com", "iimjobs.com", "hirist.com",
+    "hirist.tech", "apna.co", "internshala.com", "google.com", "bayt.com", "dice.com", "careerbuilder.com",
+}
+ACCOUNT_SITES = {
+    "myworkdayjobs.com", "myworkdaysite.com", "workday.com", "icims.com", "taleo.net", "brassring.com",
+    "successfactors.com", "successfactors.eu", "oraclecloud.com", "ultipro.com", "ukg.com", "adp.com",
+    "darwinbox.in", "peoplestrong.com", "phenompeople.com", "avature.net",
+}
+
 
 def host_of(url: str) -> str:
     try:
@@ -39,3 +54,17 @@ def site_of(host: str) -> str:
 def generic_host(url: str) -> bool:
     host = host_of(url)
     return any(host == d or host.endswith("." + d) for d in GENERIC_HOSTS)
+
+
+def _on(host: str, sites: set[str]) -> bool:
+    return any(host == d or host.endswith("." + d) for d in sites)
+
+
+def career_page(url: str) -> bool:
+    """A public https/http page that is not a job board or an account-only career suite."""
+    if not (url or "").startswith(("http://", "https://")):
+        return False
+    host = host_of(url)
+    if not host or "." not in host or host.replace(".", "").isdigit() or host == "localhost":
+        return False
+    return not _on(host, JOB_BOARD_SITES) and not _on(host, ACCOUNT_SITES)
