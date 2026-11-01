@@ -308,7 +308,7 @@ def _score_batch_llm(jobs: list[dict], *, db, score_params: dict, request_keys: 
 def _triage_job(db, run_id: str, job: dict, *, score_params: dict) -> tuple[str, dict | None]:
     """One scraped copy through dedupe -> filters -> seen check -> prefilter
     (CLAUDE.md 7.5). Returns (outcome, context): "duplicates" | "blocked" |
-    "seen" | "filtered" with no context, "reuse" (an earlier score applies)
+    "seen" | "low_score" | "handled" | "filtered" with no context, "reuse" (an earlier score applies)
     or "score" (needs the AI) with what the next steps need."""
     user_id = score_params.get("user_id")
     key = job_key(job)
@@ -326,9 +326,11 @@ def _triage_job(db, run_id: str, job: dict, *, score_params: dict) -> tuple[str,
 
     phash = score_params.get("profile_hash")
     uj = job_store.get_user_job(db, user_id, canonical.id) if user_id else None
-    decision = job_store.decide(uj, include_seen=bool(score_params.get("include_seen")), profile_hash=phash)
+    decision = job_store.decide(uj, include_seen=bool(score_params.get("include_seen")), profile_hash=phash,
+                                min_score=score_params.get("llm_min_score_to_keep", 70))
     if decision == "skip":
-        return "seen", None
+        # Skipped for different reasons, and "Show seen jobs" brings back only the plain "seen" ones.
+        return {"filtered": "low_score", "hidden": "handled", "applied": "handled"}.get(uj.state, "seen"), None
     ctx = {"key": key, "canonical": canonical, "best": best}
 
     if decision == "reuse":
@@ -406,7 +408,8 @@ def _process_jobs(db, run_id: str, jobs: list[dict], *, score_params: dict, requ
     batches of SCORE_BATCH_SIZE (QA2 §1). With `show_early` (searches from
     Jobs) those are in the feed while they are scored. Returns (counts by
     outcome, job keys kept)."""
-    counts = {"duplicates": 0, "blocked": 0, "seen": 0, "filtered": 0, "unscored": 0, "kept": 0}
+    counts = {"duplicates": 0, "blocked": 0, "seen": 0, "low_score": 0, "handled": 0, "filtered": 0, "unscored": 0,
+              "kept": 0}
     kept: list[str] = []
     pending: list[dict] = []
     for job in jobs:
@@ -547,6 +550,10 @@ def search_and_score_keyword(
             progress_cb(f"'{keyword}': skipped {counts['duplicates']} job(s) already handled in this run")
         if counts["seen"]:
             progress_cb(f"'{keyword}': skipped {counts['seen']} job(s) you have already seen")
+        if counts["low_score"]:
+            progress_cb(f"'{keyword}': skipped {counts['low_score']} job(s) that scored too low in an earlier search")
+        if counts["handled"]:
+            progress_cb(f"'{keyword}': skipped {counts['handled']} job(s) you hid or applied to")
         if counts["blocked"]:
             progress_cb(f"'{keyword}': dropped {counts['blocked']} job(s) by your must-have/exclude/avoid rules")
         if counts["filtered"]:
@@ -554,6 +561,7 @@ def search_and_score_keyword(
         if counts["unscored"]:
             progress_cb(f"'{keyword}': {counts['unscored']} job(s) not scored — every AI model failed; "
                         "they will be retried next run")
+        pipeline_progress.add_counts(run_id=run_id, counts={"raw": len(raw_jobs), **counts})
         pipeline_progress.increment_keyword_completed(run_id=run_id)
         return {"keyword": keyword, "raw_found": len(raw_jobs), **counts}
 

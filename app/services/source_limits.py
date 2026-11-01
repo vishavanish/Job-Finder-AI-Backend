@@ -74,6 +74,12 @@ def cached_feed(key: str, fetch: Callable[[], list[dict]], *, wait_seconds: floa
     raise FeedUnavailable(f"{key}: another search is still downloading it")
 
 
+def _quota_keys(source_key: str, user_id: str | None, own: bool) -> list[str]:
+    day = datetime.now(timezone.utc).strftime("%Y%m%d")
+    keys = [f"srcquota:{source_key}:{user_id or 'anon'}:{day}"]
+    return keys if own else keys + [f"srcquota:{source_key}:platform:{day}"]
+
+
 def _bump(key: str) -> int:
     r = get_redis()
     n = r.incr(key)
@@ -86,11 +92,19 @@ def take_quota(source_key: str, user_id: str | None, key_source: str) -> bool:
     """Counts one call; False when this user (or the shared platform key)
     is over today's cap. `key_source` is key_store.ResolvedKey.source."""
     settings = get_settings()
-    day = datetime.now(timezone.utc).strftime("%Y%m%d")
     own = key_source == "byok"
     cap = settings.SOURCE_DAILY_CAP_OWN_KEY if own else settings.SOURCE_DAILY_CAP_PLATFORM_KEY
-    if _bump(f"srcquota:{source_key}:{user_id or 'anon'}:{day}") > cap:
+    keys = _quota_keys(source_key, user_id, own)
+    if _bump(keys[0]) > cap:
         return False
-    if not own and _bump(f"srcquota:{source_key}:platform:{day}") > settings.SOURCE_DAILY_CAP_PLATFORM_TOTAL:
+    if not own and _bump(keys[1]) > settings.SOURCE_DAILY_CAP_PLATFORM_TOTAL:
         return False
     return True
+
+
+def refund_quota(source_key: str, user_id: str | None, key_source: str) -> None:
+    """Gives a call back when it failed: a bad key or a refused request brought no jobs, so it must not use up
+    the day's searches. Repeated failures are limited by the source breaker instead."""
+    r = get_redis()
+    for key in _quota_keys(source_key, user_id, key_source == "byok"):
+        r.decr(key)

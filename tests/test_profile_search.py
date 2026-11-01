@@ -136,6 +136,10 @@ def test_seen_job_is_not_shown_or_scored_again(fake_pipeline, make_user):
     second = _run(fake_pipeline, {"a": [job]}, _params(user_id))
     assert _feed(second) == []
     assert len(fake_pipeline["llm_calls"]) == 1
+    # The run says why it shows nothing, so the app doesn't have to guess.
+    counts = pipeline_progress.get_run_meta(run_id=second)["counts"]
+    assert counts["raw"] == 1 and counts["seen"] == 1 and counts["kept"] == 0
+    assert pipeline_progress.get_run_meta(run_id=first)["counts"]["kept"] == 1
 
     again = _run(fake_pipeline, {"a": [job]}, _params(user_id, include_seen=True))
     feed = _feed(again)
@@ -148,7 +152,34 @@ def test_hidden_job_never_comes_back(fake_pipeline, make_user, client):
     job = {**LINKEDIN, "company": "Hidden Co", "url": "https://linkedin.example/hidden"}
     job_id = _feed(_run(fake_pipeline, {"a": [job]}, _params(user_id)))[0]["id"]
     assert client.post(f"{API}/jobs/{job_id}/hide", headers=headers).json()["state"] == "hidden"
-    assert _feed(_run(fake_pipeline, {"a": [job]}, _params(user_id, include_seen=True))) == []
+    again = _run(fake_pipeline, {"a": [job]}, _params(user_id, include_seen=True))
+    assert _feed(again) == []
+    counts = pipeline_progress.get_run_meta(run_id=again)["counts"]
+    assert counts["handled"] == 1 and counts["seen"] == 0
+
+
+def test_lowering_the_minimum_score_brings_back_earlier_low_scorers(fake_pipeline, make_user):
+    user_id, _ = make_user()
+    job = {**LINKEDIN, "company": "Low Co", "url": "https://linkedin.example/low"}
+    _run(fake_pipeline, {"a": [job]}, _params(user_id))
+    calls = len(fake_pipeline["llm_calls"])
+    db = SessionLocal()
+    try:  # as if it had scored 60 against a minimum of 70
+        row = db.query(UserJob).filter_by(user_id=user_id).one()
+        row.state, row.llm_score = "filtered", 60
+        db.commit()
+    finally:
+        db.close()
+
+    same = _run(fake_pipeline, {"a": [job]}, _params(user_id, include_seen=True, llm_min_score_to_keep=70))
+    assert _feed(same) == []  # "show seen" doesn't bring it back: it isn't a seen job
+    counts = pipeline_progress.get_run_meta(run_id=same)["counts"]
+    assert counts["low_score"] == 1 and counts["seen"] == 0
+
+    lower = _run(fake_pipeline, {"a": [job]}, _params(user_id, llm_min_score_to_keep=50))
+    feed = _feed(lower)
+    assert len(feed) == 1 and feed[0]["llm_score"] == 60
+    assert len(fake_pipeline["llm_calls"]) == calls  # its stored score, no new AI call
 
 
 def test_filtered_job_is_rescored_only_when_the_profile_changes(fake_pipeline, make_user):

@@ -290,6 +290,8 @@ def get_jobs(*, run_id: str, offset: int = 0) -> list[dict]:
 
 
 _TIMING = "t:"  # meta hash fields holding seconds spent per stage
+_COUNT = "c:"   # meta hash fields counting what happened to the jobs a run found
+COUNTED = ("raw", "seen", "low_score", "handled", "filtered", "blocked", "unscored", "kept")
 
 
 def add_timings(*, run_id: str, timings: dict[str, float]) -> None:
@@ -299,6 +301,14 @@ def add_timings(*, run_id: str, timings: dict[str, float]) -> None:
     for label, seconds in timings.items():
         if seconds:
             r.hincrbyfloat(_meta_key(run_id), f"{_TIMING}{label}", round(float(seconds), 1))
+
+
+def add_counts(*, run_id: str, counts: dict[str, int]) -> None:
+    """Adds one keyword task's outcomes to the run, so a search that shows nothing can say why."""
+    r = _redis()
+    for name in COUNTED:
+        if counts.get(name):
+            r.hincrby(_meta_key(run_id), f"{_COUNT}{name}", int(counts[name]))
 
 
 def current_jobs(*, run_id: str) -> list[dict]:
@@ -353,4 +363,6 @@ def get_run_meta(*, run_id: str) -> dict | None:
         "error": meta.get("error") or None,
         # Seconds per stage, summed over keyword tasks (they run in parallel, so the sum can exceed wall time).
         "timings": {k[len(_TIMING):]: round(float(v), 1) for k, v in meta.items() if k.startswith(_TIMING)},
+        # What happened to the jobs found, summed over keyword tasks ("raw" counts every copy of a job).
+        "counts": {name: int(meta.get(f"{_COUNT}{name}", 0)) for name in COUNTED},
     }
