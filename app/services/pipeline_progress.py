@@ -303,6 +303,23 @@ def add_timings(*, run_id: str, timings: dict[str, float]) -> None:
             r.hincrbyfloat(_meta_key(run_id), f"{_TIMING}{label}", round(float(seconds), 1))
 
 
+def _titles_key(run_id: str) -> str:
+    return f"pipeline:{run_id}:titles_waiting"
+
+
+def hold_titles(*, run_id: str, titles: list[str]) -> None:
+    """Titles of a search that wait for one of its running titles to finish (QA8), so one user's search can't
+    fill the whole queue."""
+    if titles:
+        r = _redis()
+        r.rpush(_titles_key(run_id), *titles)
+        r.expire(_titles_key(run_id), RUN_TTL_SECONDS)
+
+
+def next_title(*, run_id: str) -> str | None:
+    return _redis().lpop(_titles_key(run_id))
+
+
 def add_counts(*, run_id: str, counts: dict[str, int]) -> None:
     """Adds one keyword task's outcomes to the run, so a search that shows nothing can say why."""
     r = _redis()

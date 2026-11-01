@@ -34,7 +34,7 @@ from app.core.celery_app import celery_app
 from app.core.config import get_settings
 from app.services import browser_apply, company_ats_sources, job_sources, scorer
 # --- add near the top, alongside existing imports ---
-from celery import group, chord
+from celery import chord
 from app.services import job_store, pipeline_progress, search_profiles, secret_refs
 from app.services.job_dedupe import job_key, normalize_company
 from app.core.db import SessionLocal
@@ -207,7 +207,8 @@ def _queue_ats_resolver(sources: list[str], jobs: list[dict]) -> None:
 
 
 def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str], sources: list[str],
-            manual_naukri_jobs: list, progress, timings: dict[str, float] | None = None) -> list[dict]:
+            manual_naukri_jobs: list, progress, timings: dict[str, float] | None = None,
+            on_place=None) -> list[dict]:
     """job_sources.scrape_all with the params a route built, plus source
     health: sources that answered are marked healthy, failures counted
     (enough in a row pauses the source — provider_catalog.paused_until).
@@ -225,6 +226,11 @@ def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str
             healthy.add(key)
         else:
             failed[key] = error
+
+    def place_done(rows: list[dict]) -> None:
+        _harvest_ats(db, rows)
+        _queue_ats_resolver(sources, rows)
+        on_place(rows)
 
     jobs = job_sources.scrape_all(
         keywords=keywords,
@@ -253,6 +259,7 @@ def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str
         on_source_result=on_source_result,
         progress=progress,
         timings=timings,
+        **({"on_place": place_done} if on_place else {}),
     )
     try:
         provider_catalog.mark_success(db, healthy)
@@ -402,14 +409,16 @@ def _finish_scored(db, run_id: str, ctx: dict, scored: dict, score_params: dict,
     return "kept"
 
 
+_OUTCOMES = ("duplicates", "blocked", "seen", "low_score", "handled", "filtered", "unscored", "kept")
+
+
 def _process_jobs(db, run_id: str, jobs: list[dict], *, score_params: dict, request_keys: dict[str, str],
                   show_early: bool, progress=lambda m: None) -> tuple[dict, list[str]]:
     """Every scraped copy through triage, then the ones that need the AI in
     batches of SCORE_BATCH_SIZE (QA2 §1). With `show_early` (searches from
     Jobs) those are in the feed while they are scored. Returns (counts by
     outcome, job keys kept)."""
-    counts = {"duplicates": 0, "blocked": 0, "seen": 0, "low_score": 0, "handled": 0, "filtered": 0, "unscored": 0,
-              "kept": 0}
+    counts = dict.fromkeys(_OUTCOMES, 0)
     kept: list[str] = []
     pending: list[dict] = []
     for job in jobs:
@@ -502,12 +511,16 @@ def search_and_score_keyword(
     all configured locations/sources, then scores each resulting job
     INDIVIDUALLY and writes it to PipelineRunJob the instant it's
     scored — this is what makes GET /pipeline/{run_id}/jobs show
-    results while other keywords are still running."""
+    results while other keywords are still running. Jobs are scored after
+    each place, so the first ones show before the other places are searched
+    (QA8). When it ends, the next title of this search gets its turn."""
     progress_cb = _make_progress_cb(self, "search_and_score_keyword")
     settings = get_settings()
+    next_params = (locations, sources, search_params, score_params)
 
     if pipeline_progress.is_cancelled(run_id):
         pipeline_progress.increment_keyword_completed(run_id=run_id)
+        _start_next_title(run_id, *next_params)
         return {"keyword": keyword, "skipped": "run cancelled"}
 
     db = SessionLocal()
@@ -518,28 +531,32 @@ def search_and_score_keyword(
                             "followed_companies": target_companies.followed_names(db, score_params["user_id"])}
         timings: dict[str, float] = {}
         topup = _start_ats_topup(db, keyword, sources, search_params, locations, progress_cb)
-        raw_jobs = _scrape(db, search_params, keywords=[keyword], locations=locations, sources=sources,
-                           # manual jobs are added once at the top level, not per keyword
-                           manual_naukri_jobs=[], progress=progress_cb, timings=timings)
-
         request_keys = _request_keys(score_params)
-        started = time.monotonic()
-        counts, kept_keys = _process_jobs(db, run_id, raw_jobs, score_params=score_params,
-                                          request_keys=request_keys, show_early=True, progress=progress_cb)
-        timings["Scoring"] = time.monotonic() - started
+        counts = dict.fromkeys(_OUTCOMES, 0)
+        kept_keys: list[str] = []
+        raw_jobs: list[dict] = []
+
+        def score_found(found: list[dict]) -> None:
+            nonlocal counts
+            raw_jobs.extend(found)
+            started = time.monotonic()
+            more, more_kept = _process_jobs(db, run_id, found, score_params=score_params,
+                                            request_keys=request_keys, show_early=True, progress=progress_cb)
+            timings["Scoring"] = timings.get("Scoring", 0.0) + time.monotonic() - started
+            counts = {k: counts[k] + more[k] for k in counts}
+            kept_keys.extend(more_kept)
+
+        # Manual jobs are added once at the top level, not per keyword.
+        rest = _scrape(db, search_params, keywords=[keyword], locations=locations, sources=sources,
+                       manual_naukri_jobs=[], progress=progress_cb, timings=timings, on_place=score_found)
+        score_found(rest)  # feeds, alert emails, saved jobs and the career-page index
         if topup is not None and not pipeline_progress.is_cancelled(run_id):
             # QA3 §C: jobs the live check added join the same run's feed.
             started = time.monotonic()
             extra = _finish_ats_topup(db, topup, keyword, raw_jobs, search_params, locations, progress_cb)
             timings["Company career pages (live)"] = time.monotonic() - started
             if extra:
-                started = time.monotonic()
-                more, more_kept = _process_jobs(db, run_id, extra, score_params=score_params,
-                                                request_keys=request_keys, show_early=True, progress=progress_cb)
-                timings["Scoring"] += time.monotonic() - started
-                counts = {k: counts[k] + more[k] for k in counts}
-                kept_keys += more_kept
-                raw_jobs = raw_jobs + extra
+                score_found(extra)
         pipeline_progress.add_timings(run_id=run_id, timings=timings)
         if counts["kept"]:
             progress_cb(f"'{keyword}': kept {counts['kept']} job(s)")
@@ -571,6 +588,22 @@ def search_and_score_keyword(
         return {"keyword": keyword, "error": str(e)}
     finally:
         db.close()
+        _start_next_title(run_id, *next_params)
+
+
+def _start_next_title(run_id: str, locations: list[str], sources: list[str], search_params: dict,
+                      score_params: dict) -> None:
+    """A title finished: this search's next waiting title goes to the back of the queue, behind other users'."""
+    title = None
+    try:
+        title = pipeline_progress.next_title(run_id=run_id)
+        if title:
+            search_and_score_keyword.apply_async(args=[run_id, title, locations, sources, search_params, score_params],
+                                                 queue=get_settings().default_queue)
+    except Exception:  # noqa: BLE001 — the title is lost, but the run must still be able to finish
+        logger.exception("could not start the next title of run %s", run_id)
+        if title:
+            pipeline_progress.increment_keyword_completed(run_id=run_id)
 
 
 @celery_app.task(name="job_finder.finalize_pipeline_run")
@@ -596,19 +629,22 @@ def dispatch_pipeline_group(run_id: str, search_params: dict, score_params: dict
     logs showed dispatch_pipeline_group succeeding but
     search_and_score_keyword never running.
 
-    Fix: dispatch a plain group (no callback), and let each keyword task
+    Fix: dispatch plain tasks (no callback), and let each keyword task
     mark its own completion via increment_keyword_completed(). The route
     layer (GET /pipeline/{run_id}) derives "is the run done" by comparing
-    keywords_completed to total_keywords — no chord callback needed."""
+    keywords_completed to total_keywords — no chord callback needed.
+
+    QA8: only SEARCH_TITLES_AT_ONCE titles are queued; each finished title
+    queues the next (_start_next_title), so one user's search can't make the
+    next user wait for all of its titles."""
     keywords = search_params["keywords"]
-    job = group(
-        search_and_score_keyword.s(
-            run_id, kw, search_params["locations"], search_params["sources"],
-            search_params, score_params,
+    at_once = max(1, get_settings().SEARCH_TITLES_AT_ONCE)
+    pipeline_progress.hold_titles(run_id=run_id, titles=keywords[at_once:])
+    for kw in keywords[:at_once]:
+        search_and_score_keyword.apply_async(
+            args=[run_id, kw, search_params["locations"], search_params["sources"], search_params, score_params],
+            queue=settings.default_queue,
         )
-        for kw in keywords
-    )
-    job.apply_async(queue=settings.default_queue)
 
 
 @celery_app.task(bind=True, name="job_finder.search")
