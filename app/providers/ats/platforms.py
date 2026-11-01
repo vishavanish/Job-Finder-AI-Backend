@@ -24,7 +24,7 @@ class here, a fixture in tests/fixtures/ats/ and seed rows.
 
 Live-checked 2026-10-19: Greenhouse (ETag/304), Lever, Recruitee, Workday
 (searchText), Ashby, SmartRecruiters (country=), Personio, Breezy,
-Teamtailor (RSS), Rippling, Gem. Not built: BambooHR (careers JSON redirected for
+Teamtailor (RSS), Rippling, Gem; 2026-10-31: Keka, Zoho Recruit (India), Oracle Cloud. Not built: BambooHR (careers JSON redirected for
 every tenant tried) and Homerun (its public feed returns Homerun's own jobs
 for any company name; per-company feeds use unguessable URLs).
 """
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import html
 import ipaddress
+import json
 import re
 import socket
 import xml.etree.ElementTree as ET  # expat >= 2.4 blocks entity-expansion bombs
@@ -537,6 +538,120 @@ class Workday(AtsPlatform):
         return _plain(((data or {}).get("jobPostingInfo") or {}).get("jobDescription", ""))
 
 
+# ---------------------------------------------------------------- Oracle Recruiting Cloud (Fusion HCM)
+
+class OracleCloud(AtsPlatform):
+    """{host}.oraclecloud.com Candidate Experience sites (Kotak, Tata Capital, Honeywell, Oracle…). The public
+    REST resource answers without a session. Big sites (thousands of jobs) are read target markets first
+    through the LOCATIONS facet, like Workday; `keyword=` searches titles. `host` = the oraclecloud host,
+    `site` = the site number (CX_1, CX_1001…). Live-checked 2026-10-31 on 9 Indian employers' sites."""
+    key, name, host_suffix, has_search, has_detail = "oracle_cloud", "Oracle Cloud", ".oraclecloud.com", True, True
+    _PAGE = 25
+    _SITE = re.compile(r"^CX_\d{1,6}$|^[A-Za-z0-9_]{2,40}$")
+
+    def parse_url(self, url):
+        host, parts = _parts(url)
+        if not host.endswith(self.host_suffix) or not _HOST.match(host):
+            return None
+        site = None
+        if "sites" in parts and parts.index("sites") + 1 < len(parts):        # /hcmUI/CandidateExperience/en/sites/CX_1/…
+            site = parts[parts.index("sites") + 1]
+        else:                                                                 # the REST API: …finder=findReqs;siteNumber=CX_1
+            m = re.search(r"siteNumber=([A-Za-z0-9_]+)", url)
+            site = m.group(1) if m else None
+        tenant = host.split(".")[0]
+        if not site or not self._SITE.match(site) or not valid_subdomain(tenant):
+            return None
+        return AtsRef(self.key, tenant, host=host, site=site)
+
+    def valid(self, ref):
+        return bool(ref.host and ref.host.endswith(self.host_suffix) and _HOST.match(ref.host)
+                    and ref.site and self._SITE.match(ref.site))
+
+    def careers_url(self, ref):
+        return f"https://{ref.host}/hcmUI/CandidateExperience/en/sites/{ref.site}/jobs"
+
+    def _api(self, ref) -> str:
+        return f"https://{ref.host}/hcmRestApi/resources/latest"
+
+    def _page(self, ref, offset: int, *, keyword: str = "", facet: str = "",
+              with_facets: bool = False) -> tuple[list[dict], int, list[dict]]:
+        finder = f"siteNumber={ref.site},limit={self._PAGE},offset={offset},sortBy=POSTING_DATES_DESC"
+        if keyword:
+            finder += f",keyword={quote(keyword)}"
+        if facet:
+            finder += f",selectedLocationsFacet={facet}"
+        if with_facets:
+            finder += ",facetsList=LOCATIONS"
+        data, _, _ = _get(ref, "GET", f"{self._api(ref)}/recruitingCEJobRequisitions?onlyData=true"
+                                      f"&expand=requisitionList.secondaryLocations,locationsFacet&finder=findReqs;{finder}")
+        block = ((data or {}).get("items") or [{}])[0]
+        jobs = []
+        for item in block.get("requisitionList") or []:
+            places = [item.get("PrimaryLocation") or ""] + [
+                loc.get("Name") or "" for loc in item.get("secondaryLocations") or [] if isinstance(loc, dict)]
+            workplace = str(item.get("WorkplaceType") or item.get("WorkplaceTypeCode") or "")
+            jobs.append(_job(external_id=item.get("Id"), title=item.get("Title"),
+                             location="; ".join(dict.fromkeys(p for p in places if p)),
+                             department=item.get("Department") or item.get("JobFamily"),
+                             url=f"https://{ref.host}/hcmUI/CandidateExperience/en/sites/{ref.site}/job/{item.get('Id')}",
+                             posted=item.get("PostedDate"), remote="remote" in workplace.lower(),
+                             country=item.get("PrimaryLocationCountry"),
+                             description=" ".join(filter(None, (item.get("ShortDescriptionStr"),
+                                                                item.get("ExternalResponsibilitiesStr"),
+                                                                item.get("ExternalQualificationsStr")))))
+                        | {"_employer": item.get("LegalEmployer") or ""})
+        return jobs, int(block.get("TotalJobsCount") or 0), block.get("locationsFacet") or []
+
+    def _collect(self, ref, budget: int, **kw) -> tuple[list[dict], int, list[dict]]:
+        out, offset, total, facets = [], 0, 0, []
+        while budget > 0:
+            page, t, f = self._page(ref, offset, with_facets=offset == 0, **kw)
+            total, facets = total or t, facets or f
+            out += page[:budget]
+            budget -= len(page)
+            offset += self._PAGE
+            if not page or offset >= total:
+                break
+        return out, total, facets
+
+    def list_jobs(self, ref, *, etag=None, max_jobs=400, markets=()):
+        jobs, total, facets = self._collect(ref, max_jobs)
+        if total > max_jobs and markets:
+            # Big site (Kotak: 12,000): the target markets' location facets first, then what fits of the rest.
+            wanted = {m.strip().lower() for m in markets}
+            market_jobs: list[dict] = []
+            for facet in facets:
+                if (facet.get("Name") or "").strip().lower() in wanted and len(market_jobs) < max_jobs:
+                    found, _, _ = self._collect(ref, max_jobs - len(market_jobs), facet=str(facet.get("Id")))
+                    market_jobs += found
+            seen = {j["external_id"] for j in market_jobs}
+            jobs = (market_jobs + [j for j in jobs if j["external_id"] not in seen])[:max_jobs]
+        return ListResult(jobs=jobs, complete=total <= max_jobs)
+
+    def search(self, ref, text, *, limit=100):
+        return self._collect(ref, limit, keyword=text)[0]
+
+    def job_detail(self, ref, external_id):
+        data, _, _ = _get(ref, "GET", f'{self._api(ref)}/recruitingCEJobRequisitionDetails?onlyData=true'
+                                      f'&expand=all&finder=ById;Id="{quote(str(external_id))}",siteNumber={ref.site}')
+        item = ((data or {}).get("items") or [{}])[0]
+        return _plain(" ".join(filter(None, (item.get("ExternalDescriptionStr"), item.get("ExternalResponsibilitiesStr"),
+                                             item.get("ExternalQualificationsStr")))))
+
+    def board_name(self, ref, jobs):
+        # The careers page title ("Honeywell"); some sites redirect it, then the jobs' legal employer.
+        try:
+            text, _, _ = _get(ref, "GET", self.careers_url(ref), as_text=True, accept="text/html")
+            name = page_title_name(text or "")
+        except SourceError:
+            name = None
+        if not name:
+            employers = [j.get("_employer") for j in jobs if j.get("_employer")]
+            name = clean_board_name(max(set(employers), key=employers.count)) if employers else None
+        return name
+
+
 def _workday_posted(text: str) -> str:
     t = (text or "").lower().replace("posted", "").strip()
     if t == "today":
@@ -791,9 +906,125 @@ class Gem(AtsPlatform):
         return ListResult(jobs=jobs, etag=new_etag)
 
 
+# ---------------------------------------------------------------- Keka (India)
+
+class Keka(AtsPlatform):
+    """{co}.keka.com/careers: the portal's own JSON list (full description, cities with country codes,
+    published date). Unknown companies redirect to a "tenant not found" page (GoneError)."""
+    key, name, host_suffix = "keka", "Keka", ".keka.com"
+    _RESERVED = {"www", "app", "help", "support", "cdn", "developers", "status", "blog"}
+
+    def parse_url(self, url):
+        host, parts = _parts(url)
+        if not host.endswith(self.host_suffix) or not parts or parts[0].lower() != "careers":
+            return None
+        sub = host[: -len(self.host_suffix)]
+        return AtsRef(self.key, sub) if valid_subdomain(sub) and sub not in self._RESERVED else None
+
+    def careers_url(self, ref):
+        return f"https://{ref.slug}.keka.com/careers/"
+
+    def list_jobs(self, ref, *, etag=None, max_jobs=1000, markets=()):
+        data, _, _ = _get(ref, "GET", f"https://{ref.slug}.keka.com/careers/api/jobs/default/active")
+        jobs = []
+        for item in data if isinstance(data, list) else []:
+            locs = [loc for loc in item.get("jobLocations") or [] if isinstance(loc, dict)]
+            location = "; ".join(filter(None, (loc.get("name") or loc.get("city") for loc in locs)))
+            jobs.append(_job(external_id=item.get("id"), title=item.get("title"), location=location,
+                             department=item.get("departmentName"),
+                             url=f"https://{ref.slug}.keka.com/careers/jobdetails/{item.get('id')}",
+                             posted=item.get("publishedOn"),
+                             country=locs[0].get("countryName") if locs else "",
+                             description=item.get("description")))
+        return ListResult(jobs=jobs[:max_jobs], complete=len(jobs) <= max_jobs)
+
+    def board_name(self, ref, jobs):
+        data, _, _ = _get(ref, "GET", f"https://{ref.slug}.keka.com/careers/api/organization/default/careerportalinfo")
+        return clean_board_name((data or {}).get("name"))
+
+
+# ---------------------------------------------------------------- Zoho Recruit (India and elsewhere)
+
+class ZohoRecruit(AtsPlatform):
+    """{co}.zohorecruit.{com,in,eu,com.au}/jobs/Careers: no JSON API, but the public page embeds the job list
+    as JSON in a hidden input (HTML-escaped). The page is large (~1-2 MB): crawl it on the normal schedule
+    only. `host` holds the regional domain. Unknown companies get Zoho's error page (GoneError)."""
+    key, name = "zoho_recruit", "Zoho Recruit"
+    DOMAINS = ("zohorecruit.com", "zohorecruit.in", "zohorecruit.eu", "zohorecruit.com.au")
+    _MARKER = re.compile(r'"Job_Opening_Name"\s*:\s*"')
+
+    def parse_url(self, url):
+        host, parts = _parts(url)
+        for domain in self.DOMAINS:
+            if host.endswith("." + domain):
+                sub = host[: -len(domain) - 1]
+                if valid_subdomain(sub) and sub != "www" and parts[:1] in (["jobs"], ["recruit"], []):
+                    return AtsRef(self.key, sub, host=domain)
+        return None
+
+    def valid(self, ref):
+        return valid_subdomain(ref.slug) and ref.host in self.DOMAINS
+
+    def careers_url(self, ref):
+        return f"https://{ref.slug}.{ref.host}/jobs/Careers"
+
+    @classmethod
+    def _embedded_jobs(cls, page: str) -> list[dict] | None:
+        text = html.unescape(page or "")
+        found = cls._MARKER.search(text)
+        if found is None:
+            return None
+        start = text.rfind("[", 0, found.start())
+        try:
+            data, _ = json.JSONDecoder().raw_decode(text[start:])
+        except ValueError:
+            return None
+        return [j for j in data if isinstance(j, dict)] if isinstance(data, list) else None
+
+    _SITE_NAME = re.compile(r"""<meta[^>]+property=["']og:site_name["'][^>]+content=["']([^"']{1,200})""", re.I)
+
+    @classmethod
+    def _company(cls, page: str) -> str | None:
+        # og:site_name is the company ("Kanerika Software"); the <title> may be the Zoho account's name
+        # ("Jobs at PeoplePlus"), so it is only the fallback.
+        found = cls._SITE_NAME.search(page[:200_000])
+        return (clean_board_name(found.group(1)) if found else None) or page_title_name(page)
+
+    @staticmethod
+    def _location(item: dict) -> str:
+        parts: list[str] = []
+        for value in (item.get("City"), item.get("State"), item.get("Country")):
+            for piece in str(value or "").split(","):
+                piece = piece.strip()
+                if piece and piece.lower() not in (p.lower() for p in parts):
+                    parts.append(piece.title() if piece.islower() else piece)
+        return ", ".join(parts)
+
+    def list_jobs(self, ref, *, etag=None, max_jobs=1000, markets=()):
+        page, _, _ = _get(ref, "GET", self.careers_url(ref), as_text=True, accept="text/html")
+        items = self._embedded_jobs(page)
+        if items is None:
+            if "cl-error-block" in (page or ""):
+                raise GoneError(f"{self.key} '{ref.slug}': not a Zoho Recruit careers site")
+            items = []  # a careers page with no openings right now
+        jobs = []
+        for item in items:
+            if item.get("Publish") is False:
+                continue
+            title = item.get("Posting_Title") or item.get("Job_Opening_Name")
+            words = re.sub(r"[^A-Za-z0-9]+", "-", str(title or "")).strip("-")[:80]
+            jobs.append(_job(external_id=item.get("id"), title=title, location=self._location(item),
+                             department=item.get("Industry"),
+                             url=f"{self.careers_url(ref)}/{item.get('id')}/{words}?source=CareerSite",
+                             posted=item.get("Date_Opened"), remote=bool(item.get("Remote_Job")),
+                             country=item.get("Country"), description=item.get("Job_Description")))
+        return ListResult(jobs=jobs[:max_jobs], company_name=self._company(page or ""),
+                          complete=len(jobs) <= max_jobs)
+
+
 PLATFORMS: dict[str, AtsPlatform] = {p.key: p for p in (
     Greenhouse(), Lever(), Workday(), Recruitee(), Ashby(), SmartRecruiters(), Workable(), Personio(), Breezy(),
-    Teamtailor(), Rippling(), Gem(),
+    Teamtailor(), Rippling(), Gem(), Keka(), ZohoRecruit(), OracleCloud(),
 )}
 
 

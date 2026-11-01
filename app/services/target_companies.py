@@ -37,7 +37,7 @@ from app.models.ats import AtsCompany, AtsFollow, AtsFollowHit, AtsFollowSetting
 from app.models.profile import JobPreference, SearchProfile
 from app.models.user import User
 from app.providers.ats import platforms
-from app.services import ats_search, entitlements
+from app.services import ats_search, email_templates, entitlements
 from app.services.job_dedupe import normalize_company
 
 logger = logging.getLogger("job_finder_api.target_companies")
@@ -512,8 +512,9 @@ def digest(db: Session, *, send=None, now: datetime | None = None) -> dict:
         roles = [{"title": j.title, "company": c.name, "location": j.location, "remote": j.remote, "url": j.url,
                   "posted_at": j.posted_at or j.first_seen_at} for _, j, c in hits]
         subject, body = digest_text(roles, now)
+        html = email_templates.company_roles_digest(roles, now)
         try:
-            (send or get_email_sender().send)(to=user.email, subject=subject, body=body)
+            (send or get_email_sender().send)(to=user.email, subject=subject, body=body, html=html)
         except Exception:  # noqa: BLE001 — try again next tick
             logger.exception("target companies digest failed for %s", user_id)
             counts["skipped"] += 1

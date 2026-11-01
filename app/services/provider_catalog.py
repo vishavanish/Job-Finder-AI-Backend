@@ -61,11 +61,30 @@ def is_enabled_for(row: ProviderCatalog, choices: dict[str, bool]) -> bool:
     return choices.get(row.key, bool(row.default_enabled))
 
 
-def user_key_only(source_key: str) -> bool:
+def user_key_only(source_key: str, *, shared_allowed: bool = False) -> bool:
     """Sources that must run on the user's own key. Outside production a
-    platform/.env key is accepted too, for local testing."""
+    platform/.env key is accepted too, for local testing; in production only
+    for users an admin gave `shared_search_keys` (`shared_allowed`)."""
     spec = registry.get(source_key)
-    return bool(spec and spec.user_key_only) and get_settings().ENVIRONMENT == "production"
+    return bool(spec and spec.user_key_only) and get_settings().ENVIRONMENT == "production" and not shared_allowed
+
+
+def may_share_keys(db: Session, user_id: str | None) -> bool:
+    """The admin let this user's searches use the platform's Google Jobs keys (entitlement `shared_search_keys`)."""
+    from app.services import entitlements
+    return bool(user_id) and entitlements.effective(db, user_id, "shared_search_keys").enabled
+
+
+def shared_keys_allowed(user_id: str | None) -> bool:
+    """may_share_keys() with its own session, for search workers that hold none."""
+    if not user_id:
+        return False
+    from app.core.db import SessionLocal
+    db = SessionLocal()
+    try:
+        return may_share_keys(db, user_id)
+    finally:
+        db.close()
 
 
 def paused_until(row: ProviderCatalog) -> datetime | None:
@@ -89,7 +108,7 @@ def availability(db: Session, user: User, row: ProviderCatalog, *, choices: dict
         return False, "paid source — \"Free tools only\" is on"
     if row.requires_key and row.key_scope and not has_request_key:
         scopes = [s.strip() for s in row.key_scope.split(",") if s.strip()]
-        shared_ok = not user_key_only(row.key)
+        shared_ok = not user_key_only(row.key, shared_allowed=may_share_keys(db, user.id))
         if not any(key_store.has_user_key(db, user.id, s) or (shared_ok and key_store.platform_key_available(db, s))
                    for s in scopes):
             label = " or ".join(_SCOPE_LABELS.get(s, s.title()) for s in scopes)
@@ -100,6 +119,12 @@ def availability(db: Session, user: User, row: ProviderCatalog, *, choices: dict
         if not db.query(EmailAccount.id).filter(EmailAccount.user_id == user.id,
                                                 EmailAccount.status == "active").first():
             return False, "connect Gmail to read your job-alert emails"
+    if registry.kind(row.key) == "capture":
+        from app.services import entitlements, extension
+        if not entitlements.effective(db, user.id, "browser_capture").enabled:
+            return False, "your account does not include saving jobs from your browser"
+        if not extension.has_connection(db, user.id):
+            return False, "connect the browser extension in Settings"
     if registry.kind(row.key) == "index":
         from app.services import entitlements
         if not entitlements.effective(db, user.id, "ats_discovery").enabled:
@@ -111,7 +136,8 @@ def availability(db: Session, user: User, row: ProviderCatalog, *, choices: dict
 
 
 _SCOPE_LABELS = {"apify": "Apify", "adzuna": "Adzuna", "jooble": "Jooble", "careerjet": "Careerjet",
-                 "serpapi": "SerpApi", "jsearch": "JSearch", "brightdata": "Bright Data", "themuse": "The Muse"}
+                 "serpapi": "SerpApi", "jsearch": "JSearch", "brightdata": "Bright Data", "themuse": "The Muse",
+                 "findwork": "Findwork"}
 
 # Sources a normal search never runs on its own (QA1 §6), with what users see instead of "will run".
 NOT_IN_SEARCH = {

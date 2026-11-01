@@ -74,7 +74,9 @@ def host_slot(host: str):
 def api_host(company: AtsCompany) -> str:
     return {"greenhouse": "boards-api.greenhouse.io", "lever": "api.lever.co", "ashby": "api.ashbyhq.com",
             "smartrecruiters": "api.smartrecruiters.com", "workable": "apply.workable.com",
-            "rippling": "ats.rippling.com", "gem": "api.gem.com"}.get(
+            "rippling": "ats.rippling.com", "gem": "api.gem.com",
+            # One shared host per tenant platform, so all their companies count against one slot.
+            "keka": "keka.com", "zoho_recruit": "zohorecruit.com"}.get(
         company.platform) or company.host or f"{company.slug}.{company.platform}"
 
 
@@ -212,7 +214,8 @@ def _platform_health(db: Session, platform: str, error: str | None) -> None:
 def fetch(company: AtsCompany) -> ListResult:
     cfg = get_settings()
     impl = platforms.get(company.platform)
-    max_jobs = cfg.ATS_WORKDAY_MAX_JOBS if company.platform == "workday" else cfg.ATS_MAX_JOBS_PER_COMPANY
+    big = company.platform in ats_registry.SITE_PLATFORMS  # thousands of jobs per site: capped, markets first
+    max_jobs = cfg.ATS_WORKDAY_MAX_JOBS if big else cfg.ATS_MAX_JOBS_PER_COMPANY
     result = impl.list_jobs(ats_registry.to_ref(company), etag=company.etag, max_jobs=max_jobs,
                             markets=cfg.ats_markets)
     if not result.not_modified:

@@ -1,0 +1,70 @@
+{
+ "items": [
+  {
+   "TotalJobsCount": 3,
+   "requisitionList": [
+    {
+     "Id": "158159",
+     "Title": "Advanced Software Engr",
+     "PostedDate": "2026-10-31",
+     "PrimaryLocation": "Bengaluru, Karnataka, India",
+     "PrimaryLocationCountry": "IN",
+     "WorkplaceType": "",
+     "Department": null,
+     "JobFamily": null,
+     "LegalEmployer": null,
+     "ShortDescriptionStr": "As an Advanced Software Engineer here at Honeywell, you will lead advanced software development projects, enhance and maintain critical software components, and troubleshoot complex issues. Your expertise will optimize software performance and drive innovation.You will report directly to our Manager and you’ll work out of our Bengaluru, Karnataka location on a Hybrid work schedule.",
+     "secondaryLocations": []
+    },
+    {
+     "Id": "158163",
+     "Title": "Systems Engr II",
+     "PostedDate": "2026-10-31",
+     "PrimaryLocation": "Pune, Maharashtra, India",
+     "PrimaryLocationCountry": "IN",
+     "WorkplaceType": "",
+     "Department": null,
+     "JobFamily": null,
+     "LegalEmployer": null,
+     "ShortDescriptionStr": "As a Systems Engr II here at Honeywell, you will design, implement, and manage complex systems, driving innovation, safety, and efficiency. Work on cutting-edge projects within cross-functional teams, shaping future technology and industry solutions.You will report directly to our [Title] and you’ll work out of our [City, State] location on a [Hybrid, On-site, Remote] work schedule.",
+     "secondaryLocations": []
+    },
+    {
+     "Id": "156163",
+     "Title": "Maintenance Engineer I",
+     "PostedDate": "2026-10-30",
+     "PrimaryLocation": "Boyne City, MI, United States",
+     "PrimaryLocationCountry": "US",
+     "WorkplaceType": "On-site",
+     "Department": null,
+     "JobFamily": null,
+     "LegalEmployer": null,
+     "ShortDescriptionStr": "As a Maintenance Engineer I here at Honeywell, you will play a crucial role in ensuring the reliability and efficiency of our manufacturing equipment and facilities. You will be responsible for implementing and supporting maintenance programs that minimize downtime and optimize production processes.\n",
+     "secondaryLocations": []
+    }
+   ],
+   "locationsFacet": [
+    {
+     "Id": 300000000469866,
+     "Name": "United States",
+     "TotalCount": 464
+    },
+    {
+     "Id": 300000000469485,
+     "Name": "India",
+     "TotalCount": 325
+    },
+    {
+     "Id": 100000013381552,
+     "Name": "Maharashtra, India",
+     "TotalCount": 137
+    },
+    {
+     "Id": 100000013381548,
+     "Name": "Karnataka, India",
+     "TotalCount": 128
+    }
+   ]
+  }
+ ]
+}

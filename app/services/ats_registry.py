@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -35,6 +36,8 @@ logger = logging.getLogger("job_finder_api.ats_registry")
 
 SEED_FILE = Path(__file__).resolve().parent.parent / "data" / "ats_seed.json"
 HARVEST_MAX = 25
+# Platforms whose companies are a host + a career-site id (no slug-only form, fixed vendor host suffix).
+SITE_PLATFORMS = ("workday", "oracle_cloud")
 
 
 def now() -> datetime:
@@ -43,7 +46,7 @@ def now() -> datetime:
 
 def ref_key(ref: AtsRef) -> str:
     parts = [ref.platform, ref.slug.lower()]
-    if ref.platform == "workday":
+    if ref.platform in SITE_PLATFORMS:
         parts += [(ref.host or "").lower(), (ref.site or "").lower()]
     elif ref.host:
         parts.append(ref.host.lower())
@@ -93,7 +96,7 @@ def parse_user_url(url: str) -> AtsRef:
         raise HTTPException(422, {"code": "ats_unsupported",
                                   "message": f"That link isn't a careers page we can read yet. Supported: {names}.",
                                   "details": {}})
-    if ref.host and ref.platform != "workday" and not platforms.public_host(ref.host):
+    if ref.host and ref.platform not in SITE_PLATFORMS and not platforms.public_host(ref.host):
         raise HTTPException(400, {"code": "ats_private_host",
                                   "message": "That address is not a public website.", "details": {}})
     return ref
@@ -105,10 +108,10 @@ def ref_from_parts(platform: str, slug: str) -> AtsRef:
         raise HTTPException(422, {"code": "ats_unknown_platform", "message": f"Unknown platform '{platform}'.",
                                   "details": {}})
     ref = AtsRef(impl.key, (slug or "").strip())
-    if impl.key == "workday" or not impl.valid(ref):
+    if impl.key in SITE_PLATFORMS or not impl.valid(ref):
         raise HTTPException(422, {"code": "ats_bad_slug",
-                                  "message": "Give the careers page link instead (Workday needs the full link)."
-                                  if impl.key == "workday" else "That company id has characters we can't use.",
+                                  "message": f"Give the careers page link instead ({impl.name} needs the full link)."
+                                  if impl.key in SITE_PLATFORMS else "That company id has characters we can't use.",
                                   "details": {}})
     return ref
 
@@ -134,6 +137,27 @@ def harvest(db: Session, jobs: list[dict]) -> int:
         added += int(created)
     db.commit()
     return added
+
+
+def seed_platforms(path: Path | None = None) -> set[str]:
+    """Platforms the seed file names (read once per file version)."""
+    path = path or SEED_FILE
+    if not path.exists():
+        return set()
+    return _seed_platforms(str(path), path.stat().st_mtime)
+
+
+@lru_cache(maxsize=4)
+def _seed_platforms(path: str, mtime: float) -> set[str]:
+    entries = json.loads(Path(path).read_text(encoding="utf-8"))
+    return {e["platform"] for e in entries if isinstance(e, dict) and e.get("platform")}
+
+
+def needs_seed(db: Session) -> bool:
+    """True when the registry is empty, or the seed file names a platform with no company yet (a platform
+    added after the first load, e.g. Keka / Zoho Recruit in QA7)."""
+    have = {p for (p,) in db.query(AtsCompany.platform).distinct().all()}
+    return not have or bool(seed_platforms() - have)
 
 
 def seed(db: Session, path: Path | None = None) -> int:

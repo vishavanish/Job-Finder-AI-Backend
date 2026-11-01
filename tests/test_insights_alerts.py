@@ -196,7 +196,8 @@ def test_hn_thread_is_found_and_parsed(http):
     routes["search_by_date"] = json.loads((FIXTURES / "hn_search.json").read_text(encoding="utf-8"))
     routes["/items/"] = json.loads((FIXTURES / "hn_item.json").read_text(encoding="utf-8"))
     jobs = feeds.fetch_hn_hiring()
-    assert "/items/49922569" in calls[-1]["url"]  # the "Who is hiring?" thread, not "Who wants to be hired?"
+    # the "Who is hiring?" thread, not "Who wants to be hired?" (the YC job-post search comes after it)
+    assert any("/items/49922569" in c["url"] for c in calls)
     assert len(jobs) >= 6
     by_company = {j["company"]: j for j in jobs}
     sidekick = by_company["Sidekick Labs"]
@@ -271,6 +272,30 @@ def test_google_jobs_never_uses_a_shared_key_in_production(monkeypatch, client, 
     view = {s["key"]: s for s in client.get(f"{API}/providers", headers=headers).json()["sources"]}
     assert view["google_jobs_api"]["enabled"] is False and view["google_jobs_api"]["tier"] == "free_key"
     assert view["hn_hiring"]["default_enabled"] is True
+
+
+def test_admin_can_let_one_user_use_the_shared_google_jobs_keys(monkeypatch, client, make_user, make_admin, http):
+    routes, calls = http
+    routes["serpapi.com"] = SERPAPI
+    monkeypatch.setattr(get_settings(), "ENVIRONMENT", "production")
+    allowed_id, allowed_headers = make_user()
+    other_id, other_headers = make_user()
+    _, admin_headers = make_admin()
+    shared = lambda scope, platform_only=False: ResolvedKey("shared-serp", "platform") if scope == "serpapi" else None  # noqa: E731
+
+    def run(user_id):
+        return job_sources.scrape_all(["Python Developer"], ["Bengaluru"], ["google_jobs_api"], max_age_hours=24 * 7,
+                                      user_id=user_id, key_lookup=shared)
+
+    assert run(allowed_id) == []  # off by default
+    r = client.put(f"{API}/admin/users/{allowed_id}/entitlements/shared_search_keys", headers=admin_headers,
+                   json={"enabled": True})
+    assert r.status_code == 200, r.text
+    assert [j["title"] for j in run(allowed_id)] == ["Python Developer"]
+    assert calls[-1]["params"]["api_key"] == "shared-serp"
+    assert run(other_id) == []  # everyone else still needs their own key
+    me = client.get(f"{API}/auth/me", headers=allowed_headers).json()
+    assert me["entitlements"]["shared_search_keys"]["enabled"] is True
 
 
 def test_the_muse_sends_the_platform_key(http):
@@ -390,7 +415,7 @@ def test_alert_run_emails_new_matches_once(client, make_user, monkeypatch):
     sent = []
 
     class Mailer:
-        def send(self, *, to, subject, body):
+        def send(self, *, to, subject, body, html=None):
             sent.append((to, subject, body))
 
     monkeypatch.setattr("app.providers.email.get_email_sender", lambda: Mailer())
@@ -446,7 +471,7 @@ def _alert_run_setup(client, headers, monkeypatch, scorer_fn) -> tuple[str, list
     sent = []
 
     class Mailer:
-        def send(self, *, to, subject, body):
+        def send(self, *, to, subject, body, html=None):
             sent.append((to, subject, body))
 
     monkeypatch.setattr("app.providers.email.get_email_sender", lambda: Mailer())

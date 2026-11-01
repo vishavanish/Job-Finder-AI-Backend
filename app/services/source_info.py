@@ -18,11 +18,12 @@ RANK_AGGREGATOR = 3
 
 COMPANY_ATS_SOURCES = {
     "greenhouse", "lever", "smartrecruiters", "workday", "oracle fusion", "successfactors",
-    "ashby", "recruitee", "workable", "personio", "breezy", "teamtailor", "rippling", "gem",
+    "ashby", "recruitee", "workable", "personio", "breezy", "teamtailor", "rippling", "gem", "keka", "zoho recruit",
+    "oracle cloud",
 }
 AGGREGATOR_SOURCES = {
-    "adzuna", "jooble", "careerjet",
-    "remoteok", "remotive", "himalayas", "jobicy", "arbeitnow", "the muse", "we work remotely",
+    "adzuna", "jooble", "careerjet", "findwork",
+    "remoteok", "remotive", "himalayas", "jobicy", "arbeitnow", "the muse", "we work remotely", "working nomads",
 }
 # Sources whose API returns a snippet, not the full job description.
 PARTIAL_DESCRIPTION_SOURCES = {"adzuna", "jooble", "careerjet"}

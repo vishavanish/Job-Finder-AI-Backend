@@ -51,7 +51,9 @@ from app.services.job_dedupe import normalize_company
 
 logger = logging.getLogger("job_finder_api.ats_resolver")
 
-GUESSABLE = ("greenhouse", "lever", "ashby", "smartrecruiters", "recruitee", "workable", "breezy", "teamtailor")
+# Zoho Recruit is left out: its careers page is 1-2 MB, too heavy to guess with.
+GUESSABLE = ("greenhouse", "lever", "ashby", "smartrecruiters", "recruitee", "workable", "breezy", "teamtailor",
+             "keka")
 # Job boards and aggregators: their pages are never a company's own site.
 BOARD_HOSTS = ("linkedin.com", "indeed.", "naukri.com", "glassdoor.", "google.com", "foundit.", "instahyre.com",
                "adzuna.", "jooble.", "careerjet.", "remoteok.", "remotive.", "himalayas.app", "jobicy.com",

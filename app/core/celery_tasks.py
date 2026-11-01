@@ -100,6 +100,14 @@ def _inbox_jobs(db, user_id: str | None, sources: list[str], search_params: dict
     return email_sync.recent_alert_jobs(db, user_id, search_params.get("max_age_hours", 24))
 
 
+def _captured_jobs(db, user_id: str | None, sources: list[str], search_params: dict) -> list[dict]:
+    """Jobs the user saved with the browser extension (P8a), only when that source runs."""
+    if not user_id or "browser_capture" not in sources:
+        return []
+    from app.services import extension
+    return extension.recent_captured_jobs(db, user_id, search_params.get("max_age_hours", 24))
+
+
 def _index_lookup(db, sources: list[str], search_params: dict, locations: list[str]):
     """The ATS index search for the `company_ats` source (P6), or None when that source doesn't run."""
     if "company_ats" not in sources:
@@ -232,6 +240,7 @@ def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str
         enable_naukri_auto=search_params.get("enable_naukri_auto", False),
         manual_naukri_jobs=manual_naukri_jobs,
         inbox_jobs=_inbox_jobs(db, user_id, sources, search_params),
+        captured_jobs=_captured_jobs(db, user_id, sources, search_params),
         index_jobs=_index_lookup(db, sources, search_params, locations),
         enable_naukri_apify=naukri_apify,
         apify_naukri_actor_id=search_params.get("apify_naukri_actor_id", ""),
@@ -783,13 +792,13 @@ def sync_gmail_account_task(account_id: str) -> dict:
 
 @celery_app.task(name="job_finder.ats_tick")
 def ats_tick_task() -> dict:
-    """Beat (P6): loads the seed once when the registry is empty, then queues a crawl for each due company."""
-    from app.models.ats import AtsCompany
+    """Beat (P6): loads the seed when the registry is empty or a new platform's companies are missing, then
+    queues a crawl for each due company."""
     from app.services import ats_crawler, ats_registry
 
     db = SessionLocal()
     try:
-        if db.query(AtsCompany.id).first() is None:
+        if ats_registry.needs_seed(db):
             ats_registry.seed(db)
         claimed = ats_crawler.claim_due(db)
     finally:
@@ -976,7 +985,7 @@ def run_job_alert(self, alert_id: str, trigger: str = "schedule") -> dict:
     from app.models.schemas import PipelineRequest
     from app.models.user import User
     from app.providers.email import get_email_sender
-    from app.services import job_alerts
+    from app.services import email_templates, job_alerts
     from app.services.task_params import build_pipeline_params
     from fastapi import HTTPException
 
@@ -1042,9 +1051,10 @@ def run_job_alert(self, alert_id: str, trigger: str = "schedule") -> dict:
 
         if jobs and alert.email_digest:
             subject, body = job_alerts.digest_text(alert, jobs)
+            html = email_templates.job_alert_digest(alert.name, alert.min_score, jobs)
             to = job_alerts.sends_to(alert, job_alerts.email_options(db, user))
             try:
-                get_email_sender().send(to=to, subject=subject, body=body)
+                get_email_sender().send(to=to, subject=subject, body=body, html=html)
                 run.emailed_at = job_alerts.utcnow()
             except Exception as e:  # noqa: BLE001 — the run's results stay in the app
                 logger.warning("alert %s: digest email failed: %s", alert.id, type(e).__name__)

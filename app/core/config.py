@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     BRIGHTDATA_API_KEY: str = ""  # "API_KEY:ZONE"
     SERPAPI_API_KEY: str = ""
     JSEARCH_API_KEY: str = ""
+    FINDWORK_API_KEY: str = ""
+    DEEPGRAM_API_KEY: str = ""  # Live Copilot streaming STT; Groq Whisper takes over when it fails
     THEMUSE_API_KEY: str = ""     # platform key for The Muse feed (shared cache)
 
     # ---- job sources (CLAUDE.md 7.4) ----
@@ -147,6 +149,8 @@ class Settings(BaseSettings):
     ATS_FOLLOW_HIT_RETENTION_DAYS: int = 30
     ATS_FOLLOW_DIGEST_HOUR: int = 9             # local hour of the daily email
     RATE_LIMIT_ATS_FOLLOW: str = "60/hour"
+    RATE_LIMIT_EXTENSION_PAIR: str = "10/hour"       # pairing codes / token exchanges (P8a)
+    RATE_LIMIT_EXTENSION_CAPTURE: str = "120/hour"   # "Save jobs" clicks from the extension
     ATS_GONE_AFTER: int = 3                     # 404s in a row before a company is switched off
     RATE_LIMIT_ATS_SEARCH: str = "30/minute"
     RATE_LIMIT_ATS_ADD_COMPANY: str = "10/hour"

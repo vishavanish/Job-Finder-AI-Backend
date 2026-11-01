@@ -51,13 +51,18 @@ FEATURES: dict[str, Entitlement] = {
     "resume_tailoring": Entitlement("resume_tailoring", True),
     "premium_models": Entitlement("premium_models", False),
     "job_alerts": Entitlement("job_alerts", True, quota_per_day=5),  # alert runs per day (P3.2)
+    # Google Jobs (SerpApi / JSearch / Bright Data) on the platform's own keys. Off: the user needs their own key.
+    "shared_search_keys": Entitlement("shared_search_keys", False),
+    # P8a: the browser extension saves jobs from pages the user opens (Naukri, Foundit, Glassdoor...).
+    "browser_capture": Entitlement("browser_capture", True),
 }
 
 FEATURE_LABELS = {
     "job_search": "job search", "scoring": "AI job scoring", "ats_discovery": "company career pages",
     "auto_apply": "auto apply", "gmail_tracking": "Gmail tracking", "voice_prep": "interview practice",
     "live_copilot": "Live Copilot", "resume_tailoring": "resume tailoring", "premium_models": "premium AI models",
-    "job_alerts": "job alerts",
+    "job_alerts": "job alerts", "shared_search_keys": "shared Google Jobs keys",
+    "browser_capture": "saving jobs from your browser",
 }
 
 # Global kill switches: feature -> feature flag that must be true.
