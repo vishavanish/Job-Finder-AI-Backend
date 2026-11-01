@@ -19,6 +19,11 @@ Browser extension "Job Finder capture" (P8a E1):
   - POST   /extension/runs/{id}/answer     the user answered a question in the extension's panel
   - GET    /extension/runs/{id}/resume     the resume file to attach (tailored when ready, else master)
   - POST   /extension/runs/{id}/result     submitted (LinkedIn confirmed) | closed (tab closed first)
+
+  "Fill this form" on a page with no run (P8b E3b; same gates):
+  - POST   /extension/page/fill            answers for the fields on the page
+  - POST   /extension/page/answer          the user's answer from the panel → answer bank
+  - GET    /extension/page/resume          the master resume file
 """
 from __future__ import annotations
 
@@ -32,7 +37,7 @@ from app.core.config import get_settings
 from app.core.db import get_db
 from app.core.rate_limit import limiter
 from app.models.extension_schemas import (
-    AssistFillIn, AssistFillOut, AssistRememberIn, AssistResultIn, AssistResultOut, AssistRunOut, CaptureIn,
+    AssistFillIn, AssistFillOut, AssistPageAnswerIn, AssistRememberIn, AssistResultIn, AssistResultOut, AssistRunOut, CaptureIn,
     CaptureOut, ConnectionsOut, ExtensionMeOut, PairCodeOut, TokenIn, TokenOut,
 )
 from app.models.jobs import Job
@@ -128,14 +133,17 @@ def answer(run_id: str, body: AssistRememberIn, authorization: str | None = Head
     return extension_assist.remember(db, extension_assist.get_run(db, user.id, run_id), body.key, body.value)
 
 
+def _file_response(data: bytes, name: str, media: str | None) -> Response:
+    return Response(data, media_type=media or "application/octet-stream",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}",
+                             "Cache-Control": "private, no-store"})
+
+
 @router.get("/runs/{run_id}/resume", response_class=Response,
             responses={200: {"content": {"application/pdf": {}, "application/octet-stream": {}}}})
 def resume(run_id: str, authorization: str | None = Header(default=None), db: Session = Depends(get_db)):
     user = extension_assist.assist_user(db, _bearer(authorization))
-    data, name, media = extension_assist.resume_file(db, extension_assist.get_run(db, user.id, run_id))
-    return Response(data, media_type=media or "application/octet-stream",
-                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}",
-                             "Cache-Control": "private, no-store"})
+    return _file_response(*extension_assist.resume_file(db, extension_assist.get_run(db, user.id, run_id)))
 
 
 @router.post("/runs/{run_id}/result", response_model=AssistResultOut)
@@ -144,3 +152,27 @@ def result(run_id: str, body: AssistResultIn, authorization: str | None = Header
     user = extension_assist.assist_user(db, _bearer(authorization))
     run = extension_assist.finish(db, extension_assist.get_run(db, user.id, run_id), body.outcome)
     return {"run_id": run.id, "state": run.state}
+
+
+# ---------------------------------------------------------------- "Fill this form" with no run (P8b E3b)
+
+@router.post("/page/fill", response_model=AssistFillOut)
+@limiter.limit(lambda: get_settings().RATE_LIMIT_EXTENSION_FILL)
+def page_fill(request: Request, body: AssistFillIn, authorization: str | None = Header(default=None),
+              db: Session = Depends(get_db)):
+    user = extension_assist.assist_user(db, _bearer(authorization))
+    return extension_assist.fill_page(db, user.id, [f.model_dump() for f in body.fields])
+
+
+@router.post("/page/answer")
+def page_answer(body: AssistPageAnswerIn, authorization: str | None = Header(default=None),
+                db: Session = Depends(get_db)):
+    user = extension_assist.assist_user(db, _bearer(authorization))
+    return extension_assist.remember_page(db, user.id, body.label, body.value, body.options)
+
+
+@router.get("/page/resume", response_class=Response,
+            responses={200: {"content": {"application/pdf": {}, "application/octet-stream": {}}}})
+def page_resume(authorization: str | None = Header(default=None), db: Session = Depends(get_db)):
+    user = extension_assist.assist_user(db, _bearer(authorization))
+    return _file_response(*extension_assist.page_resume(db, user.id))

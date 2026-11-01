@@ -1,6 +1,6 @@
 # P8b — Fast apply in the user's own browser (extension "apply assist")
 
-Status 2026-11-01: owner approved all eight defaults; **E3a built** (CLAUDE.md §6.22). E3b and E3c not started.
+Status 2026-11-01: owner approved all eight defaults; **E3a and E3b built** (CLAUDE.md §6.22). E3c not started.
 Difference from the plan: the form reader is a port of the server's (`extension/src/formreader.js`), not one shared
 file — the two repos can't share code; keep them in step. Backend + frontend repo (`extension/`).
 

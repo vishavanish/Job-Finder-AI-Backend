@@ -853,8 +853,32 @@ def browser_closed(db: Session, run: ApplyRun) -> ApplyRun:
     """The LinkedIn tab closed before the site confirmed anything: ask the user what happened."""
     if run.state != "in_browser":
         raise _error(409, "run_not_waiting", "This run is not open in your browser.")
-    _transition(db, run, "needs_user", "The LinkedIn tab was closed. Did you submit the application?",
-                tracker_status="")
+    where = "LinkedIn tab" if run.adapter == "linkedin" else "tab"
+    _transition(db, run, "needs_user", f"The {where} was closed. Did you submit the application?", tracker_status="")
+    return run
+
+
+OPEN_IN_BROWSER_MESSAGE = ("Finish it in your browser: on the application page, click the Job Finder extension and "
+                           "Fill this form (Alt+Shift+F) on each page, check the answers and submit.")
+
+
+def open_in_browser(db: Session, user: User, run: ApplyRun) -> ApplyRun:
+    """A run that stopped for the user (a sign-in page, a captcha, test mode) continues in their own browser:
+    the extension fills the form there with the answers this run already has (P8b E3b)."""
+    if run.state not in ("needs_user", "awaiting_input", "awaiting_review"):
+        raise _error(409, "run_not_waiting", "This run is not waiting for you.")
+    s = get_settings_row(db, user.id)
+    from app.services import extension
+    if not (s.extension_assist and extension.has_connection(db, user.id)):
+        raise _error(409, "extension_required", "Connect the Job Finder extension in Settings › Browser extension "
+                     "first, and keep Fast apply in your browser on in Apply settings.")
+    run.active_key = f"{user.id}|{run.job_key}"[:800]
+    run.plan = {**(run.plan or {}), "runner": "extension"}
+    try:
+        _transition(db, run, "in_browser", OPEN_IN_BROWSER_MESSAGE, tracker_status="")
+    except IntegrityError:
+        db.rollback()
+        raise _error(409, "run_active", "This job already has an apply run in progress.")
     return run
 
 

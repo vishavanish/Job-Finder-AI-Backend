@@ -83,7 +83,7 @@ def test_fast_apply_needs_the_extension_and_the_notice(client, make_user, monkey
 
 def test_extension_fills_a_page_remembers_answers_and_reports_the_result(client, make_user, monkeypatch):
     ai_calls = _ai_unknown(monkeypatch)
-    _, headers, ext = _setup(client, make_user)
+    user_id, headers, ext = _setup(client, make_user)
     job = _job("Ext Fill", apply_url=None, url=LI)
     run_id = client.post(f"{API}/apply/runs", json={"job_id": job, "mode": "fast"}, headers=headers).json()["id"]
 
@@ -110,9 +110,10 @@ def test_extension_fills_a_page_remembers_answers_and_reports_the_result(client,
     assert bad.status_code == 422
     db = SessionLocal()
     try:
-        entry = db.query(AnswerBankEntry).filter(AnswerBankEntry.question.like("%Kubernetes%")).one()
+        mine = db.query(AnswerBankEntry).filter(AnswerBankEntry.user_id == user_id)
+        entry = mine.filter(AnswerBankEntry.question.like("%Kubernetes%")).one()
         assert entry.answer == "3" and entry.approved
-        assert db.query(AnswerBankEntry).filter(AnswerBankEntry.question == "Gender").count() == 0
+        assert mine.filter(AnswerBankEntry.question == "Gender").count() == 0
         plan = db.get(ApplyRun, run_id).plan
         gender = next(p for p in plan["fields"] if p["key"] == "gender")
         assert gender["value"] is None and gender["sealed"]  # EEO sealed at rest
@@ -162,3 +163,85 @@ def test_assist_switch_off_blocks_the_extension_routes(client, make_user, monkey
     r = client.get(f"{API}/extension/runs/for-page", params={"url": LI}, headers=ext)
     assert r.status_code == 403 and r.json()["detail"]["code"] == "assist_off"
     assert client.get(f"{API}/extension/me", headers=ext).status_code == 200  # saving jobs still works
+
+
+# ---------------------------------------------------------------- E3b: "Fill this form" anywhere
+
+def _stopped_auto_run(user_id: str, job_id: str, *, url: str = "https://careers.acme.com/jobs/7") -> str:
+    """An Auto apply run that stopped at a sign-in page, with one answer already prepared."""
+    from app.models.apply import ApplyRun as Run
+    db = SessionLocal()
+    try:
+        run = Run(user_id=user_id, job_id=job_id, job_key=f"acme|engineer|pune|{user_id}", company_title="acme|engineer",
+                  mode="auto", level=2, adapter="generic", apply_url=url, state="needs_user",
+                  message="The application page asks you to sign in or create an account.",
+                  plan={"fields": [{"key": "notice", "label": "Notice period", "type": "text", "options": [],
+                                    "required": True, "value": "30 days", "source": "user", "approved": True,
+                                    "needs_input": False}]})
+        db.add(run)
+        db.commit()
+        return run.id
+    finally:
+        db.close()
+
+
+def test_a_stopped_auto_run_continues_in_the_browser_with_its_answers(client, make_user, monkeypatch):
+    ai_calls = _ai_unknown(monkeypatch)
+    user_id, headers = _ready_user(client, make_user, level2=False)
+    run_id = _stopped_auto_run(user_id, _job("Ext Open", apply_url="https://careers.acme.com/jobs/7"))
+    r = client.post(f"{API}/apply/runs/{run_id}/browser", headers=headers)
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "extension_required"
+
+    ext = {"Authorization": f"Bearer {_pair(client, headers)}"}
+    r = client.post(f"{API}/apply/runs/{run_id}/browser", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "in_browser" and r.json()["runner"] == "extension" and "Fill this form" in r.json()["message"]
+    # Page 2 of the same company's form (another path) still finds the run; another site doesn't.
+    found = client.get(f"{API}/extension/runs/for-page", params={"url": "https://careers.acme.com/apply/step-2"},
+                       headers=ext).json()
+    assert found["run_id"] == run_id
+    assert client.get(f"{API}/extension/runs/for-page", params={"url": "https://other.example/apply"},
+                      headers=ext).json()["run_id"] is None
+    before = len(ai_calls)
+    fill = client.post(f"{API}/extension/runs/{run_id}/fill", headers=ext, json={"fields": [
+        {"key": "notice", "label": "Notice period", "type": "text", "required": True}]}).json()
+    assert fill["answers"][0]["value"] == "30 days" and len(ai_calls) == before  # the run's answer, no AI call
+    assert client.post(f"{API}/apply/runs/{run_id}/browser", headers=headers).status_code == 409  # already open
+
+    r = client.post(f"{API}/extension/runs/{run_id}/result", json={"outcome": "closed"}, headers=ext)
+    assert r.json()["state"] == "needs_user"
+    assert "The tab was closed" in client.get(f"{API}/apply/runs/{run_id}", headers=headers).json()["message"]
+
+
+def test_fill_this_form_on_a_page_with_no_run(client, make_user, monkeypatch):
+    ai_calls = _ai_unknown(monkeypatch)
+    user_id, headers, ext = _setup(client, make_user)
+    fields = [{"key": "fn", "label": "First Name", "type": "text", "required": True},
+              {"key": "cv", "label": "Resume/CV", "type": "file", "required": True},
+              {"key": "gender", "label": "Gender", "type": "select", "options": ["Male", "Female"], "required": False},
+              {"key": "k8s", "label": "How many years of work experience do you have with Kubernetes?",
+               "type": "text", "required": True}]
+    r = client.post(f"{API}/extension/page/fill", json={"fields": fields}, headers=ext)
+    assert r.status_code == 200, r.text
+    answers = {a["key"]: a for a in r.json()["answers"]}
+    assert answers["fn"]["value"] == "Jane" and answers["gender"]["value"] == "Female"
+    assert answers["k8s"]["needs_input"] and r.json()["files"] == {"cv": "resume"}
+    assert all("Female" not in json.dumps(c.get("messages", "")) for c in ai_calls)
+
+    client.post(f"{API}/extension/page/answer", headers=ext,
+                json={"label": "How many years of work experience do you have with Kubernetes?", "value": "2"})
+    client.post(f"{API}/extension/page/answer", headers=ext, json={"label": "Gender", "value": "Female"})
+    db = SessionLocal()
+    try:
+        mine = db.query(AnswerBankEntry).filter(AnswerBankEntry.user_id == user_id)
+        assert mine.filter(AnswerBankEntry.question.like("%Kubernetes%")).one().approved
+        assert mine.filter(AnswerBankEntry.question == "Gender").count() == 0  # EEO
+    finally:
+        db.close()
+    again = client.post(f"{API}/extension/page/fill", json={"fields": fields}, headers=ext).json()
+    assert {a["key"]: a["value"] for a in again["answers"]}["k8s"] == "2"  # from the answer bank now
+
+    resume = client.get(f"{API}/extension/page/resume", headers=ext)
+    assert resume.status_code == 200 and resume.content[:2] == b"PK"
+    client.put(f"{API}/apply/settings", json={"extension_assist": False}, headers=headers)
+    assert client.post(f"{API}/extension/page/fill", json={"fields": fields}, headers=ext).status_code == 403

@@ -124,6 +124,7 @@ def get_prep(pack_id: str, user=Depends(get_current_user), db: Session = Depends
 #   POST    /apply/runs/{id}/approve       level 2: submit this run (after a 30-90 s pacing gap)
 #   POST    /apply/runs/{id}/cancel
 #   POST    /apply/runs/{id}/done          you finished it on the real page ({submitted: true|false})
+#   POST    /apply/runs/{id}/browser       continue a stopped run in your own browser (extension, P8b E3b)
 #   GET     /apply/runs/{id}/proofs[/{proof_id}]   screenshots (PNG), owner only
 
 from app.models.apply import ApplyRun  # noqa: E402
@@ -246,6 +247,14 @@ def cancel_run(run_id: str, user=Depends(get_current_user), db: Session = Depend
 @router.post("/runs/{run_id}/done", response_model=RunOut)
 def finish_run(run_id: str, body: RunDone, user=Depends(get_current_user), db: Session = Depends(get_db)):
     run = apply_engine.mark_done(db, apply_engine.get_owned(db, user.id, run_id), submitted=body.submitted)
+    return _run_out(db, run)
+
+
+@router.post("/runs/{run_id}/browser", response_model=RunOut)
+def open_run_in_browser(run_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """A run waiting for you continues in your own browser: open its apply page and the Job Finder extension's
+    "Fill this form" fills it with this run's answers. Needs a connected extension."""
+    run = apply_engine.open_in_browser(db, user, apply_engine.get_owned(db, user.id, run_id))
     return _run_out(db, run)
 
 

@@ -15,6 +15,13 @@ LinkedIn, opens the Easy Apply dialog and asks this module for the answers to ea
   finish         LinkedIn confirmed ("application was sent") → tracker `submitted` (status_source
                  "extension"); the tab closed first → needs_user, "did you submit it?"
 
+E3b — "Fill this form" on any page the user is on (the extension's button / shortcut, never on its own):
+  run_for_page   also matches a run reopened in the browser (apply_engine.open_in_browser, e.g. an Auto apply
+                 run that stopped at a sign-in page) by the site of its apply URL
+  fill_page / remember_page / page_resume
+                 no run at all (a Workday or Naukri form for a job Job Finder never saw): answers from the
+                 profile, answer bank and AI, the master resume; nothing is tracked
+
 The extension fills; the user clicks Next and Submit. Nothing here submits anything or touches LinkedIn.
 """
 from __future__ import annotations
@@ -25,6 +32,8 @@ from urllib.parse import parse_qs, urlparse
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.apply.forms import for_answering
+from app.apply.sites import host_of, site_of
 from app.models.apply import ApplyPack, ApplyRun
 from app.models.jobs import Job
 from app.models.profile import Resume
@@ -75,10 +84,17 @@ def _browser_runs(db: Session, user_id: str) -> list[ApplyRun]:
 
 
 def run_for_page(db: Session, user_id: str, page_url: str) -> ApplyRun | None:
+    """LinkedIn: the run for this exact job. Elsewhere: the newest run reopened in the browser on this site
+    (a multi-page form moves between paths, so the path can't be required)."""
+    runs = _browser_runs(db, user_id)
     wanted = linkedin_job_id(page_url)
-    if not wanted:
+    if wanted:
+        return next((r for r in runs if linkedin_job_id(r.apply_url) == wanted), None)
+    host = host_of(page_url)
+    if not host or not page_url.startswith(("https://", "http://")):
         return None
-    return next((r for r in _browser_runs(db, user_id) if linkedin_job_id(r.apply_url) == wanted), None)
+    site = site_of(host)
+    return next((r for r in runs if r.adapter != "linkedin" and site_of(host_of(r.apply_url)) == site), None)
 
 
 def get_run(db: Session, user_id: str, run_id: str) -> ApplyRun:
@@ -161,3 +177,43 @@ def finish(db: Session, run: ApplyRun, outcome: str) -> ApplyRun:
     if outcome == "submitted":
         return apply_engine.mark_done(db, run, submitted=True, source="extension")
     return apply_engine.browser_closed(db, run)
+
+
+# ---------------------------------------------------------------- E3b: a form with no run
+
+def fill_page(db: Session, user_id: str, fields: list[dict]) -> dict:
+    """Answers for a form on a page Job Finder has no run for. Same trust order as a run; AI drafts go to the
+    answer bank unapproved, as always."""
+    fields = _clean_fields(fields)
+    answers = {a["id"]: a for a in answer_bank.answer_fields(db, user_id, for_answering(fields))} if fields else {}
+    db.commit()
+    file_plan, _missing = apply_engine._file_plan(fields, {"resume": "resume"})
+    out = []
+    for f in fields:
+        if f["type"] == "file":
+            continue
+        a = answers.get(f["key"], {})
+        out.append({"key": f["key"], "value": a.get("value"), "source": a.get("source", "none"),
+                    "needs_input": bool(a.get("needs_input")) and f["required"]})
+    return {"answers": out, "files": file_plan}
+
+
+def remember_page(db: Session, user_id: str, label: str, value: str, options: list[str]) -> dict:
+    """The user answered a question in the panel on a page with no run: saved to the answer bank (approved),
+    except EEO questions, which stay out of the plain-text bank."""
+    value = (value or "").strip()[:2000]
+    label = (label or "").strip()[:500]
+    if not label:
+        raise _error(422, "no_question", "Which question is this answer for?")
+    if value and not apply_engine._is_eeo({"label": label}):
+        answer_bank.save_user_answer(db, user_id, question=label, answer=value,
+                                     field_type="select" if options else "text")
+        db.commit()
+    return {"key": "", "value": value, "source": "user", "needs_input": False}
+
+
+def page_resume(db: Session, user_id: str) -> tuple[bytes, str, str]:
+    resume = resume_store.master(db, user_id)
+    if resume is None:
+        raise _error(409, "no_resume", "Upload a resume in Job Finder first.")
+    return resume_store.load_file(db, resume), resume.file_name, resume.content_type

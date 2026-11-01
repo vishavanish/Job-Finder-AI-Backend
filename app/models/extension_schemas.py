@@ -110,3 +110,10 @@ class AssistResultIn(BaseModel):
 class AssistResultOut(BaseModel):
     run_id: str
     state: str
+
+
+class AssistPageAnswerIn(BaseModel):
+    """An answer typed in the panel on a page with no run (E3b): saved to the answer bank."""
+    label: str = Field(..., max_length=2000)
+    value: str = Field(..., max_length=2000)
+    options: list[str] = Field(default_factory=list, max_length=200)
