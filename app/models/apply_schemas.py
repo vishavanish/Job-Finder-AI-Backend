@@ -97,8 +97,8 @@ class AnswerList(BaseModel):
 
 # ---------------------------------------------------------------- P4b: apply runs and settings
 
-RunState = Literal["queued", "preparing", "awaiting_input", "awaiting_review", "submitting", "submitted", "failed",
-                   "cancelled", "needs_user", "done"]
+RunState = Literal["queued", "preparing", "awaiting_input", "awaiting_review", "submitting", "in_browser",
+                   "submitted", "failed", "cancelled", "needs_user", "done"]
 
 RISK_NOTICE = ("Auto apply fills and submits applications on company career sites (Greenhouse, Lever) for you, "
                "only after you review and approve each one. Some sites limit automated applications, answers can "
@@ -109,6 +109,10 @@ GENERIC_NOTICE = ("The AI form reader (beta) fills application forms on other ca
                   "question or a page. It never signs in or creates accounts, every application waits for your "
                   "review, and pages it can't handle are handed back to you. It may use a paid image-reading AI "
                   "model for hard pages, within a per-application limit.")
+FAST_NOTICE = ("Fast apply fills LinkedIn Easy Apply forms in your own browser, signed in as you, from your profile and "
+               "answer bank. You check every page and click Next and Submit yourself — Job Finder never submits a "
+               "LinkedIn application. LinkedIn's terms limit automation, so a daily cap stays on; answers can still be "
+               "wrong, so read them before you submit.")
 
 
 class ApplySettingsIn(BaseModel):
@@ -120,6 +124,9 @@ class ApplySettingsIn(BaseModel):
     paused: Optional[bool] = Field(None, description="Your own off switch; pausing cancels active runs")
     allow_generic: Optional[bool] = Field(None, description="Use the AI form reader (beta) on other career sites; "
                                                             "turning it off cancels its active runs")
+    extension_assist: Optional[bool] = Field(None, description="Let the connected browser extension fill Fast apply "
+                                                               "forms; turning it off cancels runs open in a tab")
+    accept_fast_notice: Optional[bool] = None
 
 
 class ApplySettingsOut(BaseModel):
@@ -131,6 +138,10 @@ class ApplySettingsOut(BaseModel):
     generic_submit_enabled: bool = Field(False, description="False = the AI form reader is in test mode: runs "
                                                             "are prepared for review but never submitted")
     risk_accepted_at: Optional[datetime] = None
+    extension_assist: bool = True
+    extension_connected: bool = Field(False, description="A browser extension is connected to this account")
+    fast_notice: str = FAST_NOTICE
+    fast_notice_accepted_at: Optional[datetime] = None
     hours_start: int
     hours_end: int
     timezone: str
@@ -162,6 +173,8 @@ class RunOut(BaseModel):
     title: str
     company: str
     mode: Literal["auto", "fast"]
+    runner: Literal["worker", "extension"] = Field("worker", description="extension = filled in your own browser "
+                                                                        "tab by the Job Finder extension")
     level: int
     adapter: str
     apply_url: str

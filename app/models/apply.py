@@ -79,7 +79,8 @@ class ApplyPack(Base):
 
 # queued -> preparing -> awaiting_input <-> awaiting_review -> submitting -> submitted
 # any active state -> cancelled | failed | needs_user (a hard stop: the user finishes on the real page)
-RUN_ACTIVE_STATES = ("queued", "preparing", "awaiting_input", "awaiting_review", "submitting")
+RUN_ACTIVE_STATES = ("queued", "preparing", "awaiting_input", "awaiting_review", "submitting",
+                     "in_browser")  # in_browser: the extension fills it in the user's own tab (P8b)
 RUN_END_STATES = ("submitted", "failed", "cancelled", "needs_user", "done")
 
 
@@ -137,4 +138,6 @@ class ApplySettings(Base):
     timezone = Column(String(64), nullable=False, default="Asia/Kolkata")
     paused = Column(Boolean, nullable=False, default=False)  # the user's own kill switch
     allow_generic = Column(Boolean, nullable=False, default=False)  # opt-in to the AI form reader (P4c)
+    extension_assist = Column(Boolean, nullable=False, default=True)  # the extension may fill Fast apply (P8b)
+    fast_notice_at = Column(DateTime, nullable=True)                  # one-time Fast apply notice accepted
     updated_at = Column(DateTime, default=_now, onupdate=_now, nullable=False)

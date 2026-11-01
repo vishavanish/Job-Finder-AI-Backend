@@ -88,13 +88,23 @@ def test_apply_options_by_job_kind(monkeypatch):
     assert gh["auto"]["available"] and gh["auto"]["reason"] is None
     assert apply_options.adapter_for({"url": "https://jobs.lever.co/acme/abc"}) == "lever"
     assert apply_options.adapter_for({"url": "https://acme.com/careers?gh_jid=5"}) == "greenhouse"
-    # A LinkedIn posting that applies on an unknown site is not Easy Apply.
+    # A LinkedIn posting that applies on the company's own career page goes to the AI form reader, not Easy Apply.
     assert apply_options.adapter_for({"url": "https://www.linkedin.com/jobs/view/3",
-                                      "apply_url": "https://careers.acme.com/9"}) is None
+                                      "apply_url": "https://careers.acme.com/9"}) == "generic"
+    # ... but not when it applies on a job board or an account-only career suite.
+    for elsewhere in ("https://in.indeed.com/viewjob?jk=1", "https://acme.wd5.myworkdayjobs.com/x/job/1",
+                      "https://sjobs.brassring.com/TGnewUI/1", "https://careers.google.com/jobs/1"):
+        assert apply_options.adapter_for({"url": "https://www.linkedin.com/jobs/view/3",
+                                          "apply_url": elsewhere}) is None, elsewhere
+    indeed = apply_options.options({"url": "https://in.indeed.com/viewjob?jk=2", "source": "Indeed",
+                                    "apply_url": "https://careers.hpe.com/job/123", "description": ""})
+    assert indeed["adapter"] == "generic" and indeed["auto"]["available"]
+    no_page = apply_options.options({"url": "https://in.indeed.com/viewjob?jk=3", "description": ""})
+    assert not no_page["auto"]["available"] and "own application page" in no_page["auto"]["reason"]
 
     monkeypatch.setattr(get_settings(), "ENVIRONMENT", "production")
     prod = apply_options.options({"url": "https://www.linkedin.com/jobs/view/1", "description": ""})
-    assert not prod["fast"]["available"] and "local apply agent" in prod["fast"]["reason"]
+    assert prod["fast"]["available"]  # the browser extension fills it (P8b); checked on click
 
 
 def test_find_apply_email():

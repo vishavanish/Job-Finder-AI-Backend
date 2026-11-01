@@ -151,6 +151,7 @@ class Settings(BaseSettings):
     RATE_LIMIT_ATS_FOLLOW: str = "60/hour"
     RATE_LIMIT_EXTENSION_PAIR: str = "10/hour"       # pairing codes / token exchanges (P8a)
     RATE_LIMIT_EXTENSION_CAPTURE: str = "120/hour"   # "Save jobs" clicks from the extension
+    RATE_LIMIT_EXTENSION_FILL: str = "300/hour"      # Fast apply pages answered for the extension (P8b)
     ATS_GONE_AFTER: int = 3                     # 404s in a row before a company is switched off
     RATE_LIMIT_ATS_SEARCH: str = "30/minute"
     RATE_LIMIT_ATS_ADD_COMPANY: str = "10/hour"

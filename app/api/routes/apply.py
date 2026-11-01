@@ -124,13 +124,14 @@ def get_prep(pack_id: str, user=Depends(get_current_user), db: Session = Depends
 #   POST    /apply/runs/{id}/approve       level 2: submit this run (after a 30-90 s pacing gap)
 #   POST    /apply/runs/{id}/cancel
 #   POST    /apply/runs/{id}/done          you finished it on the real page ({submitted: true|false})
+#   POST    /apply/runs/{id}/browser       continue a stopped run in your own browser (extension, P8b E3b)
 #   GET     /apply/runs/{id}/proofs[/{proof_id}]   screenshots (PNG), owner only
 
 from app.models.apply import ApplyRun  # noqa: E402
 from app.models.apply_schemas import (  # noqa: E402
     ApplySettingsIn, ApplySettingsOut, ProofOut, RunAnswers, RunDone, RunField, RunIn, RunList, RunOut,
 )
-from app.services import apply_engine, entitlements  # noqa: E402
+from app.services import apply_engine, entitlements, extension  # noqa: E402
 
 WAITING = ("awaiting_input", "awaiting_review", "needs_user")
 
@@ -142,7 +143,7 @@ def _run_out(db: Session, run: ApplyRun) -> RunOut:
               for p in plan.get("fields", [])]
     return RunOut(
         id=run.id, job_id=run.job_id, title=job.title if job else "", company=job.company if job else "",
-        mode=run.mode, level=run.level, adapter=run.adapter, apply_url=run.apply_url, state=run.state,
+        mode=run.mode, runner=plan.get("runner") or "worker", level=run.level, adapter=run.adapter, apply_url=run.apply_url, state=run.state,
         message=run.message, fields=fields, files=plan.get("files") or {}, resume_id=run.resume_id,
         pack_id=run.pack_id, application_id=run.application_id, proofs=len(apply_engine.proofs(db, run)),
         steps=plan.get("steps") or [], vision=plan.get("vision"),
@@ -159,6 +160,8 @@ def _settings_out(db: Session, user) -> ApplySettingsOut:
         risk_accepted_at=s.risk_accepted_at, hours_start=s.hours_start, hours_end=s.hours_end, timezone=s.timezone,
         paused=s.paused, usage_today=apply_engine.usage_today(db, user.id, s),
         allow_generic=s.allow_generic, generic_submit_enabled=cfg.GENERIC_APPLY_SUBMIT,
+        extension_assist=s.extension_assist, extension_connected=extension.has_connection(db, user.id),
+        fast_notice_accepted_at=s.fast_notice_at,
         caps={"auto_per_day": cfg.APPLY_DAILY_CAP, "per_platform_per_day": cfg.APPLY_PLATFORM_DAILY_CAP,
               "fast_per_day": cfg.FAST_APPLY_DAILY_CAP, "company_cooldown_days": cfg.APPLY_COMPANY_COOLDOWN_DAYS,
               "generic_per_day": cfg.APPLY_GENERIC_DAILY_CAP},
@@ -176,7 +179,8 @@ def get_apply_settings(user=Depends(get_current_user), db: Session = Depends(get
 def put_apply_settings(req: ApplySettingsIn, user=Depends(get_current_user), db: Session = Depends(get_db)):
     apply_engine.update_settings(db, user, level=req.level, accept_risk=req.accept_risk_notice,
                                  hours_start=req.hours_start, hours_end=req.hours_end, tz=req.timezone,
-                                 paused=req.paused, allow_generic=req.allow_generic)
+                                 paused=req.paused, allow_generic=req.allow_generic,
+                                 extension_assist=req.extension_assist, accept_fast_notice=req.accept_fast_notice)
     db.commit()
     return _settings_out(db, user)
 
@@ -187,10 +191,13 @@ def start_run(request: Request, body: RunIn, user=Depends(require_feature("auto_
               db: Session = Depends(get_db)):
     """Preflight (switches, level, risk notice, caps, duplicates, company
     cooldown, resume) and a queued run; a worker on the apply queue opens
-    the form next. Nothing is submitted until you approve the run."""
+    the form next. Nothing is submitted until you approve the run.
+    Fast apply with the browser extension connected starts `in_browser`
+    (runner `extension`): open the job page and the extension fills it."""
     run = apply_engine.create_run(db, user, _job_or_404(db, body.job_id), mode=body.mode)
-    from app.core.celery_tasks import apply_prepare_task
-    apply_prepare_task.apply_async(args=[run.id], queue=settings.apply_queue)
+    if run.state == "queued":
+        from app.core.celery_tasks import apply_prepare_task
+        apply_prepare_task.apply_async(args=[run.id], queue=settings.apply_queue)
     return _run_out(db, run)
 
 
@@ -240,6 +247,14 @@ def cancel_run(run_id: str, user=Depends(get_current_user), db: Session = Depend
 @router.post("/runs/{run_id}/done", response_model=RunOut)
 def finish_run(run_id: str, body: RunDone, user=Depends(get_current_user), db: Session = Depends(get_db)):
     run = apply_engine.mark_done(db, apply_engine.get_owned(db, user.id, run_id), submitted=body.submitted)
+    return _run_out(db, run)
+
+
+@router.post("/runs/{run_id}/browser", response_model=RunOut)
+def open_run_in_browser(run_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """A run waiting for you continues in your own browser: open its apply page and the Job Finder extension's
+    "Fill this form" fills it with this run's answers. Needs a connected extension."""
+    run = apply_engine.open_in_browser(db, user, apply_engine.get_owned(db, user.id, run_id))
     return _run_out(db, run)
 
 

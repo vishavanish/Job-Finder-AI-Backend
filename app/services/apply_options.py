@@ -7,14 +7,16 @@ the feed, GET /jobs and the apply routes all give the same answer.
 
   manual  always — the user applies on the job's own page.
   fast    LinkedIn Easy Apply (a LinkedIn posting with no external apply
-          link): fill the form, the user submits. Needs a browser on the
-          user's own PC, so it is off in production until the local agent
-          (P8) exists.
+          link): the browser extension fills the form in the user's own tab,
+          the user submits (P8b). Whether an extension is connected is
+          checked on click (apply_engine.create_run → extension_required).
   auto    Greenhouse / Lever pages: the level-2 engine (P4b). Other hosted
           career forms (Ashby, SmartRecruiters, Workable, ...): the AI form
           reader (adapter "generic", P4c), which the user turns on in Apply
-          settings. The engine's own checks (level, risk notice, opt-in,
-          caps, duplicates) run on click.
+          settings — also any company career page a board posting links to
+          (not job boards or account-only suites like Workday,
+          sites.career_page). The engine's own checks (level, risk notice,
+          opt-in, caps, duplicates) run on click.
   email   the job post itself gives an address to apply to.
 
 The adapter is detected from `apply_url` (the company's own page behind a
@@ -25,8 +27,7 @@ from __future__ import annotations
 import re
 from urllib.parse import urlparse
 
-from app.apply.sites import GENERIC_SOURCES, generic_host
-from app.core.config import get_settings
+from app.apply.sites import GENERIC_SOURCES, career_page, generic_host
 from app.services import apply_blocks
 
 _EMAIL = re.compile(r"(?<![\w.+-])([A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,24})(?![\w-])")
@@ -70,9 +71,11 @@ def adapter_for(job: dict) -> str | None:
         return direct
     if job.get("apply_url") and (job.get("source") or "").lower() in GENERIC_SOURCES:
         return "generic"  # a career page on a custom host of a platform the AI form reader handles
+    if career_page(job.get("apply_url") or ""):
+        return "generic"  # the company's own career page behind a board posting (Indeed, LinkedIn, ...)
     found = detect_adapter(job.get("url") or "")
     if found == "linkedin" and job.get("apply_url"):
-        return None  # LinkedIn posting that applies on an unknown company site
+        return None  # LinkedIn posting that applies on a job board or an account-only career suite
     return found
 
 
@@ -96,11 +99,9 @@ def _opt(available: bool, reason: str | None = None) -> dict:
 
 def options(job: dict) -> dict:
     adapter = adapter_for(job)
-    production = get_settings().ENVIRONMENT == "production"
 
     if adapter == "linkedin":
-        fast = (_opt(False, "Fast apply for LinkedIn needs the local apply agent, which is not available yet.")
-                if production else _opt(True))
+        fast = _opt(True)  # runs in the user's browser through the extension (P8b); checked on click
     else:
         fast = _opt(False, "Fast apply works on LinkedIn Easy Apply jobs.")
 
@@ -113,7 +114,8 @@ def options(job: dict) -> dict:
     elif adapter == "linkedin":
         auto = _opt(False, "LinkedIn jobs are never submitted automatically — use Fast apply.")
     else:
-        auto = _opt(False, "Auto apply works on Greenhouse, Lever and the career sites the AI form reader knows.")
+        auto = _opt(False, "Auto apply needs the company's own application page; this job applies on the job board "
+                           "or on a career site that needs an account.")
 
     email = find_apply_email(job.get("description") or "")
     return {
