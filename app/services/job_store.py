@@ -147,15 +147,18 @@ def get_user_job(db: Session, user_id: str, job_id: str) -> UserJob | None:
     return db.query(UserJob).filter(UserJob.user_id == user_id, UserJob.job_id == job_id).first()
 
 
-def decide(uj: UserJob | None, *, include_seen: bool, profile_hash: str) -> str:
-    """"score" | "reuse" (stored score is for this profile) | "skip"."""
+def decide(uj: UserJob | None, *, include_seen: bool, profile_hash: str, min_score: float | None = None) -> str:
+    """"score" | "reuse" (stored score is for this profile) | "skip". A job that scored too low before comes
+    back without a new AI call once the minimum score is lowered to its score."""
     if uj is None:
         return "score"
     same_profile = uj.profile_hash == profile_hash and uj.llm_score is not None
     if uj.state in ("hidden", "applied"):
         return "skip"
     if uj.state == "filtered":
-        return "skip" if uj.profile_hash == profile_hash else "score"
+        if uj.profile_hash != profile_hash:
+            return "score"
+        return "reuse" if same_profile and min_score is not None and uj.llm_score >= min_score else "skip"
     # seen / saved
     if not include_seen:
         return "skip"

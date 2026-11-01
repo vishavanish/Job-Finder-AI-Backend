@@ -229,6 +229,32 @@ def test_keyed_api_needs_a_key_and_respects_the_daily_cap(monkeypatch):
     assert calls[-1] == ("Django", "own:key")
 
 
+def test_failed_calls_do_not_use_up_the_daily_cap(monkeypatch):
+    calls = []
+
+    def refused(q, key):
+        calls.append(q.keyword)
+        raise aggregators.SourceError("Careerjet: HTTP 403")
+
+    monkeypatch.setitem(aggregators.KEYWORD_APIS, "careerjet", refused)
+    monkeypatch.setattr(get_settings(), "SOURCE_DAILY_CAP_PLATFORM_KEY", 2)
+    lookup = lambda scope: ResolvedKey("key", "platform")  # noqa: E731
+    messages = []
+    job_sources.scrape_all(["A", "B", "C", "D"], ["Pune"], ["careerjet"], user_id="u-refund", key_lookup=lookup,
+                           progress=messages.append)
+    assert calls == ["A", "B", "C", "D"]  # a cap of 2 would have stopped at B if failures counted
+    assert not any("limit reached" in m for m in messages)
+
+    # Calls that work still count, and reaching the cap isn't reported as a missing key.
+    monkeypatch.setitem(aggregators.KEYWORD_APIS, "careerjet", lambda q, key: calls.append(q.keyword) or [])
+    messages.clear()
+    job_sources.scrape_all(["E", "F", "G"], ["Pune"], ["careerjet"], user_id="u-refund", key_lookup=lookup,
+                           progress=messages.append)
+    assert calls[-2:] == ["E", "F"]
+    assert any("limit reached" in m for m in messages)
+    assert not any("no usable API key" in m for m in messages)
+
+
 def test_cached_feed_waits_for_a_parallel_download(fake_redis):
     fake_redis.set("feedlock:remotive", "1")
     with pytest.raises(source_limits.FeedUnavailable):

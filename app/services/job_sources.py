@@ -223,7 +223,7 @@ def _run_keyword_api(key: str, query: SourceQuery, *, user_id: str | None, key_l
 
     spec = registry.get(key)
     own_key_only = user_key_only(key) and not shared_keys_allowed(user_id)
-    tried, last_error = [], None
+    tried, last_error, capped = [], None, False
     for scope in spec.key_scopes:
         resolved = key_lookup(scope) if key_lookup else None
         if not resolved or (own_key_only and resolved.source != "byok"):
@@ -231,15 +231,18 @@ def _run_keyword_api(key: str, query: SourceQuery, *, user_id: str | None, key_l
         label = spec.name if len(spec.key_scopes) == 1 else f"{spec.name} ({scope})"
         if not source_limits.take_quota(f"{key}:{scope}", user_id, resolved.source):
             progress(f"{label}: today's search limit reached — skipped until tomorrow")
+            capped = True
             continue
         tried.append(scope)
         try:
             jobs = aggregators.KEYWORD_APIS[scope](query, resolved.value)
         except SourceError as e:
+            source_limits.refund_quota(f"{key}:{scope}", user_id, resolved.source)
             last_error = str(e)
             progress(f"{label} failed: {e}")
             continue
         except Exception as e:  # noqa: BLE001 — never echo the exception text: it may contain the key
+            source_limits.refund_quota(f"{key}:{scope}", user_id, resolved.source)
             last_error = f"{label}: {type(e).__name__}"
             progress(f"{label} failed: {type(e).__name__}")
             continue
@@ -247,7 +250,7 @@ def _run_keyword_api(key: str, query: SourceQuery, *, user_id: str | None, key_l
         progress(f"{label}: {len(jobs)} jobs for '{query.keyword}' in '{query.location}'")
         if jobs or scope == spec.key_scopes[-1]:
             return jobs
-    if not tried and last_error is None:
+    if not tried and last_error is None and not capped:
         progress(f"{spec.name}: no usable API key — skipped")
     elif last_error and key not in outcomes.ok:
         outcomes.failure(key, last_error)
