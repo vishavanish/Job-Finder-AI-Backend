@@ -7,9 +7,9 @@ the feed, GET /jobs and the apply routes all give the same answer.
 
   manual  always — the user applies on the job's own page.
   fast    LinkedIn Easy Apply (a LinkedIn posting with no external apply
-          link): fill the form, the user submits. Needs a browser on the
-          user's own PC, so it is off in production until the local agent
-          (P8) exists.
+          link): the browser extension fills the form in the user's own tab,
+          the user submits (P8b). Whether an extension is connected is
+          checked on click (apply_engine.create_run → extension_required).
   auto    Greenhouse / Lever pages: the level-2 engine (P4b). Other hosted
           career forms (Ashby, SmartRecruiters, Workable, ...): the AI form
           reader (adapter "generic", P4c), which the user turns on in Apply
@@ -28,7 +28,6 @@ import re
 from urllib.parse import urlparse
 
 from app.apply.sites import GENERIC_SOURCES, career_page, generic_host
-from app.core.config import get_settings
 from app.services import apply_blocks
 
 _EMAIL = re.compile(r"(?<![\w.+-])([A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,24})(?![\w-])")
@@ -100,11 +99,9 @@ def _opt(available: bool, reason: str | None = None) -> dict:
 
 def options(job: dict) -> dict:
     adapter = adapter_for(job)
-    production = get_settings().ENVIRONMENT == "production"
 
     if adapter == "linkedin":
-        fast = (_opt(False, "Fast apply for LinkedIn needs the local apply agent, which is not available yet.")
-                if production else _opt(True))
+        fast = _opt(True)  # runs in the user's browser through the extension (P8b); checked on click
     else:
         fast = _opt(False, "Fast apply works on LinkedIn Easy Apply jobs.")
 

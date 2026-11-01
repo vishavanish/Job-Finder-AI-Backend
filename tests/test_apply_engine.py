@@ -443,7 +443,7 @@ def test_fast_apply_fills_linkedin_and_never_submits(client, make_user, engine, 
     monkeypatch.setattr(get_settings(), "ENVIRONMENT", "production")
     r = client.post(f"{API}/apply/runs", json={"job_id": _job("Fast Three", apply_url=None), "mode": "fast"},
                     headers=headers)
-    assert r.status_code == 409 and "local apply agent" in r.json()["detail"]["message"]
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "extension_required"  # no extension connected
 
 
 # ---------------------------------------------------------------- switches

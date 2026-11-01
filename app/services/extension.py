@@ -7,8 +7,10 @@ The user's own browser saves the jobs on a job-search page they opened; nothing 
 so no captcha or block is ever worked around (CLAUDE.md §12).
 
 Pairing: the signed-in web app asks for a 6-digit code (Redis, PAIR_CODE_SECONDS, single use, hashed) →
-the extension trades it for a capture-only token (`jfx_…`, only its SHA-256 stored). The token works only
-on POST /extension/captures (and GET /extension/me); it is listed and revocable in Settings.
+the extension trades it for a token (`jfx_…`, only its SHA-256 stored). The token works only on the
+/extension/* routes: captures (and GET /extension/me), and since P8b the Fast apply routes
+(services/extension_assist.py, allowed by Apply settings "extension_assist"); it is listed and revocable in
+Settings.
 
 Captures are validated hard: a known site, every job URL https on that site's hosts, short plain-text
 fields, ≤ MAX_JOBS per call. They feed the "Saved from your browser" search source (kind `capture`).

@@ -83,6 +83,11 @@ _COVER_LABEL = re.compile(r"\bcover\s*letter\b", re.I)
 _EEO_LABEL = re.compile(r"\b(gender|sex|race|ethnic\w*|veteran|disabilit\w*|pronouns?)\b", re.I)
 
 
+IN_BROWSER_MESSAGE = ("Finish it in the LinkedIn tab: Job Finder fills each page, you check it and click Next "
+                      "and Submit.")
+IN_BROWSER_STALE_MINUTES = 60
+
+
 def _error(code: int, err: str, message: str, **details) -> HTTPException:
     return HTTPException(code, detail={"code": err, "message": message, **details})
 
@@ -109,8 +114,19 @@ def get_settings_row(db: Session, user_id: str) -> ApplySettings:
 
 def update_settings(db: Session, user: User, *, level: int | None, accept_risk: bool | None,
                     hours_start: int | None, hours_end: int | None, tz: str | None,
-                    paused: bool | None, allow_generic: bool | None = None) -> ApplySettings:
+                    paused: bool | None, allow_generic: bool | None = None, extension_assist: bool | None = None,
+                    accept_fast_notice: bool | None = None) -> ApplySettings:
     row = get_settings_row(db, user.id)
+    if accept_fast_notice is True and row.fast_notice_at is None:
+        row.fast_notice_at = _now()
+    elif accept_fast_notice is False:
+        row.fast_notice_at = None
+    if extension_assist is not None:
+        row.extension_assist = extension_assist
+        if not extension_assist:
+            for run in db.query(ApplyRun).filter(ApplyRun.user_id == user.id, ApplyRun.state == "in_browser").all():
+                _transition(db, run, "cancelled", "You turned off Fast apply in your browser.",
+                            tracker_status="cancelled")
     if accept_risk is True and row.risk_accepted_at is None:
         row.risk_accepted_at = _now()
     elif accept_risk is False:
@@ -310,8 +326,12 @@ def create_run(db: Session, user: User, job: Job, *, mode: str) -> ApplyRun:
     else:  # fast
         if adapter != "linkedin":
             raise _error(409, "fast_not_supported", opts["fast"]["reason"] or "Fast apply doesn't support this job.")
-        if get_settings().ENVIRONMENT == "production":
-            raise _error(409, "fast_not_supported", opts["fast"]["reason"])
+        runner = fast_runner(db, user.id, s)
+        if runner is None:
+            raise _error(409, "extension_required", "Fast apply fills LinkedIn in your own browser. Connect the Job "
+                         "Finder extension in Settings › Browser extension first.")
+        if runner == "extension" and s.fast_notice_at is None:
+            raise _error(409, "fast_notice_required", "Read and accept the Fast apply notice first.")
         level = 1
     _check_caps(db, user.id, s, mode=mode, adapter=adapter)
     key = compute_job_key(job_dict)
@@ -319,16 +339,23 @@ def create_run(db: Session, user: User, job: Job, *, mode: str) -> ApplyRun:
     apply_prep.usable_master(db, user.id)
 
     url = (job.apply_url if adapter != "linkedin" and job.apply_url else job.url) or job.url
+    in_browser = mode == "fast" and runner == "extension"
+    if in_browser:
+        _cancel_stale_browser_runs(db, user.id, f"{user.id}|{key}"[:800])
     run = ApplyRun(user_id=user.id, job_id=job.id, job_key=key[:700], company_title=_company_title(key)[:800],
-                   mode=mode, level=level, adapter=adapter, apply_url=url, state="queued",
-                   active_key=f"{user.id}|{key}"[:800], plan={})
+                   mode=mode, level=level, adapter=adapter, apply_url=url,
+                   state="in_browser" if in_browser else "queued", active_key=f"{user.id}|{key}"[:800],
+                   plan={"runner": "extension"} if in_browser else {})
     db.add(run)
     try:
         db.commit()
     except IntegrityError:
         db.rollback()
         raise _error(409, "run_active", "This job already has an apply run in progress.")
-    _transition(db, run, "queued", "Waiting for a browser on the apply worker.")
+    if in_browser:  # the tracker shows it like a queued run; the extension takes it from here
+        _transition(db, run, "in_browser", IN_BROWSER_MESSAGE, tracker_status="queued")
+    else:
+        _transition(db, run, "queued", "Waiting for a browser on the apply worker.")
     return run
 
 
@@ -802,9 +829,10 @@ def cancel(db: Session, run: ApplyRun, reason: str = "Cancelled by you.") -> App
     return run
 
 
-def mark_done(db: Session, run: ApplyRun, *, submitted: bool) -> ApplyRun:
-    """The user finished a needs_user / Fast apply run on the real page."""
-    if run.state not in ("needs_user", "awaiting_input", "awaiting_review"):
+def mark_done(db: Session, run: ApplyRun, *, submitted: bool, source: str = "manual") -> ApplyRun:
+    """The user finished a needs_user / Fast apply run on the real page (source "extension" when the
+    extension saw the site's confirmation)."""
+    if run.state not in ("needs_user", "awaiting_input", "awaiting_review", "in_browser"):
         raise _error(409, "run_not_waiting", "This run is not waiting for you.")
     if not submitted:
         _transition(db, run, "cancelled", "You didn't submit this application.", tracker_status="cancelled")
@@ -812,12 +840,42 @@ def mark_done(db: Session, run: ApplyRun, *, submitted: bool) -> ApplyRun:
     run.submitted_at = _now()
     _transition(db, run, "done", "You submitted this application yourself.", tracker_status="")
     job = db.get(Job, run.job_id)
-    row = record_status(user_id=run.user_id, job=_job_dict(job), status="submitted", status_source="manual",
-                        note="submitted by the user after an apply run")
+    note = ("LinkedIn confirmed the application (Fast apply in your browser)" if source == "extension"
+            else "submitted by the user after an apply run")
+    row = record_status(user_id=run.user_id, job=_job_dict(job), status="submitted", status_source=source, note=note)
     run.application_id = row.id
     job_store.set_state(db, user_id=run.user_id, job_id=run.job_id, state="applied")
     db.commit()
     return run
+
+
+def browser_closed(db: Session, run: ApplyRun) -> ApplyRun:
+    """The LinkedIn tab closed before the site confirmed anything: ask the user what happened."""
+    if run.state != "in_browser":
+        raise _error(409, "run_not_waiting", "This run is not open in your browser.")
+    _transition(db, run, "needs_user", "The LinkedIn tab was closed. Did you submit the application?",
+                tracker_status="")
+    return run
+
+
+def _cancel_stale_browser_runs(db: Session, user_id: str, active_key: str) -> None:
+    """A Fast apply tab the user abandoned keeps its job locked; after IN_BROWSER_STALE_MINUTES a new click
+    starts over."""
+    since = _naive(_now() - timedelta(minutes=IN_BROWSER_STALE_MINUTES))
+    for run in db.query(ApplyRun).filter(ApplyRun.user_id == user_id, ApplyRun.active_key == active_key,
+                                         ApplyRun.state == "in_browser", ApplyRun.updated_at < since).all():
+        _transition(db, run, "cancelled", "Started again.", tracker_status="")
+
+
+def fast_runner(db: Session, user_id: str, s: ApplySettings) -> str | None:
+    """Where Fast apply runs: "extension" (the user's own browser, P8b) when one is connected and allowed,
+    else the worker's visible browser outside production (P4b), else nowhere."""
+    from app.services import extension
+    if s.extension_assist and extension.has_connection(db, user_id):
+        return "extension"
+    if get_settings().ENVIRONMENT != "production":
+        return "worker"
+    return None
 
 
 def cancel_active_runs(db: Session, user_id: str, *, reason: str) -> int:

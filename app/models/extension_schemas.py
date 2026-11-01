@@ -62,3 +62,51 @@ class ExtensionMeOut(BaseModel):
     email: str
     saved_total: int
     saved_today: int
+
+
+# ---------------------------------------------------------------- Fast apply in the browser (P8b E3a)
+
+class AssistRunOut(BaseModel):
+    run_id: Optional[str] = Field(None, description="Your Fast apply run for this LinkedIn job; null = none")
+    title: str = ""
+    company: str = ""
+
+
+class AssistFieldIn(BaseModel):
+    key: str = Field(..., max_length=200)
+    label: str = Field("", max_length=2000)
+    type: str = Field("text", max_length=16, description="text | textarea | number | select | radio | checkbox | "
+                                                         "combobox | file")
+    options: list[str] = Field(default_factory=list, max_length=200)
+    required: bool = False
+
+
+class AssistFillIn(BaseModel):
+    fields: list[AssistFieldIn] = Field(..., max_length=60)
+
+
+class AssistAnswerOut(BaseModel):
+    key: str
+    value: Optional[str] = None
+    source: str = Field(..., description="profile | eeo | answer_bank | ai | user | none")
+    needs_input: bool
+
+
+class AssistFillOut(BaseModel):
+    answers: list[AssistAnswerOut]
+    files: dict[str, str] = Field(default_factory=dict, description="{field key: resume}")
+
+
+class AssistRememberIn(BaseModel):
+    key: str = Field(..., max_length=200)
+    value: str = Field(..., max_length=2000)
+
+
+class AssistResultIn(BaseModel):
+    outcome: str = Field(..., pattern="^(submitted|closed)$",
+                         description="submitted = LinkedIn confirmed it; closed = the tab closed first")
+
+
+class AssistResultOut(BaseModel):
+    run_id: str
+    state: str

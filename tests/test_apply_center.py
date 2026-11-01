@@ -104,7 +104,7 @@ def test_apply_options_by_job_kind(monkeypatch):
 
     monkeypatch.setattr(get_settings(), "ENVIRONMENT", "production")
     prod = apply_options.options({"url": "https://www.linkedin.com/jobs/view/1", "description": ""})
-    assert not prod["fast"]["available"] and "local apply agent" in prod["fast"]["reason"]
+    assert prod["fast"]["available"]  # the browser extension fills it (P8b); checked on click
 
 
 def test_find_apply_email():
