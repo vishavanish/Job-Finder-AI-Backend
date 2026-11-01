@@ -1,8 +1,12 @@
 name: Deploy Job Finder API to OCI
 
+# Tests run on dev and every other branch; merging dev into main skips them (owner decision 2026-11-01:
+# main only receives dev, which has already been tested).
 on:
   push:
+    branches-ignore: [main]
   pull_request:
+    branches-ignore: [main]
 
 permissions:
   contents: read
