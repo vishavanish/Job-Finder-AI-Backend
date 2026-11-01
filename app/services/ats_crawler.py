@@ -27,6 +27,7 @@ import hashlib
 import json
 import logging
 import random
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -57,15 +58,25 @@ class HostBusy(Exception):
 
 
 @contextmanager
-def host_slot(host: str):
-    """At most ATS_HOST_CONCURRENCY crawls per ATS host at once, across all workers."""
+def host_slot(host: str, *, live: bool = False, wait_seconds: float = 0.0):
+    """At most ATS_HOST_CONCURRENCY crawls per ATS host at once, across all workers. `live` is a check a user is
+    waiting for: it may also use ATS_HOST_LIVE_SLOTS, which background crawls never take, and it can wait up to
+    `wait_seconds` for a slot instead of failing at once (QA8)."""
+    cfg = get_settings()
+    limit = cfg.ATS_HOST_CONCURRENCY + (cfg.ATS_HOST_LIVE_SLOTS if live else 0)
     r = get_redis()
     key = f"ats:host:{host}"
-    n = r.incr(key)
-    r.expire(key, 120)  # a crashed worker can't hold a slot for long
-    try:
-        if n > get_settings().ATS_HOST_CONCURRENCY:
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        n = r.incr(key)
+        r.expire(key, 120)  # a crashed worker can't hold a slot for long
+        if n <= limit:
+            break
+        r.decr(key)
+        if time.monotonic() >= deadline:
             raise HostBusy(host)
+        time.sleep(0.25)
+    try:
         yield
     finally:
         r.decr(key)
@@ -240,7 +251,7 @@ def _board_name(company: AtsCompany, jobs: list[dict]) -> str | None:
         return None
 
 
-def crawl_company(db: Session, company_id: str) -> dict:
+def crawl_company(db: Session, company_id: str, *, live: bool = False, wait_seconds: float = 0.0) -> dict:
     company = db.get(AtsCompany, company_id)
     if company is None or not company.active:
         return {"company_id": company_id, "skipped": "inactive"}
@@ -250,7 +261,7 @@ def crawl_company(db: Session, company_id: str) -> dict:
         return {"company_id": company_id, "skipped": "platform off"}
     now = _now()
     try:
-        with host_slot(api_host(company)):
+        with host_slot(api_host(company), live=live, wait_seconds=wait_seconds):
             result = fetch(company)
     except HostBusy:
         company.next_crawl_at = now + timedelta(seconds=60 + random.uniform(0, 60))

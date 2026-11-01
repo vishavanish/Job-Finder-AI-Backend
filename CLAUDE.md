@@ -648,6 +648,21 @@ Plan: `docs/plans/P8b-fast-apply-extension.md` (owner approved all eight default
 - Migration `0026` (run `alembic upgrade head`). New env (optional): `RATE_LIMIT_EXTENSION_FILL` (300/hour).
 - Users reload the unpacked extension (v0.3.0) to get Fast apply and Fill this form; Chrome asks to allow the new "scripting" permission. The shortcut can be changed at `chrome://extensions/shortcuts`.
 
+### 6.23 QA8 — search speed and users taking turns (branch `dev`)
+
+Plan: `docs/plans/QA8-search-speed-and-volume.md` (owner approved steps A, C, D on 2026-11-01). Measured before: 7 titles × 2 places took about 6 min, the first title finished after about 2.5 min, the last titles waited about 3 min for a worker slot. Speeds below are not yet measured on the server.
+
+| Item | State |
+|------|-------|
+| A — jobs after each place | ✅ `job_sources.scrape_all(on_place=)` hands over each place's LinkedIn/Indeed/keyed-API jobs when that place is done; `search_and_score_keyword` scores them before the next place. Feeds, alert emails, saved jobs and the index still come once, at the end. Job alerts and `/search` don't pass `on_place` and behave as before. |
+| C — titles take turns | ✅ `dispatch_pipeline_group` queues `SEARCH_TITLES_AT_ONCE` titles; the rest wait in Redis (`pipeline_progress.hold_titles`), and each finished, failed or cancelled title queues the next (`_start_next_title`), behind other users' titles. |
+| D — live career-page checks | ✅ `ats_crawler.host_slot(host, live=, wait_seconds=)`: background crawls stay at `ATS_HOST_CONCURRENCY`; a live check may also use `ATS_HOST_LIVE_SLOTS` and waits for a slot until its `ATS_TOPUP_SECONDS` deadline. Before, it started 8 checks at once against hosts allowing 2, and the rest failed at once with `HostBusy`. |
+| Tests | ✅ `tests/test_qa8_search_speed.py`. |
+| Not done | B (separate worker for maintenance + email; needs the server's memory and CPU figures), E and F. |
+
+**Operational changes introduced in QA8**
+- No migration. New env (optional): `SEARCH_TITLES_AT_ONCE` (3), `ATS_HOST_LIVE_SLOTS` (1).
+
 ---
 
 ## 7. Modules in detail

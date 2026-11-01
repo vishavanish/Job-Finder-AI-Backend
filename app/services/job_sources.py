@@ -344,8 +344,11 @@ def scrape_all(
     on_source_result: Callable[[str, str | None], None] | None = None,
     progress: Callable[[str], None] = NoOpProgress,
     timings: dict[str, float] | None = None,
+    on_place: Callable[[list[dict]], None] | None = None,
 ) -> list[dict]:
-    """`timings`, when given, is filled with seconds spent per source (QA2 §1.4)."""
+    """`timings`, when given, is filled with seconds spent per source (QA2 §1.4). `on_place`, when given, gets
+    each searched place's jobs (LinkedIn, Indeed, keyed APIs) as soon as that place is done, so they can be shown
+    before the next place starts (QA8); those jobs are then left out of the returned list."""
     sources = [s.strip().lower() for s in sources if s]
     locations = [loc.strip() for loc in locations if loc.strip()] or ["India"]
     timings = timings if timings is not None else {}
@@ -372,6 +375,7 @@ def scrape_all(
     for keyword in keywords:
         for location in places:
             search_num += 1
+            place_jobs: list[dict] = []
             if jobspy_sites:
                 started = time.monotonic()
                 df, error = _run_jobspy(
@@ -391,16 +395,20 @@ def scrape_all(
                         outcomes.success(key)
                     elif error:
                         outcomes.failure(key, error)
-                all_jobs.extend(rows)
+                place_jobs.extend(rows)
                 timed(jobspy_label, started)
             query = SourceQuery(keyword=keyword, location=location, country=country_indeed,
                                 max_age_hours=max_age_hours, results_wanted=results_per_keyword,
                                 client_ip=client_ip, client_user_agent=client_user_agent)
             for key in keyword_apis:
                 started = time.monotonic()
-                all_jobs.extend(_run_keyword_api(key, query, user_id=user_id, key_lookup=key_lookup,
-                                                 outcomes=outcomes, progress=progress))
+                place_jobs.extend(_run_keyword_api(key, query, user_id=user_id, key_lookup=key_lookup,
+                                                   outcomes=outcomes, progress=progress))
                 timed(registry.get(key).name, started)
+            if on_place is None:
+                all_jobs.extend(place_jobs)
+            elif place_jobs:
+                on_place(_deduplicate_jobs(_validate_jobs(place_jobs, progress), progress))
             if jobspy_sites and search_num < total_searches:
                 delay = search_delay_sec + random.uniform(0, 3)
                 progress(f"pausing {delay:.0f}s before next search")

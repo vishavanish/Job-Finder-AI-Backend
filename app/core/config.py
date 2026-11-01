@@ -121,12 +121,14 @@ class Settings(BaseSettings):
     ATS_HOT_REFRESH_HOURS: int = 6              # companies people search / saved jobs
     ATS_COLD_REFRESH_HOURS: int = 24
     ATS_HOST_CONCURRENCY: int = 2               # parallel requests per ATS host
+    ATS_HOST_LIVE_SLOTS: int = 1                # extra per-host slots only live checks for a waiting user may use
     ATS_MAX_JOBS_PER_COMPANY: int = 1000
     ATS_WORKDAY_MAX_JOBS: int = 400
     ATS_INDEX_COUNTRIES: str = "India,Remote"   # markets indexed first for very large tenants
     ATS_MIN_COMPANIES: int = 10                 # fewer matches -> live top-up
     ATS_TOPUP_MAX_COMPANIES: int = 40
     ATS_TOPUP_SECONDS: int = 20
+    SEARCH_TITLES_AT_ONCE: int = 3              # one search queues this many titles at a time, so users take turns
     ATS_STALE_DAYS: int = 3                     # capped crawls close jobs not seen for this long
     ATS_CLOSED_RETENTION_DAYS: int = 7
     ATS_MAX_INDEXED_JOBS: int = 300000

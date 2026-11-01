@@ -433,7 +433,9 @@ def topup(session_factory: Callable[[], Session], q: str, *, progress: Callable[
             company = s.get(AtsCompany, company_id)
             impl = platforms.get(company.platform)
             found: dict[str, dict] = {}
-            with ats_crawler.host_slot(ats_crawler.api_host(company)):
+            # Many companies share one host: wait for a slot while this check still has time, don't fail at once.
+            with ats_crawler.host_slot(ats_crawler.api_host(company), live=True,
+                                       wait_seconds=max(0.0, deadline - time.monotonic())):
                 for phrase in phrases[:3]:
                     if time.monotonic() > deadline:
                         break
@@ -453,7 +455,8 @@ def topup(session_factory: Callable[[], Session], q: str, *, progress: Callable[
     def crawl_one(company_id: str) -> None:
         s = session_factory()
         try:
-            res = ats_crawler.crawl_company(s, company_id)
+            res = ats_crawler.crawl_company(s, company_id, live=True,
+                                            wait_seconds=max(0.0, deadline - time.monotonic()))
             counts["crawled"] += 1
             counts["added"] += res.get("added", 0)
         except Exception as e:  # noqa: BLE001
