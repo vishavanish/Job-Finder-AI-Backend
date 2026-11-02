@@ -657,6 +657,7 @@ Plan: `docs/plans/QA8-search-speed-and-volume.md` (owner approved steps A, C, D 
 | A — jobs after each place | ✅ `job_sources.scrape_all(on_place=)` hands over each place's LinkedIn/Indeed/keyed-API jobs when that place is done; `search_and_score_keyword` scores them before the next place. Feeds, alert emails, saved jobs and the index still come once, at the end. Job alerts and `/search` don't pass `on_place` and behave as before. |
 | C — titles take turns | ✅ `dispatch_pipeline_group` queues `SEARCH_TITLES_AT_ONCE` titles; the rest wait in Redis (`pipeline_progress.hold_titles`), and each finished, failed or cancelled title queues the next (`_start_next_title`), behind other users' titles. |
 | D — live career-page checks | ✅ `ats_crawler.host_slot(host, live=, wait_seconds=)`: background crawls stay at `ATS_HOST_CONCURRENCY`; a live check may also use `ATS_HOST_LIVE_SLOTS` and waits for a slot until its `ATS_TOPUP_SECONDS` deadline. Before, it started 8 checks at once against hosts allowing 2, and the rest failed at once with `HostBusy`. |
+| Saving company jobs | ✅ `ats_crawler.upsert_jobs` writes in a savepoint: when another check saved the same new job first (`IntegrityError`), it reads the jobs again and updates them. Job ids are cut to the column's 128 characters before matching; a longer id never matched its saved row, so saving it failed on every later check. |
 | Tests | ✅ `tests/test_qa8_search_speed.py`. |
 | Not done | B (separate worker for maintenance + email; needs the server's memory and CPU figures), E and F. |
 
