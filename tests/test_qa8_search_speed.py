@@ -3,12 +3,17 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
+from types import SimpleNamespace
 
 import pytest
 
 from app.core import celery_tasks
 from app.core.config import get_settings
-from app.services import ats_crawler, job_sources, pipeline_progress
+from app.core.db import SessionLocal
+from app.models.ats import AtsJob
+from app.providers.ats.platforms import AtsRef
+from app.services import ats_crawler, ats_registry, job_sources, pipeline_progress
 
 PARAMS = {"user_id": None, "resume_summary": "AI engineer", "skills": ["python"], "career_targets": [],
           "keyword_prefilter_min_pct": 0, "llm_min_score_to_keep": 70}
@@ -146,3 +151,64 @@ def test_a_live_check_waits_for_a_slot_instead_of_failing(fake_redis, monkeypatc
         with ats_crawler.host_slot("y.example", live=True, wait_seconds=0.3):
             pass
     assert int(fake_redis.get("ats:host:y.example")) == full
+
+
+# ---------------------------------------------------------------- two live checks saving the same job
+
+def _ats_job(ext: str, title: str = "Python Engineer") -> dict:
+    return {"external_id": ext, "title": title, "location": "Pune, India", "department": "",
+            "url": f"https://jobs.example/{ext[:40]}", "posted": "", "remote": False, "country": "",
+            "description": "Build things"}
+
+
+@pytest.fixture
+def ats_company():
+    db = SessionLocal()
+    row, _ = ats_registry.get_or_create(db, AtsRef("lever", f"qa8-{uuid.uuid4().hex[:8]}"), origin="admin", name="QA8")
+    db.commit()
+    yield db, row
+    db.rollback()
+    db.query(AtsJob).filter(AtsJob.company_id == row.id).delete()
+    db.delete(row)
+    db.commit()
+    db.close()
+
+
+def test_a_job_saved_by_another_check_meanwhile_is_updated_not_lost(ats_company, monkeypatch):
+    db, company = ats_company
+    # The other check's row is already there, but this check's first read doesn't see it (it read just before).
+    db.add(AtsJob(company_id=company.id, external_id="same-job", first_seen_at=ats_crawler._now(),
+                  last_seen_at=ats_crawler._now(), **ats_crawler._row_fields(company, _ats_job("same-job", "Older"))))
+    db.commit()
+    real_query = db.query
+    reads: list[bool] = []
+
+    def query(*entities):
+        if len(entities) == 1 and entities[0] is AtsJob and not reads:
+            reads.append(True)
+            return SimpleNamespace(filter=lambda *a: SimpleNamespace(all=lambda: []))
+        return real_query(*entities)
+
+    new_rows: list = []
+    jobs = [_ats_job("same-job"), _ats_job("other-job", "Data Engineer")]
+    with monkeypatch.context() as patch:
+        patch.setattr(db, "query", query)
+        result = ats_crawler.upsert_jobs(db, company, jobs, complete=False, close=False, new_rows=new_rows)
+    db.commit()
+
+    rows = {r.external_id: r for r in db.query(AtsJob).filter(AtsJob.company_id == company.id)}
+    assert reads and set(rows) == {"same-job", "other-job"}  # the rest of this company's jobs aren't lost
+    assert rows["same-job"].title == "Python Engineer"
+    assert result["added"] == 1 and [r.external_id for r in new_rows] == ["other-job"]
+    assert company.job_count == 2
+
+
+def test_long_job_ids_match_their_saved_rows(ats_company):
+    db, company = ats_company
+    long_id = "x" * 200
+    assert ats_crawler.upsert_jobs(db, company, [_ats_job(long_id)], complete=True)["added"] == 1
+    db.commit()
+    again = ats_crawler.upsert_jobs(db, company, [_ats_job(long_id)], complete=True)  # used to collide, then close it
+    db.commit()
+    assert again == {"added": 0, "changed": 0, "closed": 0}
+    assert db.query(AtsJob).filter(AtsJob.company_id == company.id).one().closed_at is None

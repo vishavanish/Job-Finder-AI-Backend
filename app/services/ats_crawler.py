@@ -32,6 +32,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import or_, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -154,14 +155,27 @@ def upsert_jobs(db: Session, company: AtsCompany, jobs: list[dict], *, complete:
                 new_rows: list | None = None) -> dict:
     """Writes one crawl's jobs; returns counts. complete=False never closes jobs it didn't see this time;
     close=False (a live text search, not a crawl) closes nothing.
-    When the index is full (ATS_MAX_INDEXED_JOBS) known jobs are still refreshed but no new ones added."""
+    When the index is full (ATS_MAX_INDEXED_JOBS) known jobs are still refreshed but no new ones added.
+    Two live checks can save the same new job at once (QA8): the loser reads the jobs again and updates them."""
+    try:
+        with db.begin_nested():
+            return _write_jobs(db, company, jobs, complete=complete, close=close, new_rows=new_rows)
+    except IntegrityError:
+        if new_rows is not None:
+            new_rows.clear()
+    with db.begin_nested():
+        return _write_jobs(db, company, jobs, complete=complete, close=close, new_rows=new_rows)
+
+
+def _write_jobs(db: Session, company: AtsCompany, jobs: list[dict], *, complete: bool, close: bool,
+                new_rows: list | None) -> dict:
     now = _now()
     allow_new = not index_full(db)
     existing = {r.external_id: r for r in db.query(AtsJob).filter(AtsJob.company_id == company.id).all()}
     seen: set[str] = set()
     added = changed = 0
     for job in jobs:
-        ext = job.get("external_id") or job.get("url")
+        ext = str(job.get("external_id") or job.get("url") or "")[:128]  # the column's size: ids must match the rows
         if not ext or not job.get("title") or ext in seen:
             continue
         seen.add(ext)
@@ -170,7 +184,7 @@ def upsert_jobs(db: Session, company: AtsCompany, jobs: list[dict], *, complete:
         if row is None:
             if not allow_new:
                 continue
-            row = AtsJob(company_id=company.id, external_id=ext[:128], first_seen_at=now, last_seen_at=now, **fields)
+            row = AtsJob(company_id=company.id, external_id=ext, first_seen_at=now, last_seen_at=now, **fields)
             db.add(row)
             if new_rows is not None:
                 new_rows.append(row)
