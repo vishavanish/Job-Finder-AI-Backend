@@ -664,6 +664,24 @@ Plan: `docs/plans/QA8-search-speed-and-volume.md` (owner approved steps A, C, D 
 **Operational changes introduced in QA8**
 - No migration. New env (optional): `SEARCH_TITLES_AT_ONCE` (3), `ATS_HOST_LIVE_SLOTS` (1).
 
+### 6.24 QA9 — more jobs per search (branch `dev`)
+
+Plan: `docs/plans/QA9-more-jobs.md` (owner accepted all ten recommended decisions 2026-11-02). Measured before: about 150 unique jobs per search, 2–6 shown. First group built (steps A, B, C, D, J); the effect on a real search is not measured yet. All of it applies only to searches from the Jobs page (`build_pipeline_params(job_search=True)`), except the prefilter rule; job alerts, `/pipeline/run` and `/search` keep their numbers.
+
+| Item | State |
+|------|-------|
+| A — prefilter | ✅ `celery_tasks._title_fits`: a job whose title fits one of the search titles (`matches_keyword`, so "Engineer" alone doesn't count) goes to the AI even when it misses `keyword_prefilter_min_pct`. Also in job alerts. `job_store.decide`: a job the prefilter stopped has no score, so it goes through the prefilter again. New outcome `prefiltered`, counted apart from `filtered` (AI score too low). |
+| A — two groups | ✅ `possible_min_score` (`POSSIBLE_MATCH_MIN_SCORE`, 50): jobs from there up to the slider are kept with `match_group: "possible"`, above it `"strong"`. Earlier low scorers in that range come back without an AI call. Jobs page: "Strong matches" / "Possible matches" headings, slider renamed "Strong match from". The frontend constant `POSSIBLE_MATCH_MIN` must match the setting. |
+| B — Indeed | ✅ `scrape_all(indeed_results_per_keyword=)`: Indeed gets its own JobSpy call asking for `INDEED_RESULTS_PER_KEYWORD` (100; JobSpy loads 100 per request), LinkedIn stays at `results_per_keyword` (25). |
+| C — window | ✅ `DEFAULT_POSTED_WITHIN_HOURS` (168) when Profile has no "posted within". |
+| D — career-page index | ✅ `_index_rows` filters by place in the database before its limit; `ATS_SEARCH_JOB_LIMIT` (100) per title; `_queue_title_expansions`: titles with no other names ask the AI once in the background, so the next search matches those too. |
+| J — counts | ✅ `pipeline_progress.add_source_counts`: `sources` on `GET /pipeline/{id}` (`{name: {raw, kept}}`), shown as "Jobs per source" in Search insights on the Jobs page. **Not in an Admin page yet.** |
+| Tests | ✅ `tests/test_qa9_more_jobs.py`, frontend `src/features/jobs/qa9.test.tsx`. |
+| Not done | E–I, K and the AI-era trials (§6 of the plan), after measuring. More AI calls per search until step H caps them. |
+
+**Operational changes introduced in QA9**
+- No migration. New env (optional): `DEFAULT_POSTED_WITHIN_HOURS` (168), `INDEED_RESULTS_PER_KEYWORD` (100), `ATS_SEARCH_JOB_LIMIT` (100), `POSSIBLE_MATCH_MIN_SCORE` (50).
+
 ---
 
 ## 7. Modules in detail

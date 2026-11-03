@@ -501,6 +501,12 @@ def _index_rows(db: Session, keyword: str, *, locations: list[str], country: str
     places = [p.strip().lower() for p in locations if p.strip()]
     cities = {c for p in places if "remote" not in p and p != (country or "").lower()
               for c in _CITY_ALIASES.get(p.split(",")[0].strip(), (p.split(",")[0].strip(),))}
+    # QA9: place first, then the limit. The best matches worldwide would otherwise fill the limit before
+    # any job in the user's cities is looked at.
+    wanted = cities or ({(country or "").lower()} - {""})
+    if wanted:
+        query = query.filter(or_(AtsJob.remote.is_(True), *[
+            func.lower(column).like(f"%{place}%") for place in wanted for column in (AtsJob.location, AtsJob.country)]))
 
     def place_ok(job: AtsJob) -> bool:
         loc = f"{job.location} {job.country}".lower()

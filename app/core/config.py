@@ -129,6 +129,11 @@ class Settings(BaseSettings):
     ATS_TOPUP_MAX_COMPANIES: int = 40
     ATS_TOPUP_SECONDS: int = 20
     SEARCH_TITLES_AT_ONCE: int = 3              # one search queues this many titles at a time, so users take turns
+    # QA9: what a search from the Jobs page asks for (job alerts and /search keep their own numbers).
+    DEFAULT_POSTED_WITHIN_HOURS: int = 168      # when Profile has no "posted within"
+    INDEED_RESULTS_PER_KEYWORD: int = 100       # Indeed answers 100 per request, so up to 100 costs no extra request
+    ATS_SEARCH_JOB_LIMIT: int = 100             # career-page index jobs per title
+    POSSIBLE_MATCH_MIN_SCORE: float = 50        # from here up to the user's minimum: shown as "Possible matches"
     ATS_STALE_DAYS: int = 3                     # capped crawls close jobs not seen for this long
     ATS_CLOSED_RETENTION_DAYS: int = 7
     ATS_MAX_INDEXED_JOBS: int = 300000

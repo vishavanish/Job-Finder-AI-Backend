@@ -39,7 +39,8 @@ async def run_pipeline_stream(
     Each job appears once per run. If a better copy of a job already in the
     feed turns up later (LinkedIn over Indeed), an updated entry with the
     SAME `id` and `replaces: true` is appended — upsert entries by `id`."""
-    search_params, score_params = build_pipeline_params(req, db=db, user=user, client=client_info(request))
+    search_params, score_params = build_pipeline_params(req, db=db, user=user, client=client_info(request),
+                                                        job_search=True)
     score_params["previous_search_at"] = pipeline_progress.mark_user_search(user.id)
     keywords = search_params["keywords"]
 
