@@ -182,6 +182,7 @@ def record_scored_job(*, run_id: str, job: dict, replaces: bool = False) -> dict
         "applicants": job.get("applicants"),
         "scoring": bool(job.get("scoring")),
         "followed": bool(job.get("followed")),  # QA4: a company the user follows
+        "match_group": job.get("match_group"),  # QA9: "strong" / "possible"; None while scoring and in job alerts
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     if replaces:
@@ -291,7 +292,8 @@ def get_jobs(*, run_id: str, offset: int = 0) -> list[dict]:
 
 _TIMING = "t:"  # meta hash fields holding seconds spent per stage
 _COUNT = "c:"   # meta hash fields counting what happened to the jobs a run found
-COUNTED = ("raw", "seen", "low_score", "handled", "filtered", "blocked", "unscored", "kept")
+_SOURCE = "s:"  # meta hash fields counting jobs per source: s:raw:LinkedIn, s:kept:LinkedIn
+COUNTED = ("raw", "seen", "low_score", "handled", "prefiltered", "filtered", "blocked", "unscored", "kept")
 
 
 def add_timings(*, run_id: str, timings: dict[str, float]) -> None:
@@ -326,6 +328,23 @@ def add_counts(*, run_id: str, counts: dict[str, int]) -> None:
     for name in COUNTED:
         if counts.get(name):
             r.hincrby(_meta_key(run_id), f"{_COUNT}{name}", int(counts[name]))
+
+
+def add_source_counts(*, run_id: str, stage: str, counts: dict[str, int]) -> None:
+    """Jobs per source at a stage ("raw" or "kept"), so a search shows which sources really gave jobs (QA9 step J)."""
+    r = _redis()
+    for source, n in counts.items():
+        if n:
+            r.hincrby(_meta_key(run_id), f"{_SOURCE}{stage}:{source}", int(n))
+
+
+def _source_counts(meta: dict) -> dict[str, dict[str, int]]:
+    out: dict[str, dict[str, int]] = {}
+    for field, value in meta.items():
+        if field.startswith(_SOURCE):
+            stage, _, source = field[len(_SOURCE):].partition(":")
+            out.setdefault(source, {"raw": 0, "kept": 0})[stage] = int(value)
+    return out
 
 
 def current_jobs(*, run_id: str) -> list[dict]:
@@ -382,4 +401,5 @@ def get_run_meta(*, run_id: str) -> dict | None:
         "timings": {k[len(_TIMING):]: round(float(v), 1) for k, v in meta.items() if k.startswith(_TIMING)},
         # What happened to the jobs found, summed over keyword tasks ("raw" counts every copy of a job).
         "counts": {name: int(meta.get(f"{_COUNT}{name}", 0)) for name in COUNTED},
+        "sources": _source_counts(meta),
     }

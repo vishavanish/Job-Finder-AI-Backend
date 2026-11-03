@@ -323,6 +323,7 @@ def scrape_all(
     sources: list[str],
     *,
     results_per_keyword: int = 25,
+    indeed_results_per_keyword: int = 0,
     max_age_hours: int = 24,
     country_indeed: str = "India",
     linkedin_fetch_description: bool = True,
@@ -370,6 +371,12 @@ def scrape_all(
     if covered and (jobspy_sites or keyword_apis):
         progress(f"not searching {', '.join(covered)} separately — {', '.join(places)} already covers it")
     jobspy_label = " + ".join(registry.by_jobspy_site(site).name for site in jobspy_sites)
+    # QA9: Indeed answers 100 jobs per request, so it gets its own call when asked for more; LinkedIn pays per
+    # page and answers 429 quickly, so it stays at results_per_keyword.
+    jobspy_calls = [(jobspy_sites, results_per_keyword)]
+    if "indeed" in jobspy_sites and indeed_results_per_keyword > results_per_keyword:
+        others = [s for s in jobspy_sites if s != "indeed"]
+        jobspy_calls = [(["indeed"], indeed_results_per_keyword)] + ([(others, results_per_keyword)] if others else [])
     total_searches = len(keywords) * len(places)
     search_num = 0
     for keyword in keywords:
@@ -378,24 +385,25 @@ def scrape_all(
             place_jobs: list[dict] = []
             if jobspy_sites:
                 started = time.monotonic()
-                df, error = _run_jobspy(
-                    keyword, location, jobspy_sites,
-                    results_per_keyword=results_per_keyword,
-                    max_age_hours=max_age_hours,
-                    country_indeed=country_indeed,
-                    linkedin_fetch_description=linkedin_fetch_description,
-                    linkedin_max_retries=linkedin_max_retries,
-                    linkedin_retry_delay_sec=linkedin_retry_delay_sec,
-                    progress=progress,
-                )
-                rows = _normalize(df)
-                for site in jobspy_sites:
-                    key = registry.by_jobspy_site(site).key
-                    if any(registry.key_for_name(j["source"]) == key for j in rows):
-                        outcomes.success(key)
-                    elif error:
-                        outcomes.failure(key, error)
-                place_jobs.extend(rows)
+                for sites, wanted in jobspy_calls:
+                    df, error = _run_jobspy(
+                        keyword, location, sites,
+                        results_per_keyword=wanted,
+                        max_age_hours=max_age_hours,
+                        country_indeed=country_indeed,
+                        linkedin_fetch_description=linkedin_fetch_description,
+                        linkedin_max_retries=linkedin_max_retries,
+                        linkedin_retry_delay_sec=linkedin_retry_delay_sec,
+                        progress=progress,
+                    )
+                    rows = _normalize(df)
+                    for site in sites:
+                        key = registry.by_jobspy_site(site).key
+                        if any(registry.key_for_name(j["source"]) == key for j in rows):
+                            outcomes.success(key)
+                        elif error:
+                            outcomes.failure(key, error)
+                    place_jobs.extend(rows)
                 timed(jobspy_label, started)
             query = SourceQuery(keyword=keyword, location=location, country=country_indeed,
                                 max_age_hours=max_age_hours, results_wanted=results_per_keyword,

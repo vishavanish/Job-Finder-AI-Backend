@@ -19,6 +19,7 @@ from __future__ import annotations
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models.schemas import (
     ApplyRequest, PipelineRequest, ScoreRequest, ScoreRequestPartial, ScoreThresholds, SearchRequest,
 )
@@ -102,14 +103,16 @@ def build_score_params(req: ScoreRequest | ScoreRequestPartial, *, user_id: str)
 
 
 def build_pipeline_params(req: PipelineRequest, *, db: Session, user: User,
-                          client: tuple[str, str] | None = None) -> tuple[dict, dict]:
+                          client: tuple[str, str] | None = None, job_search: bool = False) -> tuple[dict, dict]:
     """(search_params, score_params) for /pipeline/run and /pipeline/run/stream.
 
     Profile mode fills keywords, skills and context from the saved search
     profile, preferences and master resume; fields the caller set
     explicitly in `search` still win. Both modes add the filters and the
-    seen-job settings the keyword tasks use (CLAUDE.md 7.3, 7.5)."""
+    seen-job settings the keyword tasks use (CLAUDE.md 7.3, 7.5).
+    `job_search`: a search from the Jobs page, which asks for more jobs (QA9)."""
     prefs = search_profiles.preferences(db, user.id)
+    cfg = get_settings()
     search = req.search
     filters: dict = {"avoid_companies": search_profiles.avoided_companies(prefs)}
 
@@ -126,8 +129,11 @@ def build_pipeline_params(req: PipelineRequest, *, db: Session, user: User,
             updates["keywords"] = list(titles)
         if "locations" not in explicit and prefs and prefs.locations:
             updates["locations"] = list(prefs.locations)
-        if "max_age_hours" not in explicit and prefs and prefs.posted_within_hours:
-            updates["max_age_hours"] = prefs.posted_within_hours
+        if "max_age_hours" not in explicit:
+            if prefs and prefs.posted_within_hours:
+                updates["max_age_hours"] = prefs.posted_within_hours
+            elif job_search:
+                updates["max_age_hours"] = cfg.DEFAULT_POSTED_WITHIN_HOURS
         search = search.model_copy(update=updates)
 
         if req.score is not None:
@@ -149,7 +155,12 @@ def build_pipeline_params(req: PipelineRequest, *, db: Session, user: User,
     score["filters"] = filters
     score["include_seen"] = req.include_seen
     score["profile_hash"] = search_profiles.profile_hash(score)
-    return build_search_params(search, db=db, user=user, client=client), score
+    params = build_search_params(search, db=db, user=user, client=client)
+    if job_search:
+        params["indeed_results_per_keyword"] = cfg.INDEED_RESULTS_PER_KEYWORD
+        params["index_results_per_keyword"] = cfg.ATS_SEARCH_JOB_LIMIT
+        score["possible_min_score"] = cfg.POSSIBLE_MATCH_MIN_SCORE
+    return params, score
 
 
 def build_apply_params(req: ApplyRequest, *, user_id: str) -> dict:

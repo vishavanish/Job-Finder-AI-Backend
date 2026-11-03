@@ -28,6 +28,7 @@ import logging
 import random
 import threading
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from app.core.celery_app import celery_app
@@ -42,6 +43,7 @@ from app.services import provider_catalog
 from app.services.scorer import keyword_score
 from app.services.browser_apply import AUTO_APPLY_CAPABLE_SOURCES
 from app.providers.ats.platforms import PLATFORMS as _ATS_PLATFORMS
+from app.providers.job_sources.base import matches_keyword
 
 ATS_SOURCE_NAMES = {p.name for p in _ATS_PLATFORMS.values()}  # index jobs: already in the registry
 logger = logging.getLogger("job_finder_api.tasks")
@@ -118,7 +120,8 @@ def _index_lookup(db, sources: list[str], search_params: dict, locations: list[s
         return ats_search.index_jobs(db, keyword, locations=locations,
                                      country=search_params.get("country_indeed", "India"),
                                      max_age_hours=search_params.get("max_age_hours", 24),
-                                     limit=search_params.get("results_per_keyword", 25))
+                                     limit=search_params.get("index_results_per_keyword")
+                                     or search_params.get("results_per_keyword", 25))
     return lookup
 
 
@@ -237,6 +240,7 @@ def _scrape(db, search_params: dict, *, keywords: list[str], locations: list[str
         locations=locations,
         sources=sources,
         results_per_keyword=search_params.get("results_per_keyword", 25),
+        indeed_results_per_keyword=search_params.get("indeed_results_per_keyword", 0),
         max_age_hours=search_params.get("max_age_hours", 24),
         country_indeed=search_params.get("country_indeed", "India"),
         linkedin_fetch_description=search_params.get("linkedin_fetch_description", True),
@@ -298,6 +302,18 @@ def _prefilter_score(job: dict, score_params: dict) -> float:
     return keyword_score(job.get("description", ""), score_params["skills"])
 
 
+def _title_fits(job: dict, score_params: dict) -> bool:
+    """QA9: a job whose title is one the user searches for goes to the AI even when it names few of their skills.
+    Sources with a short snippet can hardly reach the skills minimum, and a long skill list fails most jobs."""
+    return any(matches_keyword(job, title) for title in score_params.get("career_targets") or [])
+
+
+def _lowest_score_shown(score_params: dict) -> float:
+    """The user's minimum, or the "Possible matches" floor when this search has that group and it is lower."""
+    minimum = score_params.get("llm_min_score_to_keep", 70)
+    return min(minimum, score_params.get("possible_min_score", minimum))
+
+
 def one_by_one(score_one):
     """A batch scorer made of a per-job one (tests fake scoring per job)."""
     return lambda jobs, **kw: [score_one(job, **kw) for job in jobs]
@@ -315,7 +331,7 @@ def _score_batch_llm(jobs: list[dict], *, db, score_params: dict, request_keys: 
 def _triage_job(db, run_id: str, job: dict, *, score_params: dict) -> tuple[str, dict | None]:
     """One scraped copy through dedupe -> filters -> seen check -> prefilter
     (CLAUDE.md 7.5). Returns (outcome, context): "duplicates" | "blocked" |
-    "seen" | "low_score" | "handled" | "filtered" with no context, "reuse" (an earlier score applies)
+    "seen" | "low_score" | "handled" | "prefiltered" with no context, "reuse" (an earlier score applies)
     or "score" (needs the AI) with what the next steps need."""
     user_id = score_params.get("user_id")
     key = job_key(job)
@@ -334,7 +350,7 @@ def _triage_job(db, run_id: str, job: dict, *, score_params: dict) -> tuple[str,
     phash = score_params.get("profile_hash")
     uj = job_store.get_user_job(db, user_id, canonical.id) if user_id else None
     decision = job_store.decide(uj, include_seen=bool(score_params.get("include_seen")), profile_hash=phash,
-                                min_score=score_params.get("llm_min_score_to_keep", 70))
+                                min_score=_lowest_score_shown(score_params))
     if decision == "skip":
         # Skipped for different reasons, and "Show seen jobs" brings back only the plain "seen" ones.
         return {"filtered": "low_score", "hidden": "handled", "applied": "handled"}.get(uj.state, "seen"), None
@@ -347,10 +363,10 @@ def _triage_job(db, run_id: str, job: dict, *, score_params: dict) -> tuple[str,
         return "reuse", ctx
 
     best["keyword_score"] = _prefilter_score(best, score_params)
-    if best["keyword_score"] < score_params.get("keyword_prefilter_min_pct", 30):
+    if best["keyword_score"] < score_params.get("keyword_prefilter_min_pct", 30) and not _title_fits(best, score_params):
         # cheap prefilter still applies — no point burning an LLM call on a clear non-match
         _remember(db, run_id, canonical.id, score_params, "filtered", best["keyword_score"], None, None)
-        return "filtered", None
+        return "prefiltered", None
     return "score", ctx
 
 
@@ -369,6 +385,9 @@ def _feed_entry(ctx: dict, job: dict, score_params: dict) -> dict:
     entry["auto_apply_capable"] = entry.get("source") in AUTO_APPLY_CAPABLE_SOURCES
     # QA4: a ★ on jobs from companies the user follows.
     entry["followed"] = normalize_company(entry.get("company") or "") in (score_params.get("followed_companies") or ())
+    if "possible_min_score" in score_params and entry.get("llm_score") is not None:
+        strong = entry["llm_score"] >= score_params.get("llm_min_score_to_keep", 70)
+        entry["match_group"] = "strong" if strong else "possible"  # QA9: the two groups on the Jobs page
     return entry
 
 
@@ -387,6 +406,7 @@ def _keep(db, run_id: str, ctx: dict, scored: dict, score_params: dict, *, shown
     pipeline_progress.remember_recorded(run_id=run_id, job_key=ctx["key"], payload=payload)
     _remember(db, run_id, ctx["canonical"].id, score_params, "seen", scored.get("keyword_score"),
               scored.get("llm_score"), scored.get("llm_reason"), breakdown=scored.get("match"))
+    pipeline_progress.add_source_counts(run_id=run_id, stage="kept", counts={entry.get("source") or "Unknown": 1})
     # A better copy may have been stored by another task while we scored.
     _replace_if_better(db, run_id, ctx["key"], job_store.reload(db, ctx["canonical"]))
 
@@ -397,7 +417,7 @@ def _finish_scored(db, run_id: str, ctx: dict, scored: dict, score_params: dict,
         if shown:
             pipeline_progress.remove_recorded(run_id=run_id, job_key=ctx["key"])
         return "unscored"
-    if scored.get("llm_score", 0) < score_params.get("llm_min_score_to_keep", 70):
+    if scored.get("llm_score", 0) < _lowest_score_shown(score_params):
         _remember(db, run_id, ctx["canonical"].id, score_params, "filtered", scored.get("keyword_score"),
                   scored.get("llm_score"), scored.get("llm_reason"))
         if shown:
@@ -409,7 +429,7 @@ def _finish_scored(db, run_id: str, ctx: dict, scored: dict, score_params: dict,
     return "kept"
 
 
-_OUTCOMES = ("duplicates", "blocked", "seen", "low_score", "handled", "filtered", "unscored", "kept")
+_OUTCOMES = ("duplicates", "blocked", "seen", "low_score", "handled", "prefiltered", "filtered", "unscored", "kept")
 
 
 def _process_jobs(db, run_id: str, jobs: list[dict], *, score_params: dict, request_keys: dict[str, str],
@@ -539,6 +559,8 @@ def search_and_score_keyword(
         def score_found(found: list[dict]) -> None:
             nonlocal counts
             raw_jobs.extend(found)
+            pipeline_progress.add_source_counts(run_id=run_id, stage="raw",
+                                                counts=Counter(j.get("source") or "Unknown" for j in found))
             started = time.monotonic()
             more, more_kept = _process_jobs(db, run_id, found, score_params=score_params,
                                             request_keys=request_keys, show_early=True, progress=progress_cb)
@@ -573,6 +595,8 @@ def search_and_score_keyword(
             progress_cb(f"'{keyword}': skipped {counts['handled']} job(s) you hid or applied to")
         if counts["blocked"]:
             progress_cb(f"'{keyword}': dropped {counts['blocked']} job(s) by your must-have/exclude/avoid rules")
+        if counts["prefiltered"]:
+            progress_cb(f"'{keyword}': {counts['prefiltered']} job(s) matched neither your titles nor your skills")
         if counts["filtered"]:
             progress_cb(f"'{keyword}': {counts['filtered']} job(s) scored below your thresholds")
         if counts["unscored"]:
@@ -589,6 +613,20 @@ def search_and_score_keyword(
     finally:
         db.close()
         _start_next_title(run_id, *next_params)
+
+
+def _queue_title_expansions(keywords: list[str], sources: list[str], user_id: str | None) -> None:
+    """QA9: titles the career-page index has no other names for yet ask the AI once in the background (cached);
+    the next search matches those names too. Before, only the ATS page asked. Never fails a search."""
+    if "company_ats" not in sources:
+        return
+    from app.services import ats_search
+    try:
+        for keyword in keywords:
+            if not ats_search.expansions(keyword)[1]:
+                ats_expand_title_task.apply_async(args=[keyword, user_id], queue=get_settings().default_queue)
+    except Exception:  # noqa: BLE001
+        logger.exception("could not queue title expansions")
 
 
 def _start_next_title(run_id: str, locations: list[str], sources: list[str], search_params: dict,
@@ -638,6 +676,7 @@ def dispatch_pipeline_group(run_id: str, search_params: dict, score_params: dict
     queues the next (_start_next_title), so one user's search can't make the
     next user wait for all of its titles."""
     keywords = search_params["keywords"]
+    _queue_title_expansions(keywords, search_params["sources"], score_params.get("user_id"))
     at_once = max(1, get_settings().SEARCH_TITLES_AT_ONCE)
     pipeline_progress.hold_titles(run_id=run_id, titles=keywords[at_once:])
     for kw in keywords[:at_once]:
@@ -1075,6 +1114,7 @@ def run_job_alert(self, alert_id: str, trigger: str = "schedule") -> dict:
             for outcome, n in found.items():
                 if outcome in counts:
                     counts[outcome] += n
+            counts["filtered"] += found["prefiltered"]
             kept_keys += keys
             pipeline_progress.increment_keyword_completed(run_id=run_id)
         if "linkedin" in search_params["sources"]:

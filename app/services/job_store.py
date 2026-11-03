@@ -149,14 +149,15 @@ def get_user_job(db: Session, user_id: str, job_id: str) -> UserJob | None:
 
 def decide(uj: UserJob | None, *, include_seen: bool, profile_hash: str, min_score: float | None = None) -> str:
     """"score" | "reuse" (stored score is for this profile) | "skip". A job that scored too low before comes
-    back without a new AI call once the minimum score is lowered to its score."""
+    back without a new AI call once the minimum score is lowered to its score. One the skills prefilter stopped
+    has no score: it goes through the prefilter again, which costs nothing (QA9)."""
     if uj is None:
         return "score"
     same_profile = uj.profile_hash == profile_hash and uj.llm_score is not None
     if uj.state in ("hidden", "applied"):
         return "skip"
     if uj.state == "filtered":
-        if uj.profile_hash != profile_hash:
+        if uj.profile_hash != profile_hash or uj.llm_score is None:
             return "score"
         return "reuse" if same_profile and min_score is not None and uj.llm_score >= min_score else "skip"
     # seen / saved
