@@ -271,6 +271,17 @@ class Settings(BaseSettings):
     RATE_LIMIT_APPLY_RUNS: str = "30/hour"
     APPLY_BLOCK_PAUSE_HOURS: int = 24        # QA5: a platform that blocks the server's browser pauses Auto apply
     APPLY_BLOCK_MAX_PAUSE_HOURS: int = 168   # repeat blocks within a week double the pause up to this
+    # ---- QA11 A: live takeover (the user signs in on a live view of the run's browser) ----
+    LIVE_BROWSER_URL: str = ""               # e.g. http://127.0.0.1:8790 (the job_finder_browser service); "" = off
+    LIVE_SESSIONS_MAX: int = 2               # live browsers at once on the server
+    LIVE_SESSION_MINUTES: int = 15           # one live session's whole length
+    LIVE_IDLE_MINUTES: int = 5               # closed after this long without input
+    LIVE_SESSION_DAILY_CAP: int = 10         # live sessions a user may start per day
+    LIVE_WAIT_MINUTES: int = 120             # a run waits this long for the user to sign in, then needs_user
+    LIVE_STATE_TTL_SECONDS: int = 1800       # the sign-in cookies handed to the engine are kept this long
+    LIVE_MAX_TAKEOVERS_PER_RUN: int = 2      # a site that keeps asking after this goes to needs_user
+    LIVE_FPS: int = 8
+    LIVE_ALLOW_PRIVATE: bool = False         # tests only: let the live browser open localhost / file pages
     # ---- generic AI apply (P4c) ----
     GENERIC_APPLY_SUBMIT: bool = False       # test mode (prepare + review only) until the owner turns it on
     APPLY_GENERIC_DAILY_CAP: int = 5         # AI form reader submits per user per day (inside APPLY_DAILY_CAP)

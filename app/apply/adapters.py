@@ -29,9 +29,10 @@ class HardStop(Exception):
     """The page needs a human: login, captcha, unsupported page. `reason`
     is shown to the user."""
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, kind: str | None = None):
         super().__init__(reason)
         self.reason = reason
+        self.kind = kind  # QA11: login | account | captcha — the user can do these on a live view
 
 
 class Blocked(HardStop):
@@ -53,9 +54,9 @@ class Adapter:
         if block:
             raise Blocked(block)
         if forms.login_wall(page):
-            raise HardStop("The application page asks you to sign in.")
+            raise HardStop("The application page asks you to sign in.", kind="login")
         if forms.challenge_visible(page):
-            raise HardStop("The application page shows a captcha.")
+            raise HardStop("The application page shows a captcha.", kind="captcha")
 
     def container(self, page) -> str:
         return self.form_selector

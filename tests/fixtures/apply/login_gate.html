@@ -1,0 +1,32 @@
+<!doctype html>
+<!-- QA11 test page: an apply link that needs a sign-in. Signed in (cookie jf_session) it goes on to the
+     Lever-style form; otherwise it shows a sign-in form. Signing in sets the cookie. Served over
+     http://127.0.0.1 by the tests (file:// pages have no cookies). -->
+<html>
+<head><meta charset="utf-8"><title>Orbit careers - sign in</title></head>
+<body>
+<script>
+  if (document.cookie.split('; ').includes('jf_session=ok')) {
+    location.replace('lever_form.html');
+  }
+</script>
+<h1>Sign in to apply</h1>
+<form id="login">
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" autofocus>
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password">
+  <button type="submit">Sign in</button>
+</form>
+<a id="away" href="https://evil.example.net/collect">Elsewhere</a>
+<script>
+  document.getElementById('login').addEventListener('submit', function (e) {
+    e.preventDefault();
+    if (document.getElementById('password').value) {
+      document.cookie = 'jf_session=ok; path=/';
+      location.replace('lever_form.html');
+    }
+  });
+</script>
+</body>
+</html>

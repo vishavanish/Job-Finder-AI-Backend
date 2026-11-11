@@ -15,9 +15,11 @@ downloads with GET /resumes/{id}/file.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
@@ -129,11 +131,11 @@ def get_prep(pack_id: str, user=Depends(get_current_user), db: Session = Depends
 
 from app.models.apply import ApplyRun  # noqa: E402
 from app.models.apply_schemas import (  # noqa: E402
-    ApplySettingsIn, ApplySettingsOut, ProofOut, RunAnswers, RunDone, RunField, RunIn, RunList, RunOut,
+    ApplySettingsIn, ApplySettingsOut, LiveStart, ProofOut, RunAnswers, RunDone, RunField, RunIn, RunList, RunOut,
 )
-from app.services import apply_engine, entitlements, extension  # noqa: E402
+from app.services import apply_engine, entitlements, extension, live_takeover  # noqa: E402
 
-WAITING = ("awaiting_input", "awaiting_review", "needs_user")
+WAITING = ("awaiting_login", "awaiting_input", "awaiting_review", "needs_user")
 
 
 def _run_out(db: Session, run: ApplyRun) -> RunOut:
@@ -146,7 +148,7 @@ def _run_out(db: Session, run: ApplyRun) -> RunOut:
         mode=run.mode, runner=plan.get("runner") or "worker", level=run.level, adapter=run.adapter, apply_url=run.apply_url, state=run.state,
         message=run.message, fields=fields, files=plan.get("files") or {}, resume_id=run.resume_id,
         pack_id=run.pack_id, application_id=run.application_id, proofs=len(apply_engine.proofs(db, run)),
-        steps=plan.get("steps") or [], vision=plan.get("vision"),
+        steps=plan.get("steps") or [], vision=plan.get("vision"), takeover=live_takeover.takeover_out(db, run),
         approved_at=run.approved_at, submitted_at=run.submitted_at, created_at=run.created_at,
         updated_at=run.updated_at,
     )
@@ -205,6 +207,7 @@ def start_run(request: Request, body: RunIn, user=Depends(require_feature("auto_
 def list_runs(state: str | None = None, job_id: str | None = None, limit: int = 50, offset: int = 0,
               user=Depends(get_current_user), db: Session = Depends(get_db)):
     """state: a run state, or `waiting` (needs you). job_id: the runs for one job (newest first)."""
+    live_takeover.expire_waiting(db, user.id)
     q = db.query(ApplyRun).filter(ApplyRun.user_id == user.id)
     if job_id:
         q = q.filter(ApplyRun.job_id == job_id)
@@ -219,6 +222,7 @@ def list_runs(state: str | None = None, job_id: str | None = None, limit: int = 
 
 @router.get("/runs/{run_id}", response_model=RunOut)
 def get_run(run_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    live_takeover.expire_waiting(db, user.id)
     return _run_out(db, apply_engine.get_owned(db, user.id, run_id))
 
 
@@ -241,7 +245,107 @@ def approve_run(run_id: str, user=Depends(require_feature("auto_apply")), db: Se
 
 @router.post("/runs/{run_id}/cancel", response_model=RunOut)
 def cancel_run(run_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
-    return _run_out(db, apply_engine.cancel(db, apply_engine.get_owned(db, user.id, run_id)))
+    run = apply_engine.get_owned(db, user.id, run_id)
+    if run.state == "awaiting_login":
+        live_takeover.close_session(run.id)
+    return _run_out(db, apply_engine.cancel(db, run))
+
+
+# ---------------------------------------------------------------- QA11 A: sign in on a live view
+#
+#   POST /apply/runs/{id}/live            open (or reopen) the live browser on the stop page -> stream token
+#   WS   /apply/runs/{id}/live            first message {"type": "auth", "token"}; then JPEG frames + JSON events
+#                                         out, input in ({type: click|move|wheel|key|text|back|reload, ...})
+#   POST /apply/runs/{id}/live/continue   you are signed in: the run carries on with that browser's cookies
+#   POST /apply/runs/{id}/live/give-up    finish it on the job page instead (needs_user)
+
+@router.post("/runs/{run_id}/live", response_model=LiveStart)
+@limiter.limit("30/hour")
+def start_live(request: Request, run_id: str, user=Depends(require_feature("auto_apply")),
+               db: Session = Depends(get_db)):
+    """Opens a live view of a browser on the server at the page that stopped this run (`awaiting_login`).
+    Sign in, create the account or do the check there yourself (your typing goes straight to the page and is
+    never stored), then call continue."""
+    return live_takeover.start(db, apply_engine.get_owned(db, user.id, run_id))
+
+
+@router.post("/runs/{run_id}/live/continue", response_model=RunOut)
+def continue_live(run_id: str, user=Depends(require_feature("auto_apply")), db: Session = Depends(get_db)):
+    run = live_takeover.proceed(db, apply_engine.get_owned(db, user.id, run_id))
+    if run.state == "submitting":
+        from app.core.celery_tasks import apply_submit_task
+        apply_submit_task.apply_async(args=[run.id], queue=settings.apply_queue)
+    elif run.state == "queued":
+        from app.core.celery_tasks import apply_prepare_task
+        apply_prepare_task.apply_async(args=[run.id], queue=settings.apply_queue)
+    return _run_out(db, run)
+
+
+@router.post("/runs/{run_id}/live/give-up", response_model=RunOut)
+def give_up_live(run_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    return _run_out(db, live_takeover.give_up(db, apply_engine.get_owned(db, user.id, run_id)))
+
+
+@router.websocket("/runs/{run_id}/live")
+async def live_stream(ws: WebSocket, run_id: str):
+    """Relays the live browser: frames down, your clicks and keys up. Messages over 2 kB are dropped."""
+    await ws.accept()
+    try:
+        first = json.loads(await asyncio.wait_for(ws.receive_text(), timeout=5))
+    except (asyncio.TimeoutError, ValueError, WebSocketDisconnect, RuntimeError):
+        first = {}
+    claims = live_takeover.consume_token(str(first.get("token") or ""), run_id) if isinstance(first, dict) else None
+    if claims is None:
+        await _ws_close(ws, 4401, "auth_failed", "This stream token is invalid, expired or already used.")
+        return
+    from app.core.db import SessionLocal
+    db = SessionLocal()
+    try:
+        run = db.query(ApplyRun).filter(ApplyRun.id == run_id, ApplyRun.user_id == claims["sub"]).first()
+        waiting = run is not None and run.state == "awaiting_login"
+    finally:
+        db.close()
+    if not waiting:
+        await _ws_close(ws, 4409, "run_not_waiting_login", "This run is not waiting for you to sign in.")
+        return
+    ended = False
+    try:
+        async with live_takeover.connect_service(run_id) as up:
+            async def down() -> None:
+                async for msg in up:
+                    if isinstance(msg, bytes):
+                        await ws.send_bytes(msg)
+                    else:
+                        await ws.send_text(msg)
+
+            async def upward() -> None:
+                while True:
+                    msg = await ws.receive()
+                    if msg["type"] == "websocket.disconnect":
+                        return
+                    text = msg.get("text")
+                    if text and len(text) <= 2048:
+                        await up.send(text)
+
+            tasks = [asyncio.ensure_future(down()), asyncio.ensure_future(upward())]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            ended = tasks[0] in done
+    except Exception as e:  # noqa: BLE001 — the service is down or the session is gone
+        logger.info("live stream for run=%s ended: %s", run_id, type(e).__name__)
+        ended = True
+    if ended:
+        await _ws_close(ws, 4410, "live_ended", "The live view closed. Open it again to carry on.")
+
+
+async def _ws_close(ws: WebSocket, code: int, err: str, message: str) -> None:
+    try:
+        await ws.send_text(json.dumps({"type": "error", "code": err, "message": message}))
+        await ws.close(code=code)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @router.post("/runs/{run_id}/done", response_model=RunOut)

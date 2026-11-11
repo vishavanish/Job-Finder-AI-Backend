@@ -156,9 +156,9 @@ class GenericAdapter(Adapter):
         if block:
             raise Blocked(block)
         if forms.login_wall(page):
-            raise HardStop("The application page asks you to sign in or create an account.")
+            raise HardStop("The application page asks you to sign in or create an account.", kind="login")
         if forms.challenge_visible(page):
-            raise HardStop("The application page shows a captcha.")
+            raise HardStop("The application page shows a captcha.", kind="captcha")
 
     def open(self, page, url: str, timeout_ms: int) -> None:
         host = host_of(url)
@@ -232,7 +232,8 @@ class GenericAdapter(Adapter):
         out = {k: (data.get(k) if data.get(k) in marks else None) for k in ("apply", "next", "submit")}
         out["page_kind"] = data.get("page_kind")
         if out["page_kind"] in ("login", "account_create"):
-            raise HardStop("The application page asks you to sign in or create an account.")
+            raise HardStop("The application page asks you to sign in or create an account.",
+                           kind="account" if out["page_kind"] == "account_create" else "login")
         return out
 
     def step_buttons(self, page) -> dict:

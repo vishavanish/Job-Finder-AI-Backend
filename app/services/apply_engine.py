@@ -68,7 +68,7 @@ from app.models.profile import Resume
 from app.models.user import User
 from app.services import (
     ai_router, answer_bank, apply_blocks, apply_options, apply_prep, entitlements, feature_flags, job_store, key_store,
-    resume_store,
+    live_takeover, resume_store,
 )
 from app.services.applications_store import record_status
 from app.services.job_dedupe import job_key as compute_job_key
@@ -362,10 +362,12 @@ def create_run(db: Session, user: User, job: Job, *, mode: str) -> ApplyRun:
 # ---------------------------------------------------------------- browser
 
 @contextlib.contextmanager
-def browser_session(*, headless: bool, profile_dir: str | None = None, keep_open: bool = False) -> Iterator:
-    """A Playwright page. Auto runs use a fresh, throw-away context; Fast
-    apply uses the user's own persistent profile (their LinkedIn sign-in)
-    and leaves the window open for them."""
+def browser_session(*, headless: bool, profile_dir: str | None = None, keep_open: bool = False,
+                    storage_state: dict | None = None) -> Iterator:
+    """A Playwright page. Auto runs use a fresh, throw-away context (with the
+    cookies of a live sign-in when the user did one, QA11); Fast apply uses
+    the user's own persistent profile (their LinkedIn sign-in) and leaves
+    the window open for them."""
     from playwright.sync_api import sync_playwright
 
     pw = sync_playwright().start()
@@ -375,7 +377,8 @@ def browser_session(*, headless: bool, profile_dir: str | None = None, keep_open
             context = pw.chromium.launch_persistent_context(profile_dir, headless=headless)
         else:
             browser = pw.chromium.launch(headless=headless)
-            context = browser.new_context(viewport={"width": 1280, "height": 1600})
+            context = browser.new_context(viewport={"width": 1280, "height": 1600},
+                                          **({"storage_state": storage_state} if storage_state else {}))
         page = context.new_page()
         page.set_default_timeout(get_settings().APPLY_PAGE_TIMEOUT_SECONDS * 1000)
         yield page
@@ -591,7 +594,8 @@ def prepare(db: Session, run_id: str) -> ApplyRun | None:
     try:
         docs = _documents(db, run, workdir)
         with browser_session(headless=cfg.APPLY_HEADLESS and not fast,
-                             profile_dir=_profile_dir(run.user_id) if fast else None, keep_open=fast) as page:
+                             profile_dir=_profile_dir(run.user_id) if fast else None, keep_open=fast,
+                             storage_state=None if fast else live_takeover.storage_state(run.id)) as page:
             try:
                 adapter.open(page, run.apply_url, cfg.APPLY_PAGE_TIMEOUT_SECONDS * 1000)
                 apply_blocks.note_ok(_platform(run, job)[0])
@@ -605,6 +609,8 @@ def prepare(db: Session, run_id: str) -> ApplyRun | None:
                 _save_usage(db, run, adapter)
                 if isinstance(stop, Blocked):
                     return _blocked_stop(db, run, adapter, page, job, stop)
+                if _takeover(db, run, adapter, page, stop, phase="prepare"):
+                    return run
                 _snap(db, run, adapter, page, kind="stopped", text=stop.reason)
                 _transition(db, run, "needs_user", stop.reason + " Finish this application on the job page.",
                             tracker_status="needs_user")
@@ -659,6 +665,20 @@ def prepare(db: Session, run_id: str) -> ApplyRun | None:
 
 def _platform(run: ApplyRun, job: Job | None) -> tuple[str, str]:
     return apply_blocks.platform_of(run.adapter, run.apply_url, job.best_source if job else None)
+
+
+def _takeover(db: Session, run: ApplyRun, adapter, page, stop: HardStop, *, phase: str) -> bool:
+    """QA11 A: a sign-in / account / captcha page waits for the user on a live view (awaiting_login) instead of
+    ending the run, when live sign-in is set up and allowed for this run."""
+    if not live_takeover.eligible(db, run, stop.kind):
+        return False
+    _snap(db, run, adapter, page, kind="stopped", text=stop.reason)
+    url = ""
+    with contextlib.suppress(Exception):
+        url = page.url
+    msg = live_takeover.begin(db, run, kind=stop.kind, reason=stop.reason, url=url, phase=phase)["message"]
+    _transition(db, run, "awaiting_login", msg, tracker_status="awaiting_input")
+    return True
 
 
 def _blocked_stop(db: Session, run: ApplyRun, adapter, page, job: Job | None, stop: Blocked) -> ApplyRun:
@@ -937,7 +957,7 @@ def submit(db: Session, run_id: str) -> ApplyRun | None:
     workdir = Path(tempfile.mkdtemp(prefix="jf-apply-"))
     try:
         docs = _documents(db, run, workdir)
-        with browser_session(headless=cfg.APPLY_HEADLESS) as page:
+        with browser_session(headless=cfg.APPLY_HEADLESS, storage_state=live_takeover.storage_state(run.id)) as page:
             try:
                 adapter.open(page, run.apply_url, cfg.APPLY_PAGE_TIMEOUT_SECONDS * 1000)
                 if adapter.multi_step:
@@ -949,6 +969,8 @@ def submit(db: Session, run_id: str) -> ApplyRun | None:
             except HardStop as stop:
                 if isinstance(stop, Blocked):
                     return _blocked_stop(db, run, adapter, page, db.get(Job, run.job_id), stop)
+                if _takeover(db, run, adapter, page, stop, phase="submit"):
+                    return run
                 _snap(db, run, adapter, page, kind="stopped", text=stop.reason)
                 _transition(db, run, "needs_user", stop.reason + " Finish this application on the job page.",
                             tracker_status="needs_user")
