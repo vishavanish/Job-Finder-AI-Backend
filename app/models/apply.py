@@ -80,7 +80,8 @@ class ApplyPack(Base):
 # queued -> preparing -> awaiting_input <-> awaiting_review -> submitting -> submitted
 # any active state -> cancelled | failed | needs_user (a hard stop: the user finishes on the real page)
 RUN_ACTIVE_STATES = ("queued", "preparing", "awaiting_input", "awaiting_review", "submitting",
-                     "in_browser")  # in_browser: the extension fills it in the user's own tab (P8b)
+                     "in_browser",       # in_browser: the extension fills it in the user's own tab (P8b)
+                     "awaiting_login")   # QA11: the user signs in on a live view, then the run carries on
 RUN_END_STATES = ("submitted", "failed", "cancelled", "needs_user", "done")
 
 

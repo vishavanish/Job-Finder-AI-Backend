@@ -11,6 +11,8 @@ Profile & Search (CLAUDE.md 7.2, 7.3):
   - PUT /resumes/{id}                     save the reviewed parse result and/or label
   - POST /resumes/{id}/master             make this version the master
   - POST /resumes/{id}/parse              read it again with AI
+  - POST /resumes/{id}/check              QA10: check again how a resume reader reads the file
+  - POST /resumes/{id}/plain-copy         QA10: a plain one-column DOCX from the reviewed parse
   - DELETE /resumes/{id}
   - /search-profiles (CRUD), POST /search-profiles/from-resume,
     POST /search-profiles/{id}/suggest-titles
@@ -120,19 +122,25 @@ async def upload_resume(
         row.parse_status = "unparsed"
     db.commit()
     if parse and row.parse_status == "pending":
-        _dispatch_parse(row.id, user.id)
+        _dispatch_parse(row.id, user.id)  # the parse task runs the resume check after it
+    else:
+        resume_store.request_check(row)
     return row
 
 
 @router.get("/resumes", response_model=ResumeList)
 def list_resumes(user=Depends(get_current_user), db: Session = Depends(get_db)):
     rows = resume_store.list_resumes(db, user.id)
+    resume_store.ensure_checked([r for r in rows if r.parse_status != "pending"])
     return {"resumes": rows, "master_id": next((r.id for r in rows if r.is_master), None)}
 
 
 @router.get("/resumes/{resume_id}", response_model=ResumeDetail)
 def get_resume(resume_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
-    return resume_store.get_owned(db, user.id, resume_id)
+    row = resume_store.get_owned(db, user.id, resume_id)
+    if row.parse_status != "pending":
+        resume_store.ensure_checked([row])
+    return row
 
 
 @router.get("/resumes/{resume_id}/file")
@@ -171,6 +179,29 @@ def reparse_resume(request: Request, resume_id: str, user=Depends(get_current_us
     row.parse_status, row.parse_error = "pending", None
     db.commit()
     _dispatch_parse(row.id, user.id)
+    return row
+
+
+@router.post("/resumes/{resume_id}/check", response_model=ResumeOut, status_code=202)
+@limiter.limit(settings.RATE_LIMIT_PROFILE_AI)
+def recheck_resume(request: Request, resume_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """Runs the resume check again (no AI). `ats_check` is null until it
+    finishes; poll GET /resumes/{id}."""
+    row = resume_store.get_owned(db, user.id, resume_id)
+    row.ats_check, row.ats_checked_at = None, None
+    db.commit()
+    resume_store.request_check(row, force=True)
+    return row
+
+
+@router.post("/resumes/{resume_id}/plain-copy", response_model=ResumeOut, status_code=201)
+@limiter.limit(settings.RATE_LIMIT_PROFILE_AI)
+def make_plain_copy(request: Request, resume_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """A plain one-column DOCX (standard headings, real text) made from the
+    reviewed parse, saved as a new version. Download it and check it before
+    you use it; your master stays as it is."""
+    row = resume_store.plain_copy(db, user.id, resume_id)
+    db.commit()
     return row
 
 

@@ -98,7 +98,7 @@ class AnswerList(BaseModel):
 # ---------------------------------------------------------------- P4b: apply runs and settings
 
 RunState = Literal["queued", "preparing", "awaiting_input", "awaiting_review", "submitting", "in_browser",
-                   "submitted", "failed", "cancelled", "needs_user", "done"]
+                   "awaiting_login", "submitted", "failed", "cancelled", "needs_user", "done"]
 
 RISK_NOTICE = ("Auto apply fills and submits applications on company career sites (Greenhouse, Lever) for you, "
                "only after you review and approve each one. Some sites limit automated applications, answers can "
@@ -167,6 +167,27 @@ class RunField(BaseModel):
     needs_input: bool
 
 
+class RunTakeover(BaseModel):
+    """QA11: the run stopped at a page only you can get past (sign in, create an account, a captcha).
+    Open a live view with POST /apply/runs/{id}/live, do it there, then continue."""
+    kind: Literal["login", "account", "captcha"]
+    site: str = Field(..., description="The site's host, e.g. acme.wd3.myworkdayjobs.com")
+    reason: str
+    started_at: datetime
+    expires_at: datetime = Field(..., description="After this the run goes to needs_user")
+    available: bool = Field(..., description="false when live sign-in is switched off or not set up on the server")
+    sessions_left_today: int
+
+
+class LiveStart(BaseModel):
+    token: str = Field(..., description="Single-use; the first message on WS /apply/runs/{id}/live is "
+                                        "{\"type\": \"auth\", \"token\": ...}")
+    expires_in: int
+    width: int
+    height: int
+    session_minutes: int
+
+
 class RunOut(BaseModel):
     id: str
     job_id: str
@@ -190,6 +211,7 @@ class RunOut(BaseModel):
                                                                 "({page, url, keys, files})")
     vision: Optional[dict] = Field(None, description="AI form reader: screenshot-fallback use "
                                                      "({steps, cost_usd, map_calls, log})")
+    takeover: Optional[RunTakeover] = Field(None, description="awaiting_login: what the site asks for")
     approved_at: Optional[datetime] = None
     submitted_at: Optional[datetime] = None
     created_at: datetime

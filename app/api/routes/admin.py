@@ -24,7 +24,7 @@ from app.models.schemas import (
     AdminUserCreate, AdminUserList, AdminUserUpdate, AuditEntryOut, AuditList, EntitlementOut,
     EntitlementUpdate, FlagUpdate, UserOut,
 )
-from app.services import apply_blocks, audit, entitlements, feature_flags, user_admin
+from app.services import apply_blocks, audit, entitlements, feature_flags, live_takeover, user_admin
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 logger = logging.getLogger("job_finder_api.admin")
@@ -199,8 +199,9 @@ def system_health(_admin=Depends(require_role("admin"))):
     """Every health check with its detail: database, Redis queues, AI setup,
     alerts scheduler. The public GET /health returns only the overall status.
     `apply_blocked` lists platforms whose Auto apply is paused because they
-    block the server's browser (QA5); it does not change the status."""
-    return {**run_health_check(), "apply_blocked": apply_blocks.active()}
+    block the server's browser (QA5); `live_browser` = live sign-in sessions in use (QA11, null when not set
+    up). Neither changes the status."""
+    return {**run_health_check(), "apply_blocked": apply_blocks.active(), "live_browser": live_takeover.health()}
 
 
 @router.delete("/apply/blocks/{platform}")

@@ -70,6 +70,8 @@ class Resume(Base):
     parse_status = Column(String(16), nullable=False, default="pending")  # unparsed|pending|parsed|reviewed|failed|no_text
     parse_error = Column(String(300), nullable=True)
     parsed_by = Column(String(300), nullable=True)  # "provider:model" that parsed it
+    ats_check = Column(JSON, nullable=True)          # QA10 resume check (services/resume_check.py)
+    ats_checked_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now, nullable=False)
     updated_at = Column(DateTime, default=_now, onupdate=_now, nullable=False)
 

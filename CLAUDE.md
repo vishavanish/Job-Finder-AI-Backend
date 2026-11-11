@@ -191,7 +191,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Shared Redis | `core/redis_client.py` | One client per process (`get_redis()`); tests swap in fakeredis. |
 | Frontend | separate repo `Job-Finder-AI-Frontend` | React 18 + Vite + react-router, plain JS (no TypeScript), axios client with hardcoded `API_URL`. Pages: Home, Keywords, Skills, ATS Targets, Providers, Applications, Profile, Login. Deployed on Vercel. |
 
-**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts, `0008`–`0009` apply center, `0010` tracker & Gmail, `0011` ATS discovery, `0012`–`0013` voice, `0014` Gemini 2.5 Flash → 3.8 Flash, `0015` prep-pack error detail, `0016` ATS resolver probes, `0017` target companies, `0018` generic AI apply, `0019` job-alert digest address, `0020`–`0021` copilot answer model, `0022`–`0023` Keka, Zoho Recruit, Oracle Cloud, `0024` Working Nomads + Findwork, `0025` browser extension, `0026` Fast apply in the browser); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
+**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts, `0008`–`0009` apply center, `0010` tracker & Gmail, `0011` ATS discovery, `0012`–`0013` voice, `0014` Gemini 2.5 Flash → 3.8 Flash, `0015` prep-pack error detail, `0016` ATS resolver probes, `0017` target companies, `0018` generic AI apply, `0019` job-alert digest address, `0020`–`0021` copilot answer model, `0022`–`0023` Keka, Zoho Recruit, Oracle Cloud, `0024` Working Nomads + Findwork, `0025` browser extension, `0026` Fast apply in the browser, `0027` resume check); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
 
 **CI:** `.github/workflows/tests.yml` runs the tests on every push and pull request (no secrets needed).
 
@@ -367,7 +367,7 @@ Plan: `docs/plans/P4-apply-center.md` (all ten owner decisions approved 2026-10-
 | Answer bank | ✅ `/answer-bank` CRUD + approve; user answers approved, AI drafts not. `answer_bank.answer_fields` answers form fields in trust order: profile → EEO (encrypted, never to AI) → answer bank (≥ 0.75 word overlap) → AI `form_answer` (UNKNOWN / ungrounded → `needs_input`, new answers saved as unapproved drafts). Used by the P4b engine; no route of its own yet. |
 | Email apply status | ✅ `POST /applications/manual` takes `via: "email"` → status `emailed`. |
 | Tests | ✅ 220 total (15 for P4a). |
-| Not in P4a (→ P4b) | `apply_runs`, the level-2 engine, Greenhouse/Lever adapters, review queue, caps/dedupe/working hours, risk notice, proof screenshots, LinkedIn Fast apply rework, deprecating `POST /apply`. Gmail drafts for Email apply wait for P5. ATS resume checker is P4.1. |
+| Not in P4a (→ P4b) | `apply_runs`, the level-2 engine, Greenhouse/Lever adapters, review queue, caps/dedupe/working hours, risk notice, proof screenshots, LinkedIn Fast apply rework, deprecating `POST /apply`. Gmail drafts for Email apply wait for P5. ATS resume checker is P4.1 (built as QA10, Section 6.25). |
 
 **Operational changes introduced in P4a**
 - Migration `0008` (run `alembic upgrade head`).
@@ -681,6 +681,45 @@ Plan: `docs/plans/QA9-more-jobs.md` (owner accepted all ten recommended decision
 
 **Operational changes introduced in QA9**
 - No migration. New env (optional): `DEFAULT_POSTED_WITHIN_HOURS` (168), `INDEED_RESULTS_PER_KEYWORD` (100), `ATS_SEARCH_JOB_LIMIT` (100), `POSSIBLE_MATCH_MIN_SCORE` (50).
+
+### 6.25 QA10 — resume check and keyword fit (branch `dev`)
+
+Plan: `docs/plans/QA10-ats-resume-check.md` (owner approved all eight recommended decisions 2026-11-11). The P4.1 "ATS resume checker". No ATS really scores a resume (they parse it into fields), so the screens say **Resume check** and **Keyword fit**, never "ATS score". No AI anywhere in it.
+
+| Item | State |
+|------|-------|
+| Resume check | ✅ `services/resume_check.py` `check(content_type, data, parsed=, file_name=)`: real text (no text → score 0), side-by-side columns (PDF: pdfminer.six line positions, a vertical gap most lines don't cross with ≥ 15 % of the words on each side — right-aligned dates don't count; DOCX: `w:cols num>1` or a table cell over 40 words), small tables (tip), text boxes (`w:txbxContent`), email/phone only in the page header/footer/text box (DOCX header/footer parts; PDF lines repeated in the top/bottom 6 % of every page), odd characters (`(cid:n)`, U+FFFD, private-use icon glyphs), Experience/Education/Skills headings (synonyms), readable job dates and length (from the parse), file size/name tips. Score = 100 − 25 per problem − 8 per fix (20 for columns, 15 for text boxes); bands good ≥ 85 / needs_fixes ≥ 60 / hard_to_read. `seen_text` (≤ 6,000 chars) = the text in the order a simple reader gets it. |
+| Storage & runs | ✅ `resumes.ats_check` (JSON, `CHECK_VERSION` 1) + `ats_checked_at` (migration `0027`). Celery `check_resume_task` (default queue) on upload without parse; `parse_resume_task` runs the check after parsing; saving a reviewed parse recomputes the dates/length part only (`refresh_parsed`). Old resumes and old check versions: queued lazily from `GET /resumes[/{id}]` (Redis `resume_check:pending:{id}`, 2 min). A missing or broken file gives a result with `error`, never a crash loop. |
+| Plain copy | ✅ `POST /resumes/{id}/plain-copy` (needs `parse_status = reviewed`, else 409 `resume_not_reviewed`): `apply_prep.render_docx` of the reviewed parse, new version under the original (`parent_id`; no upload limit; label "Plain copy of …"), checked at once. The app offers it only for "Hard to read". Making any child resume master now clears its `parent_id`, so deleting the old original keeps it. |
+| Keyword fit | ✅ `GET /jobs/{id}/keyword-fit?resume_id=` (default master): hard skills from `app/data/skill_terms.json` (≈ 400 terms with aliases; ambiguous ones like "rest", "cv", "solid", "excel" left out) found/missing in the resume text, plus the scorer's `missing_required`; soft skills listed apart (not scored); job title (`title_fit` ≥ 60 against headline + experience titles, or the title in the text); degree level (Bachelor's/Master's/PhD). `fit` = 70 % hard skills + 20 % title + 10 % degree over the parts the job has; `target` 75. Cached a day in Redis per job + resume text (not in `user_jobs.breakdown`, which goes out as `match`). |
+| Frontend | ✅ Profile › Resume: per version a badge ("Resume check: Needs fixes · 80", "Checking file…") opening the findings with fixes, "See what a resume reader sees", "Check again", "Make a plain copy" / "Review what we read first"; a **Download** button on every version (there was none). Prep dialog: **Keyword fit** block (fit %, found / missing chips "add only if true", title, degree; "before → after" once the tailored resume is ready). |
+| Tests | ✅ backend `tests/test_qa10_resume_check.py` with PDFs/DOCX built in code (`tests/resume_fixtures.py`, a tiny text-PDF writer); frontend `src/features/profile/qa10.test.tsx`; mocks in `mocks/f3.ts` (`mockCheck`, `MOCK_KEYWORD_FIT`). |
+| Not done | A pypdf-vs-pdfminer reading-order comparison (column detection covered the cases); real resumes from Canva/Figma not tried yet; the skill list is ~400 terms, not 600 — add terms to the JSON as gaps show up. |
+
+**Operational changes introduced in QA10**
+- Migration `0027` (run `alembic upgrade head`). New dependency `pdfminer.six` (MIT; PyMuPDF was avoided because it is AGPL) — `pip install -r requirements.txt` on deploy.
+- Existing resumes are checked the first time someone lists them (one worker task each).
+
+### 6.26 QA11 A — Sign in to continue: live takeover for Auto apply (branch `dev`)
+
+Plan: `docs/plans/QA11-auto-apply-live-takeover.md` (owner approved all eight recommended decisions 2026-11-11 and asked for part A first). Before: a sign-in page, an account form or a captcha ended an Auto apply run at `needs_user`.
+
+| Item | State |
+|------|-------|
+| Run state | ✅ New active state **`awaiting_login`**. `HardStop` now carries `kind` (login / account / captcha; set in `Adapter.open`, `GenericAdapter._page_checks`, and the form reader's `page_kind`). `apply_engine._takeover` (prepare and submit) moves an eligible run there instead of `needs_user`, with a screenshot and `plan.takeover = {kind, reason, url, phase, started_at}`; `plan.takeovers` counts them (≤ `LIVE_MAX_TAKEOVERS_PER_RUN`). Eligible = mode auto, server runner, `LIVE_BROWSER_URL` set, flag `live_takeover_enabled` (kill switch, default on). Captchas *inside* a form (`needs_human`) still go to `needs_user` — solving one on a separate live browser wouldn't carry over. |
+| Live browser service | ✅ `app/live_browser/` — a small FastAPI app (`uvicorn app.live_browser.service:app --host 127.0.0.1 --port 8790`, systemd unit `job_finder_browser`), every call signed with `X-Live-Key` (HMAC of `JWT_SECRET_KEY`). One async Playwright Chromium per run (`session.LiveSession`): CDP `Page.startScreencast` JPEG frames (newest only, `LIVE_FPS`), input as Playwright mouse/keyboard (`click`, `move`, `wheel`, `key`, `text`, `back`, `reload`; counted, never logged), sign-in pop-ups adopted. **Guard:** top-level pages only on the job's own site(s) or a sign-in provider (`IDENTITY_SITES`); any request to localhost / private / link-local addresses aborted; a blocked navigation is answered 204 so the page stays put. **Ready** = a password / code / captcha box was seen and is now gone. `≤ LIVE_SESSIONS_MAX` at once (409 `live_busy`), closed after `LIVE_SESSION_MINUTES` or `LIVE_IDLE_MINUTES` idle. Same Chromium and user agent as the engine — nothing disguised. |
+| API | ✅ `services/live_takeover.py` + routes: `POST /apply/runs/{id}/live` (open or reopen; `LIVE_SESSION_DAILY_CAP` per user, 429 `live_daily_cap`) → single-use stream token (60 s, jti in Redis); `WS /apply/runs/{id}/live` (first message `{"type":"auth","token"}`; relays frames down and input ≤ 2 kB up); `POST …/live/continue` → the service returns the context's storage state, sealed (`key_store.seal`) in Redis `apply_live_state:{run}` for `LIVE_STATE_TTL_SECONDS`; run → `queued` (prepare again) or `submitting` (stopped while submitting); `POST …/live/give-up` → `needs_user`. `browser_session(storage_state=)`: the engine's fresh browser opens with those cookies, so "a new browser per step" stays. Runs left waiting `LIVE_WAIT_MINUTES` go to `needs_user` (checked on GET run/list). `RunOut.takeover` (kind, site, reason, started/expires, available, sessions left today). Admin `GET /admin/system/health` → `live_browser`. |
+| Frontend | ✅ Run page `awaiting_login`: "<site> wants you to sign in" → **Sign in to continue** → the live view (one focusable button: clicks map to page pixels, keys / paste are sent, "Type my email" / "Type my phone", Back, Reload) → "Looks like you're in — carrying on in 5 s" (or "Not yet" / "I'm signed in — continue") → the run carries on; "I'll finish it on the job page" anytime. Status "Sign in to continue" (needs-you colour); Apply Center Needs-you lists it first. MSW: `mocks/f4.ts` live routes + `ws.link` socket. |
+| Tests | ✅ `tests/test_qa11_live_takeover.py`: end to end with the **real** service and Chromium on a local http site whose apply page needs a cookie (`fixtures/apply/login_gate.html` → `lever_form.html`): run stops → `awaiting_login`, the "user" types email/password through the service socket, `ready`, continue, the engine's next prepare opens the form signed in; guard (other site, localhost, metadata IP, `file:`); gates, caps, ended session, submit phase, give up, expiry, socket relay + token reuse, service key. Frontend `src/features/apply/qa11.test.tsx`. |
+| Not done | Notifications (part D — a takeover waits `LIVE_WAIT_MINUTES`, the user must notice), kept sign-ins (B), Workday adapter (C; Workday is still in `ACCOUNT_SITES`, so most takeovers today are company career pages behind a sign-in). Not tried on a real site's sign-in yet. Web Push was decided "with A" but is part of D. |
+
+**Operational changes introduced in QA11 A**
+- No migration. New process: the live browser service (needs Playwright Chromium like the apply worker) as user `opc`:
+  `ExecStart=/var/www/job_finder/venv/bin/uvicorn app.live_browser.service:app --host 127.0.0.1 --port 8790` in `/etc/systemd/system/job_finder_browser.service` (WorkingDirectory `/var/www/job_finder`, same `.env`), then `systemctl enable --now job_finder_browser`.
+- API `.env`: `LIVE_BROWSER_URL=http://127.0.0.1:8790` (empty = feature off). Optional: `LIVE_SESSIONS_MAX` (2), `LIVE_SESSION_MINUTES` (15), `LIVE_IDLE_MINUTES` (5), `LIVE_SESSION_DAILY_CAP` (10), `LIVE_WAIT_MINUTES` (120), `LIVE_STATE_TTL_SECONDS` (1800), `LIVE_MAX_TAKEOVERS_PER_RUN` (2), `LIVE_FPS` (8). Never set `LIVE_ALLOW_PRIVATE` outside tests.
+- nginx: the browser opens `wss://…/api/v1/apply/runs/{id}/live` — add a `location /api/v1/apply/runs/` block with the same Upgrade headers and 300 s timeouts as `/api/v1/voice/`.
+- Memory: each live session is one Chromium (~300–500 MB). Check `free -h` before raising `LIVE_SESSIONS_MAX`.
+- Local: `.\liveb` starts the service; set `LIVE_BROWSER_URL=http://127.0.0.1:8790` for `.\api`.
 
 ---
 
@@ -1314,7 +1353,7 @@ Every requirement from the product owner and where it is specified.
 Not requested yet, but common in leading products. Build only after the phase they depend on.
 
 - **Job alerts and saved searches** with email/push notifications for new unique matches.
-- **ATS resume score + keyword-gap report** against a specific job description.
+- ~~**ATS resume score + keyword-gap report** against a specific job description.~~ Built as QA10 (Section 6.25).
 - **Cover letter generator** grounded in the profile.
 - **Follow-up reminders:** no reply after N days → draft a follow-up (user sends it).
 - **Calendar integration:** interview invites found in Gmail become calendar events.

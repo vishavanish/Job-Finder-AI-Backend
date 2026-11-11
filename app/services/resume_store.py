@@ -18,6 +18,10 @@ Parsing runs on a worker (parse_resume_task) through the AI router
 ledger all apply. The reply must validate as ParsedResume; the user then
 reviews and edits it (PUT /resumes/{id} -> parse_status "reviewed").
 Resume text and parsed content are never logged.
+
+QA10 resume check: `run_check` (worker) stores `resume_check.check(...)` in
+`resumes.ats_check`; `ensure_checked` queues it for rows without a current
+result; `plain_copy` makes a one-column DOCX version from the parse.
 """
 from __future__ import annotations
 
@@ -27,6 +31,7 @@ import json
 import logging
 import re
 import zipfile
+from datetime import datetime, timezone
 
 from cryptography.fernet import Fernet
 from fastapi import HTTPException, status
@@ -37,7 +42,8 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.models.profile import Resume, ResumeFile
 from app.models.profile_schemas import ParsedResume
-from app.services import ai_router
+from app.core.redis_client import get_redis
+from app.services import ai_router, resume_check
 from app.services.secret_refs import master_fernet
 
 logger = logging.getLogger("job_finder_api.resume_store")
@@ -198,6 +204,7 @@ def set_master(db: Session, user_id: str, resume_id: str) -> Resume:
     row = get_owned(db, user_id, resume_id)
     db.query(Resume).filter(Resume.user_id == user_id, Resume.id != row.id).update({"is_master": False})
     row.is_master = True
+    row.parent_id = None  # a tailored or plain copy made master must not be deleted with its old original
     return row
 
 
@@ -229,6 +236,7 @@ def save_review(db: Session, row: Resume, *, label: str | None, parsed: ParsedRe
         row.parsed = parsed.model_dump()
         row.parse_status = "reviewed"
         row.parse_error = None
+        row.ats_check = resume_check.refresh_parsed(row.ats_check, row.parsed)
         if row.is_master:
             from app.services import profile_fill
             profile_fill.fill_empty(db, row.user_id, parsed)
@@ -292,4 +300,73 @@ def parse_resume(db: Session, row: Resume) -> Resume:
     row.parse_status, row.parse_error, row.parsed_by = "parsed", None, result.engine[:300]
     if row.is_master:
         profile_fill.fill_empty(db, row.user_id, parsed)
+    return row
+
+
+# ---------------------------------------------------------------- QA10 resume check
+
+CHECK_PENDING_SECONDS = 120
+
+
+def _pending_key(resume_id: str) -> str:
+    return f"resume_check:pending:{resume_id}"
+
+
+def run_check(db: Session, row: Resume) -> Resume:
+    """Worker side: reads the stored file and stores the check result."""
+    try:
+        data = load_file(db, row)
+        row.ats_check = resume_check.check(row.content_type, data, parsed=row.parsed, file_name=row.file_name)
+    except HTTPException:
+        row.ats_check = resume_check.failed("The original file is not stored, so it can't be checked.")
+    except Exception as e:  # noqa: BLE001 — a broken file gives a result, not a crash loop
+        logger.info("resume check failed: %s", type(e).__name__)
+        row.ats_check = resume_check.failed("This file could not be checked. Try saving it again as PDF or DOCX.")
+    row.ats_checked_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    get_redis().delete(_pending_key(row.id))
+    return row
+
+
+def request_check(row: Resume, *, force: bool = False) -> bool:
+    """Queues a check unless one was queued in the last 2 minutes."""
+    from app.core.celery_tasks import check_resume_task
+
+    if not get_redis().set(_pending_key(row.id), "1", nx=not force, ex=CHECK_PENDING_SECONDS):
+        return False
+    check_resume_task.apply_async(args=[row.id, row.user_id], queue=get_settings().default_queue)
+    return True
+
+
+def ensure_checked(rows: list[Resume]) -> None:
+    """Lazy check (decision 8): rows without a current result get one queued."""
+    for row in rows:
+        if not resume_check.is_current(row.ats_check):
+            request_check(row)
+
+
+def plain_copy(db: Session, user_id: str, resume_id: str) -> Resume:
+    """A plain one-column DOCX made from the reviewed parse, saved as a new
+    version under the original (like tailored copies: no upload limit, goes
+    when the original is deleted). The master is never replaced."""
+    from app.services.apply_prep import render_docx
+
+    src = get_owned(db, user_id, resume_id)
+    if src.parse_status != "reviewed" or not src.parsed:
+        raise api_error(409, "resume_not_reviewed",
+                        "Check and save what we read from this resume first; the plain copy is made from it.")
+    parsed = ParsedResume.model_validate(src.parsed)
+    data, text = render_docx(parsed)
+    last = db.query(func.max(Resume.version)).filter(Resume.user_id == user_id).scalar() or 0
+    base = (src.label or src.file_name.rsplit(".", 1)[0])[:70]
+    row = Resume(
+        user_id=user_id, version=last + 1, is_master=False, parent_id=src.parent_id or src.id,
+        label=f"Plain copy of {base}"[:100], file_name=_safe_name(f"{base} - plain", DOCX),
+        content_type=DOCX, size_bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), text=text,
+        parsed=src.parsed, parse_status="reviewed", parsed_by=src.parsed_by,
+    )
+    db.add(row)
+    db.flush()
+    _store_file(db, row.id, data)
+    row.ats_check = resume_check.check(DOCX, data, parsed=row.parsed, file_name=row.file_name)
+    row.ats_checked_at = datetime.now(timezone.utc).replace(tzinfo=None)
     return row

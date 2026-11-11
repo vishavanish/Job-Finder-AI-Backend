@@ -133,6 +133,47 @@ class ParsedResume(BaseModel):
 ParseStatus = Literal["unparsed", "pending", "parsed", "reviewed", "failed", "no_text"]
 
 
+class ResumeCheckFinding(BaseModel):
+    id: str = Field(..., description="text_layer, columns, tables, text_boxes, contact, odd_characters, headings, "
+                                     "dates, length, file")
+    level: Literal["pass", "info", "warn", "fail"]
+    title: str
+    detail: str = ""
+    fix: str = ""
+
+
+class ResumeCheck(BaseModel):
+    """QA10: how easily a resume reader (ATS) can read the file. No ATS scores
+    resumes — the score summarises these findings."""
+    version: int
+    score: Optional[int] = Field(None, description="0-100; null when the file could not be checked")
+    band: Optional[Literal["good", "needs_fixes", "hard_to_read"]] = None
+    error: Optional[str] = None
+    findings: list[ResumeCheckFinding] = Field(default_factory=list)
+    pages: Optional[int] = None
+    words: int = 0
+    seen_text: str = Field("", description="The text in the order a simple reader gets it (≤ 6,000 characters)")
+
+
+class EducationFit(BaseModel):
+    required: Optional[str] = Field(None, description="The degree the job names: Bachelor's, Master's or PhD")
+    met: Optional[bool] = Field(None, description="Whether the resume shows that level; null when the job names none")
+
+
+class KeywordFit(BaseModel):
+    """QA10: how much of a job's hard skills, title and degree the resume shows."""
+    resume_id: str
+    fit: Optional[int] = Field(None, description="0-100; null when the job names no skills, title or degree")
+    target: int = Field(75, description="The usual 'good fit' line")
+    hard_found: list[str] = Field(default_factory=list)
+    hard_missing: list[str] = Field(default_factory=list,
+                                    description="Add these only if you really have them")
+    soft_found: list[str] = Field(default_factory=list)
+    soft_missing: list[str] = Field(default_factory=list)
+    title_found: bool = False
+    education: EducationFit = Field(default_factory=EducationFit)
+
+
 class ResumeOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -147,8 +188,16 @@ class ResumeOut(BaseModel):
     parse_status: ParseStatus
     parse_error: Optional[str] = None
     parsed_by: Optional[str] = None
+    ats_check: Optional[ResumeCheck] = Field(None, description="Null while the check runs (poll again)")
+    ats_checked_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("ats_check", mode="before")
+    @classmethod
+    def _current_check_only(cls, value):
+        from app.services.resume_check import is_current
+        return value if is_current(value) else None
 
 
 class ResumeDetail(ResumeOut):
