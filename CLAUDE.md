@@ -191,7 +191,7 @@ This file lives at the root of the **backend repo** ([Job-Finder-AI-Backend](htt
 | Shared Redis | `core/redis_client.py` | One client per process (`get_redis()`); tests swap in fakeredis. |
 | Frontend | separate repo `Job-Finder-AI-Frontend` | React 18 + Vite + react-router, plain JS (no TypeScript), axios client with hardcoded `API_URL`. Pages: Home, Keywords, Skills, ATS Targets, Providers, Applications, Profile, Login. Deployed on Vercel. |
 
-**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts, `0008`–`0009` apply center, `0010` tracker & Gmail, `0011` ATS discovery, `0012`–`0013` voice, `0014` Gemini 2.5 Flash → 3.8 Flash, `0015` prep-pack error detail, `0016` ATS resolver probes, `0017` target companies, `0018` generic AI apply, `0019` job-alert digest address, `0020`–`0021` copilot answer model, `0022`–`0023` Keka, Zoho Recruit, Oracle Cloud, `0024` Working Nomads + Findwork, `0025` browser extension, `0026` Fast apply in the browser); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
+**Migrations & tests:** Alembic in `migrations/` (`0001` idempotent baseline, `0002` `applications.job_key` + `alias_urls`, `0003` identity & admin tables, `0004` models & providers, `0005` profile & search, `0006` free job sources, `0007` insights & alerts, `0008`–`0009` apply center, `0010` tracker & Gmail, `0011` ATS discovery, `0012`–`0013` voice, `0014` Gemini 2.5 Flash → 3.8 Flash, `0015` prep-pack error detail, `0016` ATS resolver probes, `0017` target companies, `0018` generic AI apply, `0019` job-alert digest address, `0020`–`0021` copilot answer model, `0022`–`0023` Keka, Zoho Recruit, Oracle Cloud, `0024` Working Nomads + Findwork, `0025` browser extension, `0026` Fast apply in the browser, `0027` resume check); startup no longer calls `create_all`. Tests in `tests/` (pytest, SQLite built by the migrations, fakeredis, Celery publishing stubbed).
 
 **CI:** `.github/workflows/tests.yml` runs the tests on every push and pull request (no secrets needed).
 
@@ -367,7 +367,7 @@ Plan: `docs/plans/P4-apply-center.md` (all ten owner decisions approved 2026-10-
 | Answer bank | ✅ `/answer-bank` CRUD + approve; user answers approved, AI drafts not. `answer_bank.answer_fields` answers form fields in trust order: profile → EEO (encrypted, never to AI) → answer bank (≥ 0.75 word overlap) → AI `form_answer` (UNKNOWN / ungrounded → `needs_input`, new answers saved as unapproved drafts). Used by the P4b engine; no route of its own yet. |
 | Email apply status | ✅ `POST /applications/manual` takes `via: "email"` → status `emailed`. |
 | Tests | ✅ 220 total (15 for P4a). |
-| Not in P4a (→ P4b) | `apply_runs`, the level-2 engine, Greenhouse/Lever adapters, review queue, caps/dedupe/working hours, risk notice, proof screenshots, LinkedIn Fast apply rework, deprecating `POST /apply`. Gmail drafts for Email apply wait for P5. ATS resume checker is P4.1. |
+| Not in P4a (→ P4b) | `apply_runs`, the level-2 engine, Greenhouse/Lever adapters, review queue, caps/dedupe/working hours, risk notice, proof screenshots, LinkedIn Fast apply rework, deprecating `POST /apply`. Gmail drafts for Email apply wait for P5. ATS resume checker is P4.1 (built as QA10, Section 6.25). |
 
 **Operational changes introduced in P4a**
 - Migration `0008` (run `alembic upgrade head`).
@@ -681,6 +681,24 @@ Plan: `docs/plans/QA9-more-jobs.md` (owner accepted all ten recommended decision
 
 **Operational changes introduced in QA9**
 - No migration. New env (optional): `DEFAULT_POSTED_WITHIN_HOURS` (168), `INDEED_RESULTS_PER_KEYWORD` (100), `ATS_SEARCH_JOB_LIMIT` (100), `POSSIBLE_MATCH_MIN_SCORE` (50).
+
+### 6.25 QA10 — resume check and keyword fit (branch `dev`)
+
+Plan: `docs/plans/QA10-ats-resume-check.md` (owner approved all eight recommended decisions 2026-11-11). The P4.1 "ATS resume checker". No ATS really scores a resume (they parse it into fields), so the screens say **Resume check** and **Keyword fit**, never "ATS score". No AI anywhere in it.
+
+| Item | State |
+|------|-------|
+| Resume check | ✅ `services/resume_check.py` `check(content_type, data, parsed=, file_name=)`: real text (no text → score 0), side-by-side columns (PDF: pdfminer.six line positions, a vertical gap most lines don't cross with ≥ 15 % of the words on each side — right-aligned dates don't count; DOCX: `w:cols num>1` or a table cell over 40 words), small tables (tip), text boxes (`w:txbxContent`), email/phone only in the page header/footer/text box (DOCX header/footer parts; PDF lines repeated in the top/bottom 6 % of every page), odd characters (`(cid:n)`, U+FFFD, private-use icon glyphs), Experience/Education/Skills headings (synonyms), readable job dates and length (from the parse), file size/name tips. Score = 100 − 25 per problem − 8 per fix (20 for columns, 15 for text boxes); bands good ≥ 85 / needs_fixes ≥ 60 / hard_to_read. `seen_text` (≤ 6,000 chars) = the text in the order a simple reader gets it. |
+| Storage & runs | ✅ `resumes.ats_check` (JSON, `CHECK_VERSION` 1) + `ats_checked_at` (migration `0027`). Celery `check_resume_task` (default queue) on upload without parse; `parse_resume_task` runs the check after parsing; saving a reviewed parse recomputes the dates/length part only (`refresh_parsed`). Old resumes and old check versions: queued lazily from `GET /resumes[/{id}]` (Redis `resume_check:pending:{id}`, 2 min). A missing or broken file gives a result with `error`, never a crash loop. |
+| Plain copy | ✅ `POST /resumes/{id}/plain-copy` (needs `parse_status = reviewed`, else 409 `resume_not_reviewed`): `apply_prep.render_docx` of the reviewed parse, new version under the original (`parent_id`; no upload limit; label "Plain copy of …"), checked at once. The app offers it only for "Hard to read". Making any child resume master now clears its `parent_id`, so deleting the old original keeps it. |
+| Keyword fit | ✅ `GET /jobs/{id}/keyword-fit?resume_id=` (default master): hard skills from `app/data/skill_terms.json` (≈ 400 terms with aliases; ambiguous ones like "rest", "cv", "solid", "excel" left out) found/missing in the resume text, plus the scorer's `missing_required`; soft skills listed apart (not scored); job title (`title_fit` ≥ 60 against headline + experience titles, or the title in the text); degree level (Bachelor's/Master's/PhD). `fit` = 70 % hard skills + 20 % title + 10 % degree over the parts the job has; `target` 75. Cached a day in Redis per job + resume text (not in `user_jobs.breakdown`, which goes out as `match`). |
+| Frontend | ✅ Profile › Resume: per version a badge ("Resume check: Needs fixes · 80", "Checking file…") opening the findings with fixes, "See what a resume reader sees", "Check again", "Make a plain copy" / "Review what we read first"; a **Download** button on every version (there was none). Prep dialog: **Keyword fit** block (fit %, found / missing chips "add only if true", title, degree; "before → after" once the tailored resume is ready). |
+| Tests | ✅ backend `tests/test_qa10_resume_check.py` with PDFs/DOCX built in code (`tests/resume_fixtures.py`, a tiny text-PDF writer); frontend `src/features/profile/qa10.test.tsx`; mocks in `mocks/f3.ts` (`mockCheck`, `MOCK_KEYWORD_FIT`). |
+| Not done | A pypdf-vs-pdfminer reading-order comparison (column detection covered the cases); real resumes from Canva/Figma not tried yet; the skill list is ~400 terms, not 600 — add terms to the JSON as gaps show up. |
+
+**Operational changes introduced in QA10**
+- Migration `0027` (run `alembic upgrade head`). New dependency `pdfminer.six` (MIT; PyMuPDF was avoided because it is AGPL) — `pip install -r requirements.txt` on deploy.
+- Existing resumes are checked the first time someone lists them (one worker task each).
 
 ---
 
@@ -1314,7 +1332,7 @@ Every requirement from the product owner and where it is specified.
 Not requested yet, but common in leading products. Build only after the phase they depend on.
 
 - **Job alerts and saved searches** with email/push notifications for new unique matches.
-- **ATS resume score + keyword-gap report** against a specific job description.
+- ~~**ATS resume score + keyword-gap report** against a specific job description.~~ Built as QA10 (Section 6.25).
 - **Cover letter generator** grounded in the profile.
 - **Follow-up reminders:** no reply after N days → draft a follow-up (user sends it).
 - **Calendar integration:** interview invites found in Gmail become calendar events.

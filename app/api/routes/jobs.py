@@ -8,12 +8,15 @@ the `id` of a pipeline feed entry.
   - POST /jobs/{job_id}/save        keep it in Saved
   - POST /jobs/{job_id}/hide        never show it again
   - POST /jobs/{job_id}/seen        undo save/hide (back to plain "seen")
+  - GET  /jobs/{job_id}/keyword-fit?resume_id=   QA10: the job's skills, title and degree in a resume
 
 Seen, hidden and applied jobs are skipped by later pipeline runs; saved
 and seen ones come back with `include_seen: true`.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -21,9 +24,10 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
 from app.core.db import get_db
+from app.core.redis_client import get_redis
 from app.models.jobs import Job, UserJob
-from app.models.profile_schemas import UserJobList, UserJobOut
-from app.services import apply_options, job_store
+from app.models.profile_schemas import KeywordFit, UserJobList, UserJobOut
+from app.services import apply_options, job_store, resume_check, resume_store
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -54,6 +58,34 @@ def list_my_jobs(
     rows = q.order_by(UserJob.updated_at.desc()).offset(offset).limit(limit).all()
     srcs = job_store.sources(db, [j.id for j, _ in rows])
     return {"jobs": [_out(j, uj, srcs.get(j.id, [])) for j, uj in rows], "total": total}
+
+
+@router.get("/{job_id}/keyword-fit", response_model=KeywordFit)
+def keyword_fit(job_id: str, resume_id: str | None = Query(None, description="Default: your master resume"),
+                user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """How many of the job's hard skills, its title and degree your resume
+    shows (no AI). Missing skills: add them only if you really have them."""
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(404, detail={"code": "job_not_found", "message": "No job with this id."})
+    resume = (resume_store.get_owned(db, user.id, resume_id) if resume_id else resume_store.master(db, user.id))
+    if resume is None:
+        raise HTTPException(422, detail={"code": "resume_required", "message": "Upload a resume in Profile first."})
+    uj = job_store.get_user_job(db, user.id, job_id)
+    missing_required = (uj.breakdown or {}).get("missing_required") if uj is not None else None
+    # Cached a day per job + resume content (Redis, not user_jobs.breakdown, which goes out as `match`).
+    key = (f"kwfit:{resume_check.CHECK_VERSION}:{user.id}:{job.id}:{resume.id}:"
+           f"{hashlib.sha256((resume.text or '').encode()).hexdigest()[:16]}:{len(job.description or '')}:"
+           f"{','.join(missing_required or [])}")
+    r = get_redis()
+    cached = r.get(key)
+    if cached:
+        return {"resume_id": resume.id, **json.loads(cached)}
+    fit = resume_check.keyword_fit(job_title=job.title, job_text=job.description or "", resume_text=resume.text or "",
+                                   resume_titles=resume_check.resume_titles(resume.parsed),
+                                   missing_required=missing_required)
+    r.set(key, json.dumps(fit), ex=86400)
+    return {"resume_id": resume.id, **fit}
 
 
 @router.post("/{job_id}/{action}", response_model=UserJobOut)

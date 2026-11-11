@@ -1036,7 +1036,27 @@ def parse_resume_task(resume_id: str, user_id: str) -> dict:
                 return {"resume_id": resume_id, "status": "missing"}
             row.parse_status, row.parse_error = "failed", "Reading the resume failed. Try again."
         db.commit()
+        resume_store.run_check(db, row)  # QA10: dates and length use the new parse
+        db.commit()
         return {"resume_id": resume_id, "status": row.parse_status}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="job_finder.check_resume")
+def check_resume_task(resume_id: str, user_id: str) -> dict:
+    """QA10: checks how easily a resume reader can read the stored file."""
+    from app.models.profile import Resume
+    from app.services import resume_store
+
+    db = SessionLocal()
+    try:
+        row = db.query(Resume).filter(Resume.id == resume_id, Resume.user_id == user_id).first()
+        if row is None:
+            return {"resume_id": resume_id, "status": "missing"}
+        resume_store.run_check(db, row)
+        db.commit()
+        return {"resume_id": resume_id, "band": (row.ats_check or {}).get("band")}
     finally:
         db.close()
 

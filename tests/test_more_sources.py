@@ -1,6 +1,8 @@
 """QA7 decisions 1, 2, 4 (2026-10-31): Working Nomads feed, HN job posts (YC), Findwork.dev keyed API."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from app.core.db import SessionLocal
@@ -30,11 +32,16 @@ HN_JOBS = {"hits": [
     {"title": "Show HN: not a job post", "url": "https://example.com", "created_at": "2026-10-20T12:00:24Z"},
     {"title": "Textonly (YC S20) Is Hiring Engineers", "url": None, "created_at": "2026-10-20T12:00:24Z"},
 ]}
+def _days_ago(n: int) -> str:
+    """Findwork tests search the last 7 days, so the sample posts must stay recent."""
+    return (datetime.now(timezone.utc) - timedelta(days=n)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 FINDWORK = {"count": 2, "results": [
     {"id": 1, "role": "Backend Engineer (Python)", "company_name": "Beta", "location": "Berlin", "remote": False,
-     "url": "https://findwork.dev/1/backend", "text": "Python, Postgres", "date_posted": "2026-10-30T10:00:00Z"},
+     "url": "https://findwork.dev/1/backend", "text": "Python, Postgres", "date_posted": _days_ago(1)},
     {"id": 2, "role": "Data Engineer", "company_name": "Gamma", "location": None, "remote": True,
-     "url": "https://findwork.dev/2/data", "text": "Spark", "date_posted": "2026-10-29T10:00:00Z"},
+     "url": "https://findwork.dev/2/data", "text": "Spark", "date_posted": _days_ago(2)},
 ]}
 
 
